@@ -328,9 +328,14 @@ async def execute_kcl(
     logger.info("execute_kcl tool called")
 
     try:
-        return await zoo_execute_kcl(kcl_code=kcl_code, kcl_path=kcl_path)
+        success, message = await zoo_execute_kcl(kcl_code=kcl_code, kcl_path=kcl_path)
+        if not success:
+            raise ZooMCPException(message)
+        return success, message
+    except ZooMCPException:
+        raise
     except Exception as e:
-        return False, f"Failed to execute KCL code: {e}"
+        raise ZooMCPException(f"Failed to execute KCL code: {e}") from e
 
 
 @mcp.tool()
@@ -504,7 +509,9 @@ async def multiview_snapshot_of_cad(
         )
         return encode_image(image)
     except Exception as e:
-        return f"There was an error creating the multiview snapshot: {e}"
+        raise ZooMCPException(
+            f"There was an error creating the multiview snapshot: {e}"
+        ) from e
 
 
 @mcp.tool()
@@ -540,7 +547,9 @@ async def multiview_snapshot_of_kcl(
         )
         return encode_image(image)
     except Exception as e:
-        return f"There was an error creating the multiview snapshot: {e}"
+        raise ZooMCPException(
+            f"There was an error creating the multiview snapshot: {e}"
+        ) from e
 
 
 @mcp.tool()
@@ -573,7 +582,9 @@ async def multi_isometric_snapshot_of_cad(
         )
         return encode_image(image)
     except Exception as e:
-        return f"There was an error creating the multi-isometric snapshot: {e}"
+        raise ZooMCPException(
+            f"There was an error creating the multi-isometric snapshot: {e}"
+        ) from e
 
 
 @mcp.tool()
@@ -609,7 +620,9 @@ async def multi_isometric_snapshot_of_kcl(
         )
         return encode_image(image)
     except Exception as e:
-        return f"There was an error creating the multi-isometric snapshot: {e}"
+        raise ZooMCPException(
+            f"There was an error creating the multi-isometric snapshot: {e}"
+        ) from e
 
 
 @mcp.tool()
@@ -670,7 +683,7 @@ async def snapshot_of_cad(
         )
         return encode_image(image)
     except Exception as e:
-        return f"There was an error creating the snapshot: {e}"
+        raise ZooMCPException(f"There was an error creating the snapshot: {e}") from e
 
 
 @mcp.tool()
@@ -734,7 +747,7 @@ async def snapshot_of_kcl(
         )
         return encode_image(image)
     except Exception as e:
-        return f"There was an error creating the snapshot: {e}"
+        raise ZooMCPException(f"There was an error creating the snapshot: {e}") from e
 
 
 @mcp.tool()

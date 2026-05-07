@@ -13,7 +13,7 @@ dependencies = [
     "pillow<13.0",
     "trimesh<5.0",
     "truststore<1.0",
-    "zoo-kcl>=0.3.144",
+    "zoo-kcl>=0.3.150",
 ]
 authors = [
     { name = "Ryan Barton", email = "ryan@zoo.dev" },
