@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         def unfixed_lints(self) -> list[kcl.Discovered]: ...
 
 
+from kittycad.exceptions import KittyCADClientError
 from kittycad.models import (
     Axis,
     AxisDirectionPair,
@@ -62,6 +63,7 @@ from kittycad.models.modeling_cmd import (
     OptionViewIsometric,
     OptionZoomToFit,
 )
+from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
 
 from zoo_mcp import ZooMCPException, kittycad_client, logger
@@ -1953,3 +1955,60 @@ async def zoo_snapshot_of_kcl(
         )
 
     return resize_image(jpeg_contents_list[0], max_image_dimension)
+
+
+def zoo_list_org_datasets() -> list[dict[str, str]]:
+    """List all datasets visible to the org tied to the current ZOO_API_TOKEN.
+
+    Returns:
+        A list of {"id": <uuid str>, "name": <str>} entries, possibly empty.
+    """
+    logger.info("Listing org datasets")
+    try:
+        datasets = list(
+            kittycad_client.orgs.list_org_datasets(limit=None, page_token=None)
+        )
+    except KittyCADClientError as exc:
+        if exc.status_code == 404:
+            return []
+        raise ZooMCPException(f"Failed to list org datasets: {exc}") from exc
+
+    return [{"id": str(d.id), "name": d.name} for d in datasets]
+
+
+def zoo_search_org_dataset_semantic(
+    dataset_id: str,
+    query: str,
+    limit: int | None = None,
+) -> list[dict]:
+    """Semantic-search a dataset and return the top matching chunks.
+
+    Args:
+        dataset_id: UUID of the dataset (as returned by zoo_list_org_datasets).
+        query: Natural-language query to embed and search with.
+        limit: Optional max number of matches to return.
+
+    Returns:
+        A list of dicts with keys: source_file_path, content, similarity,
+        chunk_index, conversion_id.
+    """
+    logger.info(
+        "Semantic search in dataset %s for query of length %d", dataset_id, len(query)
+    )
+    try:
+        matches = kittycad_client.orgs.search_org_dataset_semantic(
+            id=Uuid(dataset_id), q=query, limit=limit
+        )
+    except KittyCADClientError as exc:
+        raise ZooMCPException(f"Failed to search dataset {dataset_id}: {exc}") from exc
+
+    return [
+        {
+            "source_file_path": m.source_file_path,
+            "content": m.content,
+            "similarity": m.similarity,
+            "chunk_index": m.chunk_index,
+            "conversion_id": str(m.conversion_id),
+        }
+        for m in matches
+    ]
