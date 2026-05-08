@@ -1,3 +1,4 @@
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -5,10 +6,12 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from kittycad import KittyCAD
 from kittycad.exceptions import KittyCADClientError
 from mcp.types import ImageContent
 
 import zoo_mcp
+import zoo_mcp.zoo_tools
 from zoo_mcp.server import mcp
 
 
@@ -1245,3 +1248,33 @@ async def test_search_org_dataset_semantic_error(monkeypatch: pytest.MonkeyPatch
     result = _meta_result(response)
     assert isinstance(result, str)
     assert result.startswith("There was an error searching dataset dataset-uuid")
+
+
+@pytest.mark.asyncio
+@pytest.mark.flaky(reruns=3, reruns_delay=1)
+@pytest.mark.skipif(
+    not os.environ.get("ZOO_DATASET_TOKEN"),
+    reason="ZOO_DATASET_TOKEN not set",
+)
+async def test_list_and_search_org_dataset_live(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ZOO_HOST", "https://api.dev.zoo.dev")
+    dev_client = KittyCAD(token=os.environ["ZOO_DATASET_TOKEN"])
+    monkeypatch.setattr(zoo_mcp, "kittycad_client", dev_client)
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "kittycad_client", dev_client)
+
+    list_response = await mcp.call_tool("list_org_datasets", arguments={})
+    datasets = _meta_result(list_response)
+    assert isinstance(datasets, list)
+    assert len(datasets) >= 1, "expected at least one dataset in the dev org"
+    dataset_id = datasets[0]["id"]
+
+    search_response = await mcp.call_tool(
+        "search_org_dataset_semantic",
+        arguments={
+            "dataset_id": dataset_id,
+            "query": "PVC DWV Straight Reducer",
+        },
+    )
+    matches = _meta_result(search_response)
+    assert isinstance(matches, list)
+    assert len(matches) >= 1, "expected at least one semantic-search match"
