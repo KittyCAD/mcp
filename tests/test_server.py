@@ -1,10 +1,14 @@
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
+from kittycad.exceptions import KittyCADClientError
 from mcp.types import ImageContent
 
+import zoo_mcp
 from zoo_mcp.server import mcp
 
 
@@ -1129,3 +1133,115 @@ async def test_save_image_to_temp_file(cube_stl: str):
     assert Path(result).exists()
     assert Path(result).suffix == ".png"
     assert Path(result).stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_list_org_datasets_success(monkeypatch: pytest.MonkeyPatch):
+    fake_datasets = [
+        SimpleNamespace(id="uuid-1", name="alpha"),
+        SimpleNamespace(id="uuid-2", name="beta"),
+    ]
+    monkeypatch.setattr(
+        zoo_mcp.kittycad_client.orgs,
+        "list_org_datasets",
+        MagicMock(return_value=iter(fake_datasets)),
+    )
+
+    response = await mcp.call_tool("list_org_datasets", arguments={})
+    result = _meta_result(response)
+    assert result == [
+        {"id": "uuid-1", "name": "alpha"},
+        {"id": "uuid-2", "name": "beta"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_org_datasets_empty_when_404(monkeypatch: pytest.MonkeyPatch):
+    def raise_404(*args: Any, **kwargs: Any):
+        raise KittyCADClientError(message="No org found", status_code=404)
+
+    monkeypatch.setattr(
+        zoo_mcp.kittycad_client.orgs,
+        "list_org_datasets",
+        raise_404,
+    )
+
+    response = await mcp.call_tool("list_org_datasets", arguments={})
+    result = _meta_result(response)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_search_org_dataset_semantic_success(monkeypatch: pytest.MonkeyPatch):
+    fake_matches = [
+        SimpleNamespace(
+            chunk_index=0,
+            content="first chunk",
+            conversion_id="conv-uuid-1",
+            similarity=0.91,
+            source_file_path="path/one.kcl",
+        ),
+        SimpleNamespace(
+            chunk_index=2,
+            content="second chunk",
+            conversion_id="conv-uuid-2",
+            similarity=0.74,
+            source_file_path="path/two.kcl",
+        ),
+    ]
+    mock = MagicMock(return_value=fake_matches)
+    monkeypatch.setattr(
+        zoo_mcp.kittycad_client.orgs,
+        "search_org_dataset_semantic",
+        mock,
+    )
+
+    response = await mcp.call_tool(
+        "search_org_dataset_semantic",
+        arguments={
+            "dataset_id": "dataset-uuid",
+            "query": "find the gear",
+            "limit": 5,
+        },
+    )
+    result = _meta_result(response)
+    assert result == [
+        {
+            "source_file_path": "path/one.kcl",
+            "content": "first chunk",
+            "similarity": 0.91,
+            "chunk_index": 0,
+            "conversion_id": "conv-uuid-1",
+        },
+        {
+            "source_file_path": "path/two.kcl",
+            "content": "second chunk",
+            "similarity": 0.74,
+            "chunk_index": 2,
+            "conversion_id": "conv-uuid-2",
+        },
+    ]
+    mock.assert_called_once_with(id="dataset-uuid", q="find the gear", limit=5)
+
+
+@pytest.mark.asyncio
+async def test_search_org_dataset_semantic_error(monkeypatch: pytest.MonkeyPatch):
+    def raise_500(*args: Any, **kwargs: Any):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        zoo_mcp.kittycad_client.orgs,
+        "search_org_dataset_semantic",
+        raise_500,
+    )
+
+    response = await mcp.call_tool(
+        "search_org_dataset_semantic",
+        arguments={
+            "dataset_id": "dataset-uuid",
+            "query": "anything",
+        },
+    )
+    result = _meta_result(response)
+    assert isinstance(result, str)
+    assert result.startswith("There was an error searching dataset dataset-uuid")
