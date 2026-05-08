@@ -23,11 +23,13 @@ from zoo_mcp.zoo_tools import (
     zoo_format_kcl,
     zoo_get_sketch_constraint_status,
     zoo_lint_and_fix_kcl,
+    zoo_list_org_datasets,
     zoo_mock_execute_kcl,
     zoo_multi_isometric_snapshot_of_cad,
     zoo_multi_isometric_snapshot_of_kcl,
     zoo_multiview_snapshot_of_cad,
     zoo_multiview_snapshot_of_kcl,
+    zoo_search_org_dataset_semantic,
     zoo_snapshot_of_cad,
     zoo_snapshot_of_kcl,
 )
@@ -836,6 +838,56 @@ async def save_image(
         return saved_path
     except Exception as e:
         return f"There was an error saving the image: {e}"
+
+
+@mcp.tool()
+async def list_org_datasets() -> list[dict] | str:
+    """List the datasets available to the user's organization.
+
+    Each dataset has a UUID `id` and a human-readable `name`. Use the `id`
+    as the `dataset_id` argument to `search_org_dataset_semantic`.
+
+    Returns:
+        A list of {"id": str, "name": str} entries, or an error message if the operation fails.
+    """
+
+    logger.info("list_org_datasets tool called")
+
+    try:
+        return zoo_list_org_datasets()
+    except Exception as e:
+        return f"There was an error listing org datasets: {e}"
+
+
+@mcp.tool()
+async def search_org_dataset_semantic(
+    dataset_id: str,
+    query: str,
+    limit: int | None = None,
+) -> list[dict] | str:
+    """Semantic-search a dataset for samples relevant to the query.
+
+    Embeds the query with the org-dataset embedding model and returns the top
+    chunk matches ranked by cosine similarity.
+
+    Args:
+        dataset_id (str): The UUID of the dataset to search (from `list_org_datasets`).
+        query (str): The natural-language query to embed and search with.
+        limit (int | None): Optional max number of matches to return.
+
+    Returns:
+        A list of match dicts (source_file_path, content, similarity, chunk_index, conversion_id),
+        or an error message if the operation fails.
+    """
+
+    logger.info("search_org_dataset_semantic tool called for dataset_id=%s", dataset_id)
+
+    try:
+        return zoo_search_org_dataset_semantic(
+            dataset_id=dataset_id, query=query, limit=limit
+        )
+    except Exception as e:
+        return f"There was an error searching dataset {dataset_id}: {e}"
 
 
 def main():
