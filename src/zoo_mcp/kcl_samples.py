@@ -1,7 +1,16 @@
 """KCL Samples fetching and search.
 
-This module fetches KCL samples from the modeling-app GitHub repository
-at server startup and provides search functionality for LLMs.
+This module fetches the KCL samples index from zoo.dev and provides search
+functionality for LLMs. The index is loaded lazily — server.py kicks off the
+fetch in the background when the MCP server's lifespan starts, and tools
+``await KCLSamples.initialize()`` (idempotent) before serving so the first
+call also bootstraps if the lifespan hook hasn't run yet.
+
+Both the index page (``/aquarium``) and per-sample pages
+(``/aquarium/<sample>``) are requested with ``Accept: text/markdown``.
+Per-sample pages embed each KCL file as a ``### <filename>.kcl`` section
+with a fenced ```kcl`` ... ``` `` block, which we parse to recover file
+contents on demand.
 """
 
 import asyncio
@@ -13,29 +22,50 @@ import httpx
 
 from zoo_mcp import logger
 from zoo_mcp.utils.data_retrieval_utils import (
-    GITHUB_REPO,
+    ZOO_BASE_URL,
     extract_excerpt,
-    fetch_github_file,
+    fetch_markdown,
     is_safe_path_component,
-    resolve_github_ref,
 )
 
-_SAMPLES_PATH = "public/kcl-samples"
+_AQUARIUM_BASE_URL = f"{ZOO_BASE_URL}/aquarium"
 
 # Only allow safe characters in sample names and filenames
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.kcl$")
 
+# Index entries look like:
+#   - [Title](/aquarium/<slug>) - <description> (<Categories>)
+# where the trailing categories chunk is optional. Description text may itself
+# contain parens (e.g. embedded URLs), so we strip the trailing ``(...)`` group
+# anchored at end-of-line in a separate pass.
+_INDEX_LINE_RE = re.compile(
+    r"^- \[(?P<title>[^\]]+)\]"
+    r"\(/aquarium/(?P<name>[A-Za-z0-9_-]+)\)"
+    r"\s*-\s*(?P<rest>.*)$"
+)
+_TRAILING_CATEGORIES_RE = re.compile(
+    r"\s*\((?P<cats>[A-Z][A-Za-z]*(?:,\s*[A-Z][A-Za-z]*)*)\)\s*$"
+)
+
+# Matches each "### <filename>.kcl" header followed by a ```kcl ... ``` block
+# inside an /aquarium/<sample> page.
+_FILE_BLOCK_RE = re.compile(
+    r"^###[ \t]+(?P<filename>[^\s/\\]+\.kcl)[ \t]*\n+"
+    r"```kcl[ \t]*\n(?P<content>.*?)\n```",
+    re.MULTILINE | re.DOTALL,
+)
+
 
 class SampleMetadata(TypedDict):
-    """Metadata for a single KCL sample from manifest.json."""
+    """Metadata for a single KCL sample, derived from the /aquarium index."""
 
-    file: str
-    pathFromProjectDirectoryToFirstFile: str
-    multipleFiles: bool
     title: str
     description: str
-    files: list[str]
+    # multipleFiles starts False from the index (the index doesn't expose file
+    # counts) and is updated to the true value when ``get_sample_content``
+    # fetches the per-sample page.
+    multipleFiles: bool
 
 
 class SampleFile(TypedDict):
@@ -59,14 +89,13 @@ class SampleData(TypedDict):
 class KCLSamples:
     """Container for KCL samples data."""
 
-    # Manifest data indexed by sample directory name
+    # Sample metadata indexed by sample directory name
     manifest: dict[str, SampleMetadata] = field(default_factory=dict)
     # Cached file contents: sample_name -> filename -> content
     file_cache: dict[str, dict[str, str]] = field(default_factory=dict)
-    # Git ref (release tag) used to fetch content
-    _ref: str = "main"
 
     _instance: ClassVar["KCLSamples | None"] = None
+    _init_lock: ClassVar[asyncio.Lock | None] = None
 
     @classmethod
     def get(cls) -> "KCLSamples":
@@ -75,86 +104,93 @@ class KCLSamples:
 
     @classmethod
     async def initialize(cls) -> None:
-        """Initialize the samples cache from GitHub."""
-        if cls._instance is None:
-            cls._instance = await _fetch_manifest_from_github()
+        """Initialize the samples cache from zoo.dev (idempotent, race-safe)."""
+        if cls._instance is not None:
+            return
+        if cls._init_lock is None:
+            cls._init_lock = asyncio.Lock()
+        async with cls._init_lock:
+            if cls._instance is None:
+                cls._instance = await _fetch_index_from_zoo_dev()
 
 
-def _extract_sample_name(path: str) -> str:
-    """Extract the sample directory name from a path.
+def _parse_index_markdown(markdown: str) -> dict[str, SampleMetadata]:
+    """Parse the /aquarium markdown index into a {name: metadata} mapping."""
+    manifest: dict[str, SampleMetadata] = {}
+    for line in markdown.splitlines():
+        m = _INDEX_LINE_RE.match(line)
+        if m is None:
+            continue
 
-    Example: "axial-fan/main.kcl" -> "axial-fan"
+        name = m.group("name")
+        if not is_safe_path_component(name, _SAFE_NAME_RE):
+            logger.warning(f"Rejected unsafe sample name from index: {name!r}")
+            continue
+
+        rest = m.group("rest").strip()
+        cats_match = _TRAILING_CATEGORIES_RE.search(rest)
+        if cats_match:
+            description = rest[: cats_match.start()].rstrip()
+        else:
+            description = rest
+
+        manifest[name] = SampleMetadata(
+            title=m.group("title").strip(),
+            description=description,
+            multipleFiles=False,
+        )
+
+    return manifest
+
+
+def _parse_aquarium_markdown(markdown: str) -> dict[str, str]:
+    """Extract ``filename -> content`` pairs from an /aquarium/<sample> page.
+
+    The page contains a ``## Files`` section followed by repeated
+    ``### <filename>.kcl`` headers, each immediately followed by a fenced
+    ```kcl`` ... ``` `` block holding that file's source.
     """
-    return path.split("/")[0] if "/" in path else path
+    files: dict[str, str] = {}
+    for match in _FILE_BLOCK_RE.finditer(markdown):
+        filename = match.group("filename")
+        if is_safe_path_component(filename, _SAFE_FILENAME_RE):
+            files[filename] = match.group("content")
+        else:
+            logger.warning(f"Rejected unsafe filename in markdown: {filename!r}")
+    return files
 
 
 async def _fetch_sample_files(
     client: httpx.AsyncClient,
-    raw_content_base: str,
     sample_name: str,
-    filenames: list[str],
 ) -> dict[str, str]:
-    """Fetch all files for a sample."""
-    tasks = [
-        fetch_github_file(
-            client,
-            f"{raw_content_base}{sample_name}/{filename}",
-            f"{sample_name}/{filename}",
-        )
-        for filename in filenames
-    ]
-    results = await asyncio.gather(*tasks)
-    return {
-        filename: content
-        for filename, content in zip(filenames, results)
-        if content is not None
-    }
+    """Fetch a sample's files from /aquarium/<sample_name> as markdown."""
+    url = f"{_AQUARIUM_BASE_URL}/{sample_name}"
+    markdown = await fetch_markdown(client, url, sample_name)
+    if markdown is None:
+        return {}
+    return _parse_aquarium_markdown(markdown)
 
 
-async def _fetch_manifest_from_github() -> KCLSamples:
-    """Fetch the manifest from GitHub and return a KCLSamples instance."""
+async def _fetch_index_from_zoo_dev() -> KCLSamples:
+    """Fetch the samples index from zoo.dev and return a KCLSamples instance."""
     samples = KCLSamples()
 
-    logger.info("Fetching KCL samples manifest from GitHub...")
+    logger.info("Fetching KCL samples index from zoo.dev...")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # 1. Resolve the latest release tag (fall back to "main" if unavailable)
-        ref = await resolve_github_ref(client)
-
-        raw_content_base = (
-            f"https://raw.githubusercontent.com/{GITHUB_REPO}/{ref}/{_SAMPLES_PATH}/"
-        )
-        manifest_url = f"{raw_content_base}manifest.json"
-
-        # Store ref for later use when fetching sample files on-demand
-        samples._ref = ref
-
-        try:
-            response = await client.get(manifest_url)
-            response.raise_for_status()
-            manifest_data: list[SampleMetadata] = response.json()
-        except httpx.HTTPError as e:
-            logger.warning(f"Failed to fetch samples manifest: {e}")
+        markdown = await fetch_markdown(client, _AQUARIUM_BASE_URL, "/aquarium")
+        if markdown is None:
             return samples
 
-        # Index manifest by sample name, validating each name
-        for entry in manifest_data:
-            sample_name = _extract_sample_name(
-                entry.get("pathFromProjectDirectoryToFirstFile", "")
-            )
-            if sample_name and is_safe_path_component(sample_name, _SAFE_NAME_RE):
-                samples.manifest[sample_name] = entry
-            elif sample_name:
-                logger.warning(
-                    f"Rejected unsafe sample name from manifest: {sample_name!r}"
-                )
+        samples.manifest = _parse_index_markdown(markdown)
 
-    logger.info(f"KCL samples manifest loaded with {len(samples.manifest)} samples")
+    logger.info(f"KCL samples index loaded with {len(samples.manifest)} samples")
     return samples
 
 
 async def initialize_samples_cache() -> None:
-    """Initialize the samples cache from GitHub."""
+    """Initialize the samples cache from zoo.dev."""
     await KCLSamples.initialize()
 
 
@@ -165,7 +201,9 @@ def list_available_samples() -> list[dict]:
     - name: The sample directory name (used to retrieve the sample)
     - title: Human-readable title
     - description: Brief description of the sample
-    - multipleFiles: Whether the sample contains multiple KCL files
+    - multipleFiles: Whether the sample contains multiple KCL files. The
+      index doesn't expose this, so it stays False until the sample's
+      per-sample page has been fetched at least once via get_kcl_sample.
 
     Use get_kcl_sample() with the name to retrieve the full sample content.
 
@@ -224,9 +262,8 @@ def search_samples(query: str, max_results: int = 5) -> list[dict]:
 
         match_count = searchable_lower.count(query_lower)
         if match_count > 0:
-            # Prioritize title matches
             title_matches = title.lower().count(query_lower)
-            score = match_count + (title_matches * 3)  # Boost title matches
+            score = match_count + (title_matches * 3)
 
             excerpt = extract_excerpt(searchable, query, context_chars=150)
 
@@ -242,10 +279,8 @@ def search_samples(query: str, max_results: int = 5) -> list[dict]:
                 }
             )
 
-    # Sort by score (descending)
     results.sort(key=lambda x: x["_score"], reverse=True)
 
-    # Remove internal score field
     for r in results:
         del r["_score"]
 
@@ -273,7 +308,6 @@ async def get_sample_content(sample_name: str) -> SampleData | None:
     """
     samples = KCLSamples.get()
 
-    # Validate sample name against allowlist
     if not is_safe_path_component(sample_name, _SAFE_NAME_RE):
         return None
 
@@ -281,35 +315,20 @@ async def get_sample_content(sample_name: str) -> SampleData | None:
     if metadata is None:
         return None
 
-    # Check if we have cached files
     if sample_name in samples.file_cache:
         file_contents = samples.file_cache[sample_name]
     else:
-        # Validate and filter filenames from manifest
-        raw_filenames = metadata.get("files", ["main.kcl"])
-        filenames = []
-        for f in raw_filenames:
-            if is_safe_path_component(f, _SAFE_FILENAME_RE):
-                filenames.append(f)
-            else:
-                logger.warning(
-                    f"Rejected unsafe filename in sample {sample_name!r}: {f!r}"
-                )
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            file_contents = await _fetch_sample_files(client, sample_name)
 
-        if not filenames:
+        if not file_contents:
             return None
 
-        raw_content_base = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{samples._ref}/{_SAMPLES_PATH}/"
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            file_contents = await _fetch_sample_files(
-                client, raw_content_base, sample_name, filenames
-            )
-
-        # Cache the results
         samples.file_cache[sample_name] = file_contents
+        # The index doesn't tell us file counts; record the real value now
+        # that we've parsed the per-sample page.
+        metadata["multipleFiles"] = len(file_contents) > 1
 
-    # Build response
     files_list: list[SampleFile] = []
     for filename, content in sorted(file_contents.items()):
         files_list.append(SampleFile(filename=filename, content=content))
