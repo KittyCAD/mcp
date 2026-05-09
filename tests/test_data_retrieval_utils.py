@@ -5,10 +5,9 @@ from zoo_mcp.kcl_docs import _SAFE_DOC_PATH_RE
 from zoo_mcp.kcl_samples import _SAFE_FILENAME_RE, _SAFE_NAME_RE
 from zoo_mcp.utils.data_retrieval_utils import (
     extract_excerpt,
-    fetch_github_file,
+    fetch_markdown,
+    fetch_url,
     is_safe_path_component,
-    resolve_github_ref,
-    resolve_latest_release_tag,
 )
 
 # ---------------------------------------------------------------------------
@@ -72,23 +71,35 @@ class TestIsSafePathComponent:
 
     def test_valid_doc_path(self):
         assert (
-            is_safe_path_component("docs/kcl-lang/functions.md", _SAFE_DOC_PATH_RE)
+            is_safe_path_component("docs/kcl-lang/functions", _SAFE_DOC_PATH_RE) is True
+        )
+
+    def test_valid_kcl_std_doc_path(self):
+        assert (
+            is_safe_path_component(
+                "docs/kcl-std/functions/std-sketch-extrude", _SAFE_DOC_PATH_RE
+            )
             is True
+        )
+
+    def test_doc_path_with_md_extension_rejected(self):
+        """The new regex no longer matches the legacy ``.md`` suffix."""
+        assert (
+            is_safe_path_component("docs/kcl-lang/functions.md", _SAFE_DOC_PATH_RE)
+            is False
         )
 
     def test_doc_path_with_encoded_traversal(self):
         """The regex blocks '%' so encoded traversal is rejected."""
         assert (
             is_safe_path_component(
-                "docs/kcl-lang/%2e%2e%2f%2e%2e%2fREADME.md", _SAFE_DOC_PATH_RE
+                "docs/kcl-lang/%2e%2e%2f%2e%2e%2fREADME", _SAFE_DOC_PATH_RE
             )
             is False
         )
 
     def test_doc_path_with_literal_dot_dot(self):
-        assert (
-            is_safe_path_component("docs/../etc/passwd.md", _SAFE_DOC_PATH_RE) is False
-        )
+        assert is_safe_path_component("docs/../etc/passwd", _SAFE_DOC_PATH_RE) is False
 
 
 # ---------------------------------------------------------------------------
@@ -141,12 +152,12 @@ class TestExtractExcerpt:
 
 
 # ---------------------------------------------------------------------------
-# fetch_github_file
+# fetch_url / fetch_markdown
 # ---------------------------------------------------------------------------
 
 
-class TestFetchGithubFile:
-    """Tests for fetch_github_file."""
+class TestFetchUrl:
+    """Tests for fetch_url and fetch_markdown."""
 
     @pytest.mark.asyncio
     async def test_successful_fetch(self, httpx_mock):
@@ -155,9 +166,7 @@ class TestFetchGithubFile:
             text="file content",
         )
         async with httpx.AsyncClient() as client:
-            result = await fetch_github_file(
-                client, "https://example.com/file.txt", "file.txt"
-            )
+            result = await fetch_url(client, "https://example.com/file.txt", "file.txt")
         assert result == "file content"
 
     @pytest.mark.asyncio
@@ -168,9 +177,7 @@ class TestFetchGithubFile:
             headers={"location": "https://evil.com/payload"},
         )
         async with httpx.AsyncClient() as client:
-            result = await fetch_github_file(
-                client, "https://example.com/file.txt", "file.txt"
-            )
+            result = await fetch_url(client, "https://example.com/file.txt", "file.txt")
         assert result is None
 
     @pytest.mark.asyncio
@@ -180,66 +187,16 @@ class TestFetchGithubFile:
             status_code=404,
         )
         async with httpx.AsyncClient() as client:
-            result = await fetch_github_file(
-                client, "https://example.com/file.txt", "file.txt"
-            )
+            result = await fetch_url(client, "https://example.com/file.txt", "file.txt")
         assert result is None
 
-
-# ---------------------------------------------------------------------------
-# resolve_latest_release_tag / resolve_github_ref
-# ---------------------------------------------------------------------------
-
-
-class TestResolveRelease:
-    """Tests for resolve_latest_release_tag and resolve_github_ref."""
-
     @pytest.mark.asyncio
-    async def test_resolve_tag_success(self, httpx_mock):
+    async def test_fetch_markdown_sends_accept_header(self, httpx_mock):
         httpx_mock.add_response(
-            url="https://api.github.com/repos/KittyCAD/modeling-app/releases/latest",
-            json={"tag_name": "kcl-42"},
+            url="https://example.com/page",
+            text="# Heading",
+            match_headers={"Accept": "text/markdown"},
         )
         async with httpx.AsyncClient() as client:
-            tag = await resolve_latest_release_tag(client)
-        assert tag == "kcl-42"
-
-    @pytest.mark.asyncio
-    async def test_resolve_tag_failure_returns_none(self, httpx_mock):
-        httpx_mock.add_response(
-            url="https://api.github.com/repos/KittyCAD/modeling-app/releases/latest",
-            status_code=500,
-        )
-        async with httpx.AsyncClient() as client:
-            tag = await resolve_latest_release_tag(client)
-        assert tag is None
-
-    @pytest.mark.asyncio
-    async def test_resolve_tag_missing_field(self, httpx_mock):
-        httpx_mock.add_response(
-            url="https://api.github.com/repos/KittyCAD/modeling-app/releases/latest",
-            json={"other_field": "value"},
-        )
-        async with httpx.AsyncClient() as client:
-            tag = await resolve_latest_release_tag(client)
-        assert tag is None
-
-    @pytest.mark.asyncio
-    async def test_resolve_ref_uses_tag(self, httpx_mock):
-        httpx_mock.add_response(
-            url="https://api.github.com/repos/KittyCAD/modeling-app/releases/latest",
-            json={"tag_name": "kcl-99"},
-        )
-        async with httpx.AsyncClient() as client:
-            ref = await resolve_github_ref(client)
-        assert ref == "kcl-99"
-
-    @pytest.mark.asyncio
-    async def test_resolve_ref_falls_back_to_main(self, httpx_mock):
-        httpx_mock.add_response(
-            url="https://api.github.com/repos/KittyCAD/modeling-app/releases/latest",
-            status_code=404,
-        )
-        async with httpx.AsyncClient() as client:
-            ref = await resolve_github_ref(client)
-        assert ref == "main"
+            result = await fetch_markdown(client, "https://example.com/page", "page")
+        assert result == "# Heading"
