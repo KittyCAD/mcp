@@ -3,7 +3,6 @@
 A lightweight service that enables AI assistants to execute Zoo commands through the Model Context Protocol (MCP).
 """
 
-import asyncio
 import logging
 import ssl
 import sys
@@ -38,40 +37,3 @@ kittycad_client.websocket_recv_timeout = 300
 
 httpx_logger = logging.getLogger("httpx")
 httpx_logger.setLevel(logging.WARNING)
-
-
-def _initialize_kcl_docs() -> None:
-    """Initialize KCL documentation cache at module load time."""
-    from zoo_mcp.kcl_docs import initialize_docs_cache
-
-    try:
-        try:
-            loop = asyncio.get_running_loop()
-            # Already in an event loop, schedule the task
-            loop.create_task(initialize_docs_cache())
-        except RuntimeError:
-            # No running loop, use asyncio.run()
-            asyncio.run(initialize_docs_cache())
-    except Exception as e:
-        logger.warning(f"Failed to initialize KCL docs cache: {e}")
-
-
-def _initialize_kcl_samples() -> None:
-    """Initialize KCL samples cache at module load time."""
-    from zoo_mcp.kcl_samples import initialize_samples_cache
-
-    try:
-        try:
-            loop = asyncio.get_running_loop()
-            # Already in an event loop, schedule the task
-            loop.create_task(initialize_samples_cache())
-        except RuntimeError:
-            # No running loop, use asyncio.run()
-            asyncio.run(initialize_samples_cache())
-    except Exception as e:
-        logger.warning(f"Failed to initialize KCL samples cache: {e}")
-
-
-# Initialize caches when module is imported
-# _initialize_kcl_docs()
-# _initialize_kcl_samples()
