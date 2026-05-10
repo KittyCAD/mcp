@@ -101,6 +101,9 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     finally:
         if _kcl_cache_task is not None and not _kcl_cache_task.done():
             _kcl_cache_task.cancel()
+        _kcl_cache_task = None
+        KCLDocs._instance = None
+        KCLSamples._instance = None
 
 
 mcp = FastMCP(
