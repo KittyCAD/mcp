@@ -4,8 +4,6 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent
 
 from zoo_mcp import ZooMCPException, logger
-from zoo_mcp.ai_tools import edit_kcl_project as _edit_kcl_project
-from zoo_mcp.ai_tools import text_to_cad as _text_to_cad
 from zoo_mcp.utils.image_utils import encode_image, save_image_to_disk
 from zoo_mcp.zoo_tools import (
     CameraView,
@@ -740,83 +738,6 @@ async def snapshot_of_kcl(
 
 
 @mcp.tool()
-async def text_to_cad(prompt: str) -> str:
-    """Generate a CAD model as KCL code from a text prompt.
-
-    # General Tips
-    - You can use verbs like "design a..." or "create a...", but those aren't needed. Prompting "A gear" works as well as "Create a gear".
-    - If your prompt omits important dimensions, Text-to-CAD will make its best guess to fill in missing details.
-    - Traditional, simple mechanical parts such as fasteners, bearings and connectors work best right now.
-    - Text-to-CAD returns a 422 error code if it fails to generate a valid geometry internally, even if it understands your prompt. We're working on reducing the amount of errors.
-    - Shorter prompts, 1-2 sentences in length, succeed more often than longer prompts.
-    - The maximum prompt length is approximately 6000 words. Generally, shorter prompts of one or two sentences work best. Longer prompts take longer to resolve.
-    - The same prompt can generate different results when submitted multiple times. Sometimes a failing prompt will succeed on the next attempt, and vice versa.
-
-    # Examples
-    - "A 21-tooth involute helical gear."
-    - "A plate with a hole in each corner for a #10 bolt. The plate is 4" wide, 6" tall."
-    - "A dodecahedron."
-    - "A camshaft."
-    - "A 1/2 inch gear with 21 teeth."
-    - "A 3x6 lego."
-
-    Args:
-        prompt (str): The text prompt to be realized as KCL code.
-
-    Returns:
-        str: The generated KCL code if Text-to-CAD is successful, otherwise the error message.
-    """
-    logger.info("text_to_cad tool called with prompt: %s", prompt)
-    try:
-        return await _text_to_cad(prompt=prompt)
-    except Exception as e:
-        return f"There was an error generating the CAD file from text: {e}"
-
-
-@mcp.tool()
-async def edit_kcl_project(
-    prompt: str,
-    proj_path: str,
-) -> dict | str:
-    """Modify an existing KCL project by sending a prompt and a KCL project path to Zoo's Text-To-CAD "edit KCL project" endpoint. The proj_path will upload all contained files to the endpoint. There must be a main.kcl file in the root of the project.
-
-    # General Tips
-    - You can use verbs like "add", "remove", "change", "make", "fillet", etc. to describe the modification you want to make.
-    - Be specific about what you want to change in the model. For example, "add a hole to the center" is more specific than "add a hole".
-    - If your prompt omits important dimensions, Text-to-CAD will make its best guess to fill in missing details.
-    - Text-to-CAD returns a 422 error code if it fails to generate a valid geometry internally, even if it understands your prompt.
-    - Shorter prompts, 1-2 sentences in length, succeed more often than longer prompts.
-    - The maximum prompt length is approximately 6000 words. Generally, shorter prompts of one or two sentences work best. Longer prompts take longer to resolve.
-    - The same prompt can generate different results when submitted multiple times. Sometimes a failing prompt will succeed on the next attempt, and vice versa.
-
-    # Examples
-    - "Add a hole to the center of the plate."
-    - "Make the gear twice as large."
-    - "Remove the top face of the box."
-    - "Fillet each corner"
-
-    Args:
-        prompt (str): The text prompt describing the modification to be made.
-        proj_path (str): A path to a KCL project directory containing a main.kcl file in the root. All contained files (found recursively) will be sent to the endpoint.
-
-    Returns:
-        dict | str: A dictionary containing the complete KCL code of the CAD model if Text-To-CAD edit KCL project was successful.
-                    Each key in the dict refers to a KCL file path relative to the project path, and each value is the complete KCL code for that file.
-                    If unsuccessful, returns an error message from Text-To-CAD.
-    """
-
-    logger.info("edit_kcl_project tool called with prompt: %s", prompt)
-
-    try:
-        return await _edit_kcl_project(
-            proj_path=proj_path,
-            prompt=prompt,
-        )
-    except Exception as e:
-        return f"There was an error modifying the KCL project from text: {e}"
-
-
-@mcp.tool()
 async def save_image(
     image: ImageContent,
     output_path: str | None = None,
@@ -844,11 +765,13 @@ async def save_image(
 async def list_org_datasets() -> list[dict] | str:
     """List the datasets available to the user's organization.
 
-    Each dataset has a UUID `id` and a human-readable `name`. Use the `id`
-    as the `dataset_id` argument to `search_org_dataset_semantic`.
+    Each dataset has a UUID `id`, a human-readable `name`, and an optional
+    `description`. Use the `id` as the `dataset_id` argument to
+    `search_org_dataset_semantic`.
 
     Returns:
-        A list of {"id": str, "name": str} entries, or an error message if the operation fails.
+        A list of {"id": str, "name": str, "description": str | None}
+        entries, or an error message if the operation fails.
     """
 
     logger.info("list_org_datasets tool called")

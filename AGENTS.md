@@ -23,29 +23,29 @@ Before committing any code, ensure all tests pass, formatting is good, linting i
 
 ## Architecture
 
-This is a Model Context Protocol (MCP) server that exposes Zoo's AI-powered CAD generation tools to AI assistants. The architecture consists of:
+This is a Model Context Protocol (MCP) server that exposes Zoo CAD and KCL utility tools to AI assistants. The architecture consists of:
 
 ### Core Components
-- `src/zoo_mcp/server.py` - FastMCP server that defines the MCP interface and exposes the `call_text_to_cad` tool
-- `src/zoo_mcp/tools.py` - Contains the `text_to_cad` function that interfaces with Zoo's KittyCAD API
+- `src/zoo_mcp/server.py` - FastMCP server that defines the MCP interface and registers the tools
+- `src/zoo_mcp/zoo_tools.py` - Contains the Zoo and KCL tool implementations that interface with the KittyCAD API and local KCL runtime
 - `src/zoo_mcp/__init__.py` - Package initialization with logging configuration
 
 ### Key Dependencies
-- `kittycad` - Official Zoo API client for accessing Text-to-CAD functionality
+- `kittycad` - Official Zoo API client for accessing Zoo file, modeling, and org-dataset functionality
 - `mcp[cli]` - Model Context Protocol framework for AI assistant integration
 - `pytest-asyncio` - For testing async functions
 
 ### API Integration
-The server connects to Zoo's Text-to-CAD API using the KittyCAD client. All requests require a valid `ZOO_API_TOKEN` environment variable. The `text_to_cad` function handles:
-- Sending prompts to Zoo's ML endpoint
-- Polling for completion status
-- Returning either generated KCL code (on success) or error messages (on failure)
+The server connects to Zoo's APIs using the KittyCAD client. Requests that hit Zoo APIs require a valid `ZOO_API_TOKEN` environment variable. The tool implementations cover:
+- CAD file conversion and physical-property calculations
+- KCL execution, formatting, linting, export, and snapshots
+- Org dataset listing and semantic search
 
 ### Testing Strategy  
 Tests are located in `tests/test_server.py` and cover:
 - Basic tool functionality
-- Success scenarios (valid CAD prompts)
-- Failure scenarios (invalid prompts)
+- Success scenarios
+- Failure scenarios
 - All tests are async and use pytest-asyncio
 
 ## Package Structure
