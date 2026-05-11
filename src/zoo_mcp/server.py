@@ -765,11 +765,13 @@ async def save_image(
 async def list_org_datasets() -> list[dict] | str:
     """List the datasets available to the user's organization.
 
-    Each dataset has a UUID `id` and a human-readable `name`. Use the `id`
-    as the `dataset_id` argument to `search_org_dataset_semantic`.
+    Each dataset has a UUID `id`, a human-readable `name`, and an optional
+    `description`. Use the `id` as the `dataset_id` argument to
+    `search_org_dataset_semantic`.
 
     Returns:
-        A list of {"id": str, "name": str} entries, or an error message if the operation fails.
+        A list of {"id": str, "name": str, "description": str | None}
+        entries, or an error message if the operation fails.
     """
 
     logger.info("list_org_datasets tool called")

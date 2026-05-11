@@ -1090,8 +1090,8 @@ async def test_save_image_to_temp_file(cube_stl: str):
 @pytest.mark.asyncio
 async def test_list_org_datasets_success(monkeypatch: pytest.MonkeyPatch):
     fake_datasets = [
-        SimpleNamespace(id="uuid-1", name="alpha"),
-        SimpleNamespace(id="uuid-2", name="beta"),
+        SimpleNamespace(id="uuid-1", name="alpha", description="first dataset"),
+        SimpleNamespace(id="uuid-2", name="beta", description=None),
     ]
     monkeypatch.setattr(
         zoo_mcp.kittycad_client.orgs,
@@ -1102,8 +1102,8 @@ async def test_list_org_datasets_success(monkeypatch: pytest.MonkeyPatch):
     response = await mcp.call_tool("list_org_datasets", arguments={})
     result = _meta_result(response)
     assert result == [
-        {"id": "uuid-1", "name": "alpha"},
-        {"id": "uuid-2", "name": "beta"},
+        {"id": "uuid-1", "name": "alpha", "description": "first dataset"},
+        {"id": "uuid-2", "name": "beta", "description": None},
     ]
 
 

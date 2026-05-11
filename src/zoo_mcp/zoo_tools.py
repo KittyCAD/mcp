@@ -1957,11 +1957,12 @@ async def zoo_snapshot_of_kcl(
     return resize_image(jpeg_contents_list[0], max_image_dimension)
 
 
-def zoo_list_org_datasets() -> list[dict[str, str]]:
+def zoo_list_org_datasets() -> list[dict[str, str | None]]:
     """List all datasets visible to the org tied to the current ZOO_API_TOKEN.
 
     Returns:
-        A list of {"id": <uuid str>, "name": <str>} entries, possibly empty.
+        A list of {"id": <uuid str>, "name": <str>, "description": <str | None>}
+        entries, possibly empty.
     """
     logger.info("Listing org datasets")
     try:
@@ -1973,7 +1974,10 @@ def zoo_list_org_datasets() -> list[dict[str, str]]:
             return []
         raise ZooMCPException(f"Failed to list org datasets: {exc}") from exc
 
-    return [{"id": str(d.id), "name": d.name} for d in datasets]
+    return [
+        {"id": str(d.id), "name": d.name, "description": d.description}
+        for d in datasets
+    ]
 
 
 def zoo_search_org_dataset_semantic(
