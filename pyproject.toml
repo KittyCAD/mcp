@@ -8,8 +8,8 @@ version = "0.15.0"
 requires-python = ">=3.11, <3.14"
 dependencies = [
     "aiofiles<26.0",
-    "kittycad>=1.3.7, <2.0",
-    "mcp[cli]<2.0",
+    "kittycad>=1.3.8,<2.0",
+    "mcp[cli]>=1.27.1,<2.0",
     "pillow<13.0",
     "trimesh<5.0",
     "truststore<1.0",
