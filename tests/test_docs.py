@@ -23,19 +23,16 @@ def test_extract_excerpt():
 
 def test_categorize_doc_path():
     """Test documentation path categorization."""
-    assert kcl_docs._categorize_doc_path("docs/kcl-lang/functions.md") == "kcl-lang"
+    assert kcl_docs._categorize_doc_path("docs/kcl-lang/functions") == "kcl-lang"
     assert (
-        kcl_docs._categorize_doc_path("docs/kcl-std/functions/extrude.md")
+        kcl_docs._categorize_doc_path("docs/kcl-std/functions/std-sketch-extrude")
         == "kcl-std-functions"
     )
     assert (
-        kcl_docs._categorize_doc_path("docs/kcl-std/types/Sketch.md") == "kcl-std-types"
+        kcl_docs._categorize_doc_path("docs/kcl-std/types/Sketch") == "kcl-std-types"
     )
+    assert kcl_docs._categorize_doc_path("docs/kcl-std/consts/PI") == "kcl-std-consts"
     assert (
-        kcl_docs._categorize_doc_path("docs/kcl-std/consts/PI.md") == "kcl-std-consts"
+        kcl_docs._categorize_doc_path("docs/kcl-std/modules/math") == "kcl-std-modules"
     )
-    assert (
-        kcl_docs._categorize_doc_path("docs/kcl-std/modules/math.md")
-        == "kcl-std-modules"
-    )
-    assert kcl_docs._categorize_doc_path("docs/other/file.md") is None
+    assert kcl_docs._categorize_doc_path("docs/other/file") is None
