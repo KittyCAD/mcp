@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import Sequence
 from pathlib import Path
@@ -6,12 +7,15 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+import pytest_asyncio
 from kittycad import KittyCAD
 from kittycad.exceptions import KittyCADClientError
-from mcp.types import ImageContent
+from mcp.types import ImageContent, TextContent
 
 import zoo_mcp
 import zoo_mcp.zoo_tools
+from zoo_mcp.kcl_docs import KCLDocs
+from zoo_mcp.kcl_samples import KCLSamples, SampleMetadata
 from zoo_mcp.server import mcp
 
 
@@ -974,6 +978,425 @@ async def test_text_to_cad_tools_are_not_registered():
 
     assert "text_to_cad" not in tool_names
     assert "edit_kcl_project" not in tool_names
+
+
+_FAKE_DOC_CONTENT = {
+    "docs/kcl-lang/functions": (
+        "# Functions\n\n"
+        "Functions in KCL let you reuse logic. A function takes named "
+        "parameters and returns a value. Functions can be defined inline or "
+        "imported from other modules. Calling a function uses the standard "
+        "`name(arg = value)` syntax. This page describes how functions "
+        "behave inside KCL programs and how they interact with sketches.\n"
+    ),
+    "docs/kcl-lang/sketches": (
+        "# Sketches\n\n"
+        "A sketch is a 2D profile drawn on a plane. Sketches are the "
+        "starting point for most modeling operations.\n"
+    ),
+    "docs/kcl-std/functions/std-sketch-extrude": (
+        "# extrude\n\n"
+        "Extrude a sketch into a 3D solid. The extrude function takes a "
+        "sketch and a length and returns a solid.\n"
+    ),
+    "docs/kcl-std/types/Sketch": (
+        "# Sketch\n\nThe Sketch type represents a 2D sketch on a plane.\n"
+    ),
+    "docs/kcl-std/consts/PI": ("# PI\n\nThe mathematical constant pi.\n"),
+    "docs/kcl-std/modules/math": ("# math\n\nMath utility module.\n"),
+}
+
+
+def _build_fake_docs() -> KCLDocs:
+    docs = KCLDocs(docs=dict(_FAKE_DOC_CONTENT))
+    for path in docs.docs:
+        if path.startswith("docs/kcl-lang/"):
+            docs.index["kcl-lang"].append(path)
+        elif path.startswith("docs/kcl-std/functions/"):
+            docs.index["kcl-std-functions"].append(path)
+        elif path.startswith("docs/kcl-std/types/"):
+            docs.index["kcl-std-types"].append(path)
+        elif path.startswith("docs/kcl-std/consts/"):
+            docs.index["kcl-std-consts"].append(path)
+        elif path.startswith("docs/kcl-std/modules/"):
+            docs.index["kcl-std-modules"].append(path)
+    for category in docs.index:
+        docs.index[category].sort()
+    return docs
+
+
+@pytest_asyncio.fixture(scope="module")
+async def live_docs_index():
+    """Populate the docs index with synthetic data.
+
+    Fully offline: avoids hitting zoo.dev. The fetch and parse pipeline is
+    covered by ``tests/test_docs.py`` and ``tests/test_data_retrieval_utils.py``.
+    """
+    saved = KCLDocs._instance
+    KCLDocs._instance = _build_fake_docs()
+    try:
+        yield KCLDocs._instance
+    finally:
+        KCLDocs._instance = saved
+
+
+@pytest.mark.xdist_group(name="docs")
+@pytest.mark.asyncio
+async def test_list_kcl_docs(live_docs_index):
+    """Test that list_kcl_docs returns categorized documentation."""
+    response = await mcp.call_tool("list_kcl_docs", arguments={})
+    inner_list = _content_list(response)
+    assert len(inner_list) == 1
+    assert isinstance(inner_list[0], TextContent)
+    result = json.loads(inner_list[0].text)
+
+    assert isinstance(result, dict)
+    # Check all expected categories exist
+    assert "kcl-lang" in result
+    assert "kcl-std-functions" in result
+    assert "kcl-std-types" in result
+    assert "kcl-std-consts" in result
+    assert "kcl-std-modules" in result
+
+    # Verify we have docs in each major category
+    assert len(result["kcl-lang"]) > 0, "Should have KCL language docs"
+    assert len(result["kcl-std-functions"]) > 0, "Should have std function docs"
+    assert len(result["kcl-std-types"]) > 0, "Should have std type docs"
+
+
+@pytest.mark.xdist_group(name="docs")
+@pytest.mark.asyncio
+async def test_search_kcl_docs(live_docs_index):
+    """Test that search_kcl_docs returns relevant excerpts for 'extrude'."""
+    response = await mcp.call_tool(
+        "search_kcl_docs", arguments={"query": "extrude", "max_results": 5}
+    )
+    # FastMCP returns list results as [list_of_TextContent]
+    inner_list = _content_list(response)
+    assert len(inner_list) > 0, "Should find results for 'extrude'"
+
+    # Parse all results
+    result = [json.loads(tc.text) for tc in inner_list]
+
+    # Check result structure
+    first_result = result[0]
+    assert "path" in first_result
+    assert "title" in first_result
+    assert "excerpt" in first_result
+    assert "match_count" in first_result
+
+    # The extrude function doc should be in the results
+    paths = [r["path"] for r in result]
+    assert any("extrude" in p.lower() for p in paths), (
+        "Should find extrude-related docs"
+    )
+
+
+@pytest.mark.xdist_group(name="docs")
+@pytest.mark.asyncio
+async def test_search_kcl_docs_sketch(live_docs_index):
+    """Test searching for 'sketch' returns relevant results."""
+    response = await mcp.call_tool(
+        "search_kcl_docs", arguments={"query": "sketch", "max_results": 10}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) > 0, "Should find results for 'sketch'"
+
+    result = [json.loads(tc.text) for tc in inner_list]
+
+    # Should find sketch-related docs
+    all_text = " ".join([r["title"] + r["excerpt"] for r in result]).lower()
+    assert "sketch" in all_text, "Results should contain 'sketch'"
+
+
+@pytest.mark.xdist_group(name="docs")
+@pytest.mark.asyncio
+async def test_search_kcl_docs_no_results(live_docs_index):
+    """Test that search_kcl_docs handles queries with no matches."""
+    response = await mcp.call_tool(
+        "search_kcl_docs",
+        arguments={"query": "xyznonexistentterm12345abc", "max_results": 5},
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 0, "Should find no results for gibberish query"
+
+
+@pytest.mark.xdist_group(name="docs")
+@pytest.mark.asyncio
+async def test_search_kcl_docs_empty_query(live_docs_index):
+    """Test that search_kcl_docs handles empty queries."""
+    response = await mcp.call_tool(
+        "search_kcl_docs", arguments={"query": "", "max_results": 5}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 1
+
+    result = json.loads(inner_list[0].text)
+    assert "error" in result
+
+
+@pytest.mark.xdist_group(name="docs")
+@pytest.mark.asyncio
+async def test_get_kcl_doc_functions(live_docs_index):
+    """Test that get_kcl_doc retrieves the functions documentation."""
+    response = await mcp.call_tool(
+        "get_kcl_doc", arguments={"doc_path": "docs/kcl-lang/functions"}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 1
+
+    result = inner_list[0].text
+    assert isinstance(result, str)
+    # Should contain content about functions
+    assert "function" in result.lower(), "Should mention functions"
+    assert len(result) > 100, "Should have substantial content"
+
+
+@pytest.mark.xdist_group(name="docs")
+@pytest.mark.asyncio
+async def test_get_kcl_doc_extrude(live_docs_index):
+    """Test that get_kcl_doc retrieves the extrude function documentation."""
+    response = await mcp.call_tool(
+        "get_kcl_doc",
+        arguments={"doc_path": "docs/kcl-std/functions/std-sketch-extrude"},
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 1
+
+    result = inner_list[0].text
+    assert isinstance(result, str)
+    assert "extrude" in result.lower(), "Should mention extrude"
+
+
+@pytest.mark.xdist_group(name="docs")
+@pytest.mark.asyncio
+async def test_get_kcl_doc_not_found(live_docs_index):
+    """Test that get_kcl_doc handles missing documentation."""
+    response = await mcp.call_tool(
+        "get_kcl_doc", arguments={"doc_path": "docs/nonexistent/fake"}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 1
+
+    result = inner_list[0].text
+    assert isinstance(result, str)
+    assert "Documentation not found" in result
+
+
+@pytest.mark.xdist_group(name="docs")
+@pytest.mark.asyncio
+async def test_get_kcl_doc_path_traversal(live_docs_index):
+    """Test that get_kcl_doc rejects path traversal attempts."""
+    response = await mcp.call_tool(
+        "get_kcl_doc", arguments={"doc_path": "../../../etc/passwd"}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 1
+
+    result = inner_list[0].text
+    assert isinstance(result, str)
+    assert "Documentation not found" in result
+
+
+_FAKE_SAMPLE_FILES: dict[str, dict[str, str]] = {
+    "ball-bearing": {"main.kcl": "// ball-bearing\nradius = 10\n"},
+    "spur-gear": {"main.kcl": "// spur gear\nteeth = 24\n"},
+    "axial-fan": {
+        "main.kcl": 'import "parameters.kcl" as p\n',
+        "parameters.kcl": "blades = 5\n",
+        "fan.kcl": "// fan body\n",
+    },
+}
+
+_FAKE_SAMPLE_META: dict[str, tuple[str, str]] = {
+    "ball-bearing": ("Ball Bearing", "A rolling-element bearing."),
+    "spur-gear": ("Spur Gear", "A gear with straight teeth."),
+    "axial-fan": ("Axial Fan", "An axial-flow fan with multiple parts."),
+}
+
+
+def _build_fake_samples() -> KCLSamples:
+    samples = KCLSamples()
+    for name, (title, description) in _FAKE_SAMPLE_META.items():
+        files = _FAKE_SAMPLE_FILES[name]
+        samples.manifest[name] = SampleMetadata(
+            title=title,
+            description=description,
+            multipleFiles=len(files) > 1,
+        )
+        samples.file_index[name] = dict(files)
+    return samples
+
+
+@pytest_asyncio.fixture(scope="module")
+async def live_samples_index():
+    """Populate the samples index with synthetic data.
+
+    Fully offline. Parse and fetch behavior is covered by
+    ``tests/test_samples.py`` and ``tests/test_data_retrieval_utils.py``.
+    """
+    saved = KCLSamples._instance
+    KCLSamples._instance = _build_fake_samples()
+    try:
+        yield KCLSamples._instance
+    finally:
+        KCLSamples._instance = saved
+
+
+@pytest.mark.xdist_group(name="samples")
+@pytest.mark.asyncio
+async def test_list_kcl_samples(live_samples_index):
+    """Test that list_kcl_samples returns sample information."""
+    response = await mcp.call_tool("list_kcl_samples", arguments={})
+    inner_list = _content_list(response)
+    assert len(inner_list) > 0, "Should have samples in the list"
+
+    # Parse first result and check structure
+    first_result = json.loads(inner_list[0].text)
+    assert "name" in first_result
+    assert "title" in first_result
+    assert "description" in first_result
+    assert "multipleFiles" in first_result
+
+
+@pytest.mark.xdist_group(name="samples")
+@pytest.mark.asyncio
+async def test_search_kcl_samples_gear(live_samples_index):
+    """Test searching for 'gear' returns relevant results."""
+    response = await mcp.call_tool(
+        "search_kcl_samples", arguments={"query": "gear", "max_results": 5}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) > 0, "Should find results for 'gear'"
+
+    result = [json.loads(tc.text) for tc in inner_list]
+
+    # Check result structure
+    first_result = result[0]
+    assert "name" in first_result
+    assert "title" in first_result
+    assert "description" in first_result
+    assert "match_count" in first_result
+    assert "excerpt" in first_result
+
+    # Should find gear-related samples
+    all_text = " ".join([r["title"] + r["description"] for r in result]).lower()
+    assert "gear" in all_text, "Results should contain 'gear'"
+
+
+@pytest.mark.xdist_group(name="samples")
+@pytest.mark.asyncio
+async def test_search_kcl_samples_bearing(live_samples_index):
+    """Test searching for 'bearing' returns relevant results."""
+    response = await mcp.call_tool(
+        "search_kcl_samples", arguments={"query": "bearing", "max_results": 5}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) > 0, "Should find results for 'bearing'"
+
+    result = [json.loads(tc.text) for tc in inner_list]
+
+    # Should find bearing-related samples
+    names = [r["name"] for r in result]
+    assert any("bearing" in n for n in names), "Should find bearing samples"
+
+
+@pytest.mark.xdist_group(name="samples")
+@pytest.mark.asyncio
+async def test_search_kcl_samples_no_results(live_samples_index):
+    """Test that search_kcl_samples handles queries with no matches."""
+    response = await mcp.call_tool(
+        "search_kcl_samples",
+        arguments={"query": "xyznonexistentterm12345abc", "max_results": 5},
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 0, "Should find no results for gibberish query"
+
+
+@pytest.mark.xdist_group(name="samples")
+@pytest.mark.asyncio
+async def test_search_kcl_samples_empty_query(live_samples_index):
+    """Test that search_kcl_samples handles empty queries."""
+    response = await mcp.call_tool(
+        "search_kcl_samples", arguments={"query": "", "max_results": 5}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 1
+
+    result = json.loads(inner_list[0].text)
+    assert "error" in result
+
+
+@pytest.mark.xdist_group(name="samples")
+@pytest.mark.asyncio
+async def test_get_kcl_sample_single_file(live_samples_index):
+    """Test that get_kcl_sample retrieves a single-file sample."""
+    response = await mcp.call_tool(
+        "get_kcl_sample", arguments={"sample_name": "ball-bearing"}
+    )
+    result = _meta_result(response)
+
+    assert isinstance(result, dict)
+    assert result["name"] == "ball-bearing"
+    assert "title" in result
+    assert "description" in result
+    assert "files" in result
+    assert len(result["files"]) >= 1
+
+    # Check file structure
+    main_file = next((f for f in result["files"] if f["filename"] == "main.kcl"), None)
+    assert main_file is not None, "Should have main.kcl"
+    assert len(main_file["content"]) > 0, "Should have content"
+
+
+@pytest.mark.xdist_group(name="samples")
+@pytest.mark.asyncio
+async def test_get_kcl_sample_multi_file(live_samples_index):
+    """Test that get_kcl_sample retrieves a multi-file sample."""
+    response = await mcp.call_tool(
+        "get_kcl_sample", arguments={"sample_name": "axial-fan"}
+    )
+    result = _meta_result(response)
+
+    assert isinstance(result, dict)
+    assert result["name"] == "axial-fan"
+    assert result["multipleFiles"] is True
+    assert len(result["files"]) > 1, "Should have multiple files"
+
+    # Check expected files exist
+    filenames = [f["filename"] for f in result["files"]]
+    assert "main.kcl" in filenames
+    assert "parameters.kcl" in filenames or "fan.kcl" in filenames
+
+
+@pytest.mark.xdist_group(name="samples")
+@pytest.mark.asyncio
+async def test_get_kcl_sample_not_found(live_samples_index):
+    """Test that get_kcl_sample handles missing samples."""
+    response = await mcp.call_tool(
+        "get_kcl_sample", arguments={"sample_name": "nonexistent-sample-xyz"}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 1
+
+    result = inner_list[0].text
+    assert isinstance(result, str)
+    assert "Sample not found" in result
+
+
+@pytest.mark.xdist_group(name="samples")
+@pytest.mark.asyncio
+async def test_get_kcl_sample_path_traversal(live_samples_index):
+    """Test that get_kcl_sample rejects path traversal attempts."""
+    response = await mcp.call_tool(
+        "get_kcl_sample", arguments={"sample_name": "../../../etc/passwd"}
+    )
+    inner_list = _content_list(response)
+    assert len(inner_list) == 1
+
+    result = inner_list[0].text
+    assert isinstance(result, str)
+    assert "Sample not found" in result
 
 
 @pytest.mark.asyncio

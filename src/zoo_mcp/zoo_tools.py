@@ -291,9 +291,7 @@ class CameraView(Enum):
         )
 
     @staticmethod
-    def to_kittycad_camera(
-        view: dict[str, list[float]],
-    ) -> OptionDefaultCameraLookAt:
+    def to_kittycad_camera(view: dict[str, list[float]]) -> OptionDefaultCameraLookAt:
         return OptionDefaultCameraLookAt(
             up=Point3d(
                 x=view["up"][0],

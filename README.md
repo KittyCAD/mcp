@@ -54,6 +54,23 @@ from zoo_mcp.server import mcp
 mcp.run()
 ```
 
+Individual tools can be used in your own python code as well
+
+```python
+from mcp.server.fastmcp import FastMCP
+from zoo_mcp.zoo_tools import zoo_execute_kcl
+
+mcp = FastMCP(name="My Example Server")
+
+
+@mcp.tool()
+async def my_execute_kcl(kcl_code: str) -> tuple[bool, str]:
+    """
+    Example tool that uses the zoo_execute_kcl function from zoo_mcp.zoo_tools
+    """
+    return await zoo_execute_kcl(kcl_code=kcl_code)
+```
+
 The server can be integrated with [Claude desktop](https://claude.ai/download) using the following command
 ```bash 
 uv run mcp install src/zoo_mcp/server.py
