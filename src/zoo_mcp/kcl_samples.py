@@ -37,14 +37,26 @@ _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.kcl$")
 
 # Index entries look like:
 #   - [Title](/aquarium/<slug>) - <description> (<Categories>)
-# where the trailing categories chunk is optional. Description text may itself
-# contain parens (e.g. embedded URLs), so we strip the trailing ``(...)`` group
-# anchored at end-of-line in a separate pass.
+# The ``- <description>`` chunk and the trailing categories chunk are both
+# optional — if a future zoo.dev page lists a slug with no description we
+# still want to capture it. Description text may itself contain parens (e.g.
+# embedded URLs), so we strip the trailing ``(...)`` group anchored at
+# end-of-line in a separate pass.
 _INDEX_LINE_RE = re.compile(
     r"^- \[(?P<title>[^\]]+)\]"
     r"\(/aquarium/(?P<name>[A-Za-z0-9_-]+)\)"
-    r"\s*-\s*(?P<rest>.*)$"
+    r"(?:\s*-\s*(?P<rest>.*))?\s*$"
 )
+
+# Strips a trailing ``(Cat)`` or ``(Cat1, Cat2, ...)`` group from a
+# description. Each token must start with an uppercase letter and contain
+# only letters, so acronyms (``(API)``, ``(CAD)``) and ``(Manufacturing)``
+# are recognized but prose parentheticals (``(see foo)``,
+# ``(https://...)``) are deliberately left intact. Categories containing
+# digits (``(3D Models)``), hyphens (``(KCL-Std)``), or internal spaces
+# (``(Power Tools)``) will NOT be stripped and will leak into the
+# description verbatim — extend this pattern if zoo.dev introduces such
+# labels.
 _TRAILING_CATEGORIES_RE = re.compile(
     r"\s*\((?P<cats>[A-Z][A-Za-z]*(?:,\s*[A-Z][A-Za-z]*)*)\)\s*$"
 )
@@ -63,9 +75,12 @@ class SampleMetadata(TypedDict):
 
     title: str
     description: str
-    # multipleFiles starts False from the index (the index doesn't expose file
-    # counts) and is updated to the true value when ``get_sample_content``
-    # fetches the per-sample page.
+    # ``multipleFiles`` is best-effort: the /aquarium index doesn't expose
+    # file counts, so it starts ``False`` for every sample and is corrected
+    # in-place by ``get_sample_content`` once the per-sample page has been
+    # fetched and parsed. Callers reading this field from a list/search
+    # response should treat it as a hint and re-check via ``get_kcl_sample``
+    # if a reliable value is needed.
     multipleFiles: bool
 
 
@@ -128,7 +143,8 @@ def _parse_index_markdown(markdown: str) -> dict[str, SampleMetadata]:
             logger.warning(f"Rejected unsafe sample name from index: {name!r}")
             continue
 
-        rest = m.group("rest").strip()
+        raw_rest = m.group("rest")
+        rest = raw_rest.strip() if raw_rest else ""
         cats_match = _TRAILING_CATEGORIES_RE.search(rest)
         if cats_match:
             description = rest[: cats_match.start()].rstrip()
@@ -202,9 +218,15 @@ def list_available_samples() -> list[dict]:
     - name: The sample directory name (used to retrieve the sample)
     - title: Human-readable title
     - description: Brief description of the sample
-    - multipleFiles: Whether the sample contains multiple KCL files. The
-      index doesn't expose this, so it stays False until the sample's
-      per-sample page has been fetched at least once via get_kcl_sample.
+    - multipleFiles: Whether the sample contains multiple KCL files.
+
+    Note on ``multipleFiles``: the /aquarium index page does not expose
+    file counts, so this field is ``False`` for any sample whose per-sample
+    page has not yet been fetched. It becomes accurate only after
+    ``get_kcl_sample`` has been called for that sample (which caches the
+    parsed file list and updates the metadata in-place). Treat
+    ``multipleFiles`` as a best-effort hint here; call ``get_kcl_sample``
+    if you need a reliable answer.
 
     Use get_kcl_sample() with the name to retrieve the full sample content.
 
@@ -242,7 +264,10 @@ def search_samples(query: str, max_results: int = 5) -> list[dict]:
             - name: The sample directory name (used to retrieve the sample)
             - title: Human-readable title
             - description: Brief description of the sample
-            - multipleFiles: Whether the sample contains multiple KCL files
+            - multipleFiles: Whether the sample contains multiple KCL files.
+              Best-effort hint only — see ``list_available_samples`` for the
+              full caveat. Call ``get_kcl_sample`` if you need a reliable
+              answer.
             - match_count: Number of times the query appears in title/description
             - excerpt: A relevant excerpt with the match in context
     """

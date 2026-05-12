@@ -982,7 +982,11 @@ async def list_kcl_samples() -> list[dict] | str:
             - name: The sample directory name (use with get_kcl_sample)
             - title: Human-readable title
             - description: Brief description of what the sample creates
-            - multipleFiles: Whether the sample contains multiple KCL files
+            - multipleFiles: Whether the sample contains multiple KCL files.
+              Best-effort hint only. The /aquarium index doesn't expose file
+              counts, so this is ``False`` for any sample that has not yet
+              been fetched via get_kcl_sample. Call get_kcl_sample if you
+              need a reliable answer.
             If there was an error, returns an error message string.
     """
     logger.info("list_kcl_samples tool called")
@@ -1010,7 +1014,9 @@ async def search_kcl_samples(query: str, max_results: int = 5) -> list[dict] | s
             - name: The sample directory name (use with get_kcl_sample)
             - title: Human-readable title
             - description: Brief description of the sample
-            - multipleFiles: Whether the sample contains multiple KCL files
+            - multipleFiles: Whether the sample contains multiple KCL files.
+              Best-effort hint only — see list_kcl_samples for the full
+              caveat. Call get_kcl_sample if you need a reliable answer.
             - match_count: Number of times the query appears in title/description
             - excerpt: A relevant excerpt with the match in context
             If there was an error, returns an error message string.
@@ -1044,7 +1050,10 @@ async def get_kcl_sample(sample_name: str) -> SampleData | str:
             - name: The sample directory name
             - title: Human-readable title
             - description: Brief description
-            - multipleFiles: Whether the sample contains multiple files
+            - multipleFiles: Whether the sample contains multiple files.
+              Reliable here (unlike in list_kcl_samples / search_kcl_samples),
+              because this tool fetches the per-sample page and counts the
+              parsed files.
             - files: List of SampleFile dictionaries, each with 'filename' and 'content'
         Returns an error message string if the sample is not found. If there was an error, returns an error message string.
     """
