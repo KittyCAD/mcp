@@ -65,7 +65,6 @@ from kittycad.models.modeling_cmd import (
 )
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
-from pydantic import ValidationError
 
 from zoo_mcp import ZooMCPException, kittycad_client, logger
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
@@ -1956,11 +1955,12 @@ async def zoo_snapshot_of_kcl(
     return resize_image(jpeg_contents_list[0], max_image_dimension)
 
 
-def zoo_list_org_datasets() -> list[dict[str, str]]:
+def zoo_list_org_datasets() -> list[dict[str, str | None]]:
     """List all datasets visible to the org tied to the current ZOO_API_TOKEN.
 
     Returns:
-        A list of {"id": <uuid str>, "name": <str>} entries, possibly empty.
+        A list of {"id": <uuid str>, "name": <str>, "description": <str | None>}
+        entries, possibly empty.
     """
     logger.info("Listing org datasets")
     try:
@@ -1971,38 +1971,11 @@ def zoo_list_org_datasets() -> list[dict[str, str]]:
         if exc.status_code == 404:
             return []
         raise ZooMCPException(f"Failed to list org datasets: {exc}") from exc
-    except ValidationError:
-        # The kittycad SDK's OrgDataset model rejects fields the backend has
-        # since added (e.g. `description`). Fall back to the raw endpoint and
-        # extract only the fields we need.
-        return _list_org_datasets_raw()
 
-    return [{"id": str(d.id), "name": d.name} for d in datasets]
-
-
-def _list_org_datasets_raw() -> list[dict[str, str]]:
-    """Fetch org datasets directly via HTTP, bypassing the SDK's strict models."""
-    http = kittycad_client.get_http_client()
-    results: list[dict[str, str]] = []
-    url: str | None = f"{kittycad_client.base_url}/org/datasets"
-    while url:
-        response = http.get(url, headers=kittycad_client.get_headers())
-        if response.status_code == 404:
-            return []
-        if not response.is_success:
-            raise ZooMCPException(
-                f"Failed to list org datasets: HTTP {response.status_code} {response.text}"
-            )
-        payload = response.json()
-        for item in payload.get("items", []):
-            results.append({"id": str(item["id"]), "name": item["name"]})
-        next_token = payload.get("next_page")
-        url = (
-            f"{kittycad_client.base_url}/org/datasets?page_token={next_token}"
-            if next_token
-            else None
-        )
-    return results
+    return [
+        {"id": str(d.id), "name": d.name, "description": d.description}
+        for d in datasets
+    ]
 
 
 def zoo_search_org_dataset_semantic(
