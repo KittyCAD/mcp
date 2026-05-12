@@ -3,8 +3,9 @@
 This module fetches the KCL samples index from zoo.dev and provides search
 functionality for LLMs. The index is loaded lazily — server.py kicks off the
 fetch in the background when the MCP server's lifespan starts, and tools
-``await KCLSamples.initialize()`` (idempotent) before serving so the first
-call also bootstraps if the lifespan hook hasn't run yet.
+``await KCLSamples.initialize()`` before serving so the first call also
+bootstraps if the lifespan hook hasn't run yet. Repeat calls are no-ops once
+the index is loaded.
 
 Both the index page (``/aquarium``) and per-sample pages
 (``/aquarium/<sample>``) are requested with ``Accept: text/markdown``.
@@ -104,7 +105,7 @@ class KCLSamples:
 
     @classmethod
     async def initialize(cls) -> None:
-        """Initialize the samples index from zoo.dev (idempotent, race-safe)."""
+        """Initialize the samples index from zoo.dev. Repeat and concurrent calls are safe."""
         if cls._instance is not None:
             return
         if cls._init_lock is None:

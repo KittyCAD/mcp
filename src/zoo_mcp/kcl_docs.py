@@ -3,8 +3,9 @@
 This module fetches KCL documentation from zoo.dev and provides search
 functionality for LLMs. The index is loaded lazily — server.py kicks off the
 fetch in the background when the MCP server's lifespan starts, and tools
-``await KCLDocs.initialize()`` (idempotent) before serving so the first call
-also bootstraps if the lifespan hook hasn't run yet.
+``await KCLDocs.initialize()`` before serving so the first call also
+bootstraps if the lifespan hook hasn't run yet. Repeat calls are no-ops once
+the index is loaded.
 
 Pages are requested with ``Accept: text/markdown`` so we get clean markdown
 rather than rendered HTML.
@@ -76,7 +77,7 @@ class KCLDocs:
 
     @classmethod
     async def initialize(cls) -> None:
-        """Initialize the docs index from zoo.dev (idempotent, race-safe)."""
+        """Initialize the docs index from zoo.dev. Repeat and concurrent calls are safe."""
         if cls._instance is not None:
             return
         if cls._init_lock is None:
