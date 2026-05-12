@@ -50,10 +50,10 @@ from zoo_mcp.zoo_tools import (
 )
 
 
-async def _init_kcl_caches() -> None:
-    """Populate the KCL docs and samples caches from zoo.dev concurrently.
+async def _init_kcl_indexes() -> None:
+    """Populate the KCL docs and samples indexes from zoo.dev concurrently.
 
-    Each cache is initialized independently — a failure in one does not
+    Each index is initialized independently — a failure in one does not
     prevent the other from succeeding.
     """
 
@@ -61,7 +61,7 @@ async def _init_kcl_caches() -> None:
         try:
             await coro
         except Exception as e:
-            logger.warning(f"Failed to initialize {label} cache: {e}")
+            logger.warning(f"Failed to initialize {label} index: {e}")
 
     await asyncio.gather(
         _safe(KCLDocs.initialize(), "KCL docs"),
@@ -69,37 +69,37 @@ async def _init_kcl_caches() -> None:
     )
 
 
-_kcl_cache_task: asyncio.Task[None] | None = None
+_kcl_index_task: asyncio.Task[None] | None = None
 
 
-async def _ensure_kcl_caches() -> None:
-    """Ensure KCL caches are initialized, kicking off the fetch on first call.
+async def _ensure_kcl_indexes() -> None:
+    """Ensure KCL indexes are initialized, kicking off the fetch on first call.
 
     Subsequent calls await the same in-flight task, so initialization
     runs at most once per process.
     """
-    global _kcl_cache_task
-    if _kcl_cache_task is None:
-        _kcl_cache_task = asyncio.create_task(_init_kcl_caches())
-    await _kcl_cache_task
+    global _kcl_index_task
+    if _kcl_index_task is None:
+        _kcl_index_task = asyncio.create_task(_init_kcl_indexes())
+    await _kcl_index_task
 
 
 @asynccontextmanager
 async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
-    """Eagerly start cache population when the server starts.
+    """Eagerly start index population when the server starts.
 
-    Tools still ``await _ensure_kcl_caches()`` so they wait for completion
+    Tools still ``await _ensure_kcl_indexes()`` so they wait for completion
     if invoked before the background fetch finishes.
     """
-    global _kcl_cache_task
-    if _kcl_cache_task is None:
-        _kcl_cache_task = asyncio.create_task(_init_kcl_caches())
+    global _kcl_index_task
+    if _kcl_index_task is None:
+        _kcl_index_task = asyncio.create_task(_init_kcl_indexes())
     try:
         yield
     finally:
-        if _kcl_cache_task is not None and not _kcl_cache_task.done():
-            _kcl_cache_task.cancel()
-        _kcl_cache_task = None
+        if _kcl_index_task is not None and not _kcl_index_task.done():
+            _kcl_index_task.cancel()
+        _kcl_index_task = None
         KCLDocs._instance = None
         KCLSamples._instance = None
 
@@ -906,7 +906,7 @@ async def list_kcl_docs() -> dict | str:
     """
     logger.info("list_kcl_docs tool called")
     try:
-        await _ensure_kcl_caches()
+        await _ensure_kcl_indexes()
         return list_available_docs()
     except Exception as e:
         logger.error("list_kcl_docs tool called with error: %s", e)
@@ -934,7 +934,7 @@ async def search_kcl_docs(query: str, max_results: int = 5) -> list[dict] | str:
     """
     logger.info("search_kcl_docs tool called with query: %s", query)
     try:
-        await _ensure_kcl_caches()
+        await _ensure_kcl_indexes()
         return search_docs(query, max_results)
     except Exception as e:
         logger.error("search_kcl_docs tool called with error: %s", e)
@@ -959,7 +959,7 @@ async def get_kcl_doc(doc_path: str) -> str:
     """
     logger.info("get_kcl_doc tool called for path: %s", doc_path)
     try:
-        await _ensure_kcl_caches()
+        await _ensure_kcl_indexes()
         content = get_doc_content(doc_path)
         if content is None:
             return f"Documentation not found: {doc_path}. Use list_kcl_docs() to see available paths."
@@ -987,7 +987,7 @@ async def list_kcl_samples() -> list[dict] | str:
     """
     logger.info("list_kcl_samples tool called")
     try:
-        await _ensure_kcl_caches()
+        await _ensure_kcl_indexes()
         return list_available_samples()
     except Exception as e:
         logger.error("list_kcl_samples tool called with error: %s", e)
@@ -1017,7 +1017,7 @@ async def search_kcl_samples(query: str, max_results: int = 5) -> list[dict] | s
     """
     logger.info("search_kcl_samples tool called with query: %s", query)
     try:
-        await _ensure_kcl_caches()
+        await _ensure_kcl_indexes()
         return search_samples(query, max_results)
     except Exception as e:
         logger.error("search_kcl_samples tool called with error: %s", e)
@@ -1050,7 +1050,7 @@ async def get_kcl_sample(sample_name: str) -> SampleData | str:
     """
     logger.info("get_kcl_sample tool called for sample: %s", sample_name)
     try:
-        await _ensure_kcl_caches()
+        await _ensure_kcl_indexes()
         sample = await get_sample_content(sample_name)
         if sample is None:
             return f"Sample not found: {sample_name}. Use list_kcl_samples() to see available samples."

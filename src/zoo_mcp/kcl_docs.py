@@ -1,7 +1,7 @@
 """KCL Documentation fetching and search.
 
 This module fetches KCL documentation from zoo.dev and provides search
-functionality for LLMs. The cache is loaded lazily — server.py kicks off the
+functionality for LLMs. The index is loaded lazily — server.py kicks off the
 fetch in the background when the MCP server's lifespan starts, and tools
 ``await KCLDocs.initialize()`` (idempotent) before serving so the first call
 also bootstraps if the lifespan hook hasn't run yet.
@@ -71,12 +71,12 @@ class KCLDocs:
 
     @classmethod
     def get(cls) -> "KCLDocs":
-        """Get the cached docs instance, or empty cache if not initialized."""
+        """Get the docs index, or an empty one if not initialized."""
         return cls._instance if cls._instance is not None else cls()
 
     @classmethod
     async def initialize(cls) -> None:
-        """Initialize the docs cache from zoo.dev (idempotent, race-safe)."""
+        """Initialize the docs index from zoo.dev (idempotent, race-safe)."""
         if cls._instance is not None:
             return
         if cls._init_lock is None:
@@ -184,12 +184,12 @@ async def _fetch_docs_from_zoo_dev() -> KCLDocs:
     for category in docs.index:
         docs.index[category].sort()
 
-    logger.info(f"KCL documentation cache initialized with {len(docs.docs)} files")
+    logger.info(f"KCL documentation index initialized with {len(docs.docs)} files")
     return docs
 
 
-async def initialize_docs_cache() -> None:
-    """Initialize the docs cache from zoo.dev."""
+async def initialize_docs_index() -> None:
+    """Initialize the docs index from zoo.dev."""
     await KCLDocs.initialize()
 
 

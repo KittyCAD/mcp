@@ -91,20 +91,20 @@ class KCLSamples:
 
     # Sample metadata indexed by sample directory name
     manifest: dict[str, SampleMetadata] = field(default_factory=dict)
-    # Cached file contents: sample_name -> filename -> content
-    file_cache: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Parsed file contents indexed by sample name -> filename -> content
+    file_index: dict[str, dict[str, str]] = field(default_factory=dict)
 
     _instance: ClassVar["KCLSamples | None"] = None
     _init_lock: ClassVar[asyncio.Lock | None] = None
 
     @classmethod
     def get(cls) -> "KCLSamples":
-        """Get the cached samples instance, or empty cache if not initialized."""
+        """Get the samples index, or an empty one if not initialized."""
         return cls._instance if cls._instance is not None else cls()
 
     @classmethod
     async def initialize(cls) -> None:
-        """Initialize the samples cache from zoo.dev (idempotent, race-safe)."""
+        """Initialize the samples index from zoo.dev (idempotent, race-safe)."""
         if cls._instance is not None:
             return
         if cls._init_lock is None:
@@ -189,8 +189,8 @@ async def _fetch_index_from_zoo_dev() -> KCLSamples:
     return samples
 
 
-async def initialize_samples_cache() -> None:
-    """Initialize the samples cache from zoo.dev."""
+async def initialize_samples_index() -> None:
+    """Initialize the samples index from zoo.dev."""
     await KCLSamples.initialize()
 
 
@@ -315,8 +315,8 @@ async def get_sample_content(sample_name: str) -> SampleData | None:
     if metadata is None:
         return None
 
-    if sample_name in samples.file_cache:
-        file_contents = samples.file_cache[sample_name]
+    if sample_name in samples.file_index:
+        file_contents = samples.file_index[sample_name]
     else:
         async with httpx.AsyncClient(timeout=30.0) as client:
             file_contents = await _fetch_sample_files(client, sample_name)
@@ -324,7 +324,7 @@ async def get_sample_content(sample_name: str) -> SampleData | None:
         if not file_contents:
             return None
 
-        samples.file_cache[sample_name] = file_contents
+        samples.file_index[sample_name] = file_contents
         # The index doesn't tell us file counts; record the real value now
         # that we've parsed the per-sample page.
         metadata["multipleFiles"] = len(file_contents) > 1

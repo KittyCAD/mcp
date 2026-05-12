@@ -1026,8 +1026,8 @@ def _build_fake_docs() -> KCLDocs:
 
 
 @pytest_asyncio.fixture(scope="module")
-async def live_docs_cache():
-    """Populate the docs cache with synthetic data.
+async def live_docs_index():
+    """Populate the docs index with synthetic data.
 
     Fully offline: avoids hitting zoo.dev. The fetch and parse pipeline is
     covered by ``tests/test_docs.py`` and ``tests/test_data_retrieval_utils.py``.
@@ -1042,7 +1042,7 @@ async def live_docs_cache():
 
 @pytest.mark.xdist_group(name="docs")
 @pytest.mark.asyncio
-async def test_list_kcl_docs(live_docs_cache):
+async def test_list_kcl_docs(live_docs_index):
     """Test that list_kcl_docs returns categorized documentation."""
     response = await mcp.call_tool("list_kcl_docs", arguments={})
     inner_list = _content_list(response)
@@ -1066,7 +1066,7 @@ async def test_list_kcl_docs(live_docs_cache):
 
 @pytest.mark.xdist_group(name="docs")
 @pytest.mark.asyncio
-async def test_search_kcl_docs(live_docs_cache):
+async def test_search_kcl_docs(live_docs_index):
     """Test that search_kcl_docs returns relevant excerpts for 'extrude'."""
     response = await mcp.call_tool(
         "search_kcl_docs", arguments={"query": "extrude", "max_results": 5}
@@ -1094,7 +1094,7 @@ async def test_search_kcl_docs(live_docs_cache):
 
 @pytest.mark.xdist_group(name="docs")
 @pytest.mark.asyncio
-async def test_search_kcl_docs_sketch(live_docs_cache):
+async def test_search_kcl_docs_sketch(live_docs_index):
     """Test searching for 'sketch' returns relevant results."""
     response = await mcp.call_tool(
         "search_kcl_docs", arguments={"query": "sketch", "max_results": 10}
@@ -1111,7 +1111,7 @@ async def test_search_kcl_docs_sketch(live_docs_cache):
 
 @pytest.mark.xdist_group(name="docs")
 @pytest.mark.asyncio
-async def test_search_kcl_docs_no_results(live_docs_cache):
+async def test_search_kcl_docs_no_results(live_docs_index):
     """Test that search_kcl_docs handles queries with no matches."""
     response = await mcp.call_tool(
         "search_kcl_docs",
@@ -1123,7 +1123,7 @@ async def test_search_kcl_docs_no_results(live_docs_cache):
 
 @pytest.mark.xdist_group(name="docs")
 @pytest.mark.asyncio
-async def test_search_kcl_docs_empty_query(live_docs_cache):
+async def test_search_kcl_docs_empty_query(live_docs_index):
     """Test that search_kcl_docs handles empty queries."""
     response = await mcp.call_tool(
         "search_kcl_docs", arguments={"query": "", "max_results": 5}
@@ -1137,7 +1137,7 @@ async def test_search_kcl_docs_empty_query(live_docs_cache):
 
 @pytest.mark.xdist_group(name="docs")
 @pytest.mark.asyncio
-async def test_get_kcl_doc_functions(live_docs_cache):
+async def test_get_kcl_doc_functions(live_docs_index):
     """Test that get_kcl_doc retrieves the functions documentation."""
     response = await mcp.call_tool(
         "get_kcl_doc", arguments={"doc_path": "docs/kcl-lang/functions"}
@@ -1154,7 +1154,7 @@ async def test_get_kcl_doc_functions(live_docs_cache):
 
 @pytest.mark.xdist_group(name="docs")
 @pytest.mark.asyncio
-async def test_get_kcl_doc_extrude(live_docs_cache):
+async def test_get_kcl_doc_extrude(live_docs_index):
     """Test that get_kcl_doc retrieves the extrude function documentation."""
     response = await mcp.call_tool(
         "get_kcl_doc",
@@ -1170,7 +1170,7 @@ async def test_get_kcl_doc_extrude(live_docs_cache):
 
 @pytest.mark.xdist_group(name="docs")
 @pytest.mark.asyncio
-async def test_get_kcl_doc_not_found(live_docs_cache):
+async def test_get_kcl_doc_not_found(live_docs_index):
     """Test that get_kcl_doc handles missing documentation."""
     response = await mcp.call_tool(
         "get_kcl_doc", arguments={"doc_path": "docs/nonexistent/fake"}
@@ -1185,7 +1185,7 @@ async def test_get_kcl_doc_not_found(live_docs_cache):
 
 @pytest.mark.xdist_group(name="docs")
 @pytest.mark.asyncio
-async def test_get_kcl_doc_path_traversal(live_docs_cache):
+async def test_get_kcl_doc_path_traversal(live_docs_index):
     """Test that get_kcl_doc rejects path traversal attempts."""
     response = await mcp.call_tool(
         "get_kcl_doc", arguments={"doc_path": "../../../etc/passwd"}
@@ -1224,13 +1224,13 @@ def _build_fake_samples() -> KCLSamples:
             description=description,
             multipleFiles=len(files) > 1,
         )
-        samples.file_cache[name] = dict(files)
+        samples.file_index[name] = dict(files)
     return samples
 
 
 @pytest_asyncio.fixture(scope="module")
-async def live_samples_cache():
-    """Populate the samples cache with synthetic data.
+async def live_samples_index():
+    """Populate the samples index with synthetic data.
 
     Fully offline. Parse and fetch behavior is covered by
     ``tests/test_samples.py`` and ``tests/test_data_retrieval_utils.py``.
@@ -1245,7 +1245,7 @@ async def live_samples_cache():
 
 @pytest.mark.xdist_group(name="samples")
 @pytest.mark.asyncio
-async def test_list_kcl_samples(live_samples_cache):
+async def test_list_kcl_samples(live_samples_index):
     """Test that list_kcl_samples returns sample information."""
     response = await mcp.call_tool("list_kcl_samples", arguments={})
     inner_list = _content_list(response)
@@ -1261,7 +1261,7 @@ async def test_list_kcl_samples(live_samples_cache):
 
 @pytest.mark.xdist_group(name="samples")
 @pytest.mark.asyncio
-async def test_search_kcl_samples_gear(live_samples_cache):
+async def test_search_kcl_samples_gear(live_samples_index):
     """Test searching for 'gear' returns relevant results."""
     response = await mcp.call_tool(
         "search_kcl_samples", arguments={"query": "gear", "max_results": 5}
@@ -1286,7 +1286,7 @@ async def test_search_kcl_samples_gear(live_samples_cache):
 
 @pytest.mark.xdist_group(name="samples")
 @pytest.mark.asyncio
-async def test_search_kcl_samples_bearing(live_samples_cache):
+async def test_search_kcl_samples_bearing(live_samples_index):
     """Test searching for 'bearing' returns relevant results."""
     response = await mcp.call_tool(
         "search_kcl_samples", arguments={"query": "bearing", "max_results": 5}
@@ -1303,7 +1303,7 @@ async def test_search_kcl_samples_bearing(live_samples_cache):
 
 @pytest.mark.xdist_group(name="samples")
 @pytest.mark.asyncio
-async def test_search_kcl_samples_no_results(live_samples_cache):
+async def test_search_kcl_samples_no_results(live_samples_index):
     """Test that search_kcl_samples handles queries with no matches."""
     response = await mcp.call_tool(
         "search_kcl_samples",
@@ -1315,7 +1315,7 @@ async def test_search_kcl_samples_no_results(live_samples_cache):
 
 @pytest.mark.xdist_group(name="samples")
 @pytest.mark.asyncio
-async def test_search_kcl_samples_empty_query(live_samples_cache):
+async def test_search_kcl_samples_empty_query(live_samples_index):
     """Test that search_kcl_samples handles empty queries."""
     response = await mcp.call_tool(
         "search_kcl_samples", arguments={"query": "", "max_results": 5}
@@ -1329,7 +1329,7 @@ async def test_search_kcl_samples_empty_query(live_samples_cache):
 
 @pytest.mark.xdist_group(name="samples")
 @pytest.mark.asyncio
-async def test_get_kcl_sample_single_file(live_samples_cache):
+async def test_get_kcl_sample_single_file(live_samples_index):
     """Test that get_kcl_sample retrieves a single-file sample."""
     response = await mcp.call_tool(
         "get_kcl_sample", arguments={"sample_name": "ball-bearing"}
@@ -1351,7 +1351,7 @@ async def test_get_kcl_sample_single_file(live_samples_cache):
 
 @pytest.mark.xdist_group(name="samples")
 @pytest.mark.asyncio
-async def test_get_kcl_sample_multi_file(live_samples_cache):
+async def test_get_kcl_sample_multi_file(live_samples_index):
     """Test that get_kcl_sample retrieves a multi-file sample."""
     response = await mcp.call_tool(
         "get_kcl_sample", arguments={"sample_name": "axial-fan"}
@@ -1371,7 +1371,7 @@ async def test_get_kcl_sample_multi_file(live_samples_cache):
 
 @pytest.mark.xdist_group(name="samples")
 @pytest.mark.asyncio
-async def test_get_kcl_sample_not_found(live_samples_cache):
+async def test_get_kcl_sample_not_found(live_samples_index):
     """Test that get_kcl_sample handles missing samples."""
     response = await mcp.call_tool(
         "get_kcl_sample", arguments={"sample_name": "nonexistent-sample-xyz"}
@@ -1386,7 +1386,7 @@ async def test_get_kcl_sample_not_found(live_samples_cache):
 
 @pytest.mark.xdist_group(name="samples")
 @pytest.mark.asyncio
-async def test_get_kcl_sample_path_traversal(live_samples_cache):
+async def test_get_kcl_sample_path_traversal(live_samples_index):
     """Test that get_kcl_sample rejects path traversal attempts."""
     response = await mcp.call_tool(
         "get_kcl_sample", arguments={"sample_name": "../../../etc/passwd"}

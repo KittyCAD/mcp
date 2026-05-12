@@ -38,7 +38,7 @@ def _meta_result(response: Sequence[Any] | dict[str, Any]) -> Any:
 
 @pytest_asyncio.fixture(scope="module")
 async def real_docs():
-    """Fetch the docs cache from zoo.dev once for the module."""
+    """Fetch the docs index from zoo.dev once for the module."""
     saved = KCLDocs._instance
     KCLDocs._instance = None
     try:
