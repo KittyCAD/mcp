@@ -28,9 +28,7 @@ def test_categorize_doc_path():
         kcl_docs._categorize_doc_path("docs/kcl-std/functions/std-sketch-extrude")
         == "kcl-std-functions"
     )
-    assert (
-        kcl_docs._categorize_doc_path("docs/kcl-std/types/Sketch") == "kcl-std-types"
-    )
+    assert kcl_docs._categorize_doc_path("docs/kcl-std/types/Sketch") == "kcl-std-types"
     assert kcl_docs._categorize_doc_path("docs/kcl-std/consts/PI") == "kcl-std-consts"
     assert (
         kcl_docs._categorize_doc_path("docs/kcl-std/modules/math") == "kcl-std-modules"
