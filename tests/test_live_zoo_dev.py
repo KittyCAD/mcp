@@ -18,6 +18,7 @@ from mcp.types import TextContent
 from zoo_mcp.kcl_docs import KCLDocs
 from zoo_mcp.kcl_samples import KCLSamples
 from zoo_mcp.server import mcp
+from zoo_mcp.utils.data_retrieval_utils import ZOO_BASE_URL
 
 pytestmark = [pytest.mark.live, pytest.mark.asyncio]
 
@@ -45,7 +46,7 @@ async def real_docs():
         await KCLDocs.initialize()
         assert KCLDocs._instance is not None
         assert len(KCLDocs._instance.docs) > 0, (
-            "zoo.dev returned no docs — sitemap or markdown shape likely changed"
+            f"{ZOO_BASE_URL} returned no docs — sitemap or markdown shape likely changed"
         )
         yield KCLDocs._instance
     finally:
@@ -61,7 +62,7 @@ async def real_samples():
         await KCLSamples.initialize()
         assert KCLSamples._instance is not None
         assert len(KCLSamples._instance.manifest) > 0, (
-            "zoo.dev returned no samples — /aquarium markdown shape likely changed"
+            f"{ZOO_BASE_URL} returned no samples — /aquarium markdown shape likely changed"
         )
         yield KCLSamples._instance
     finally:

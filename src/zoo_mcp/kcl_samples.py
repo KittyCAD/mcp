@@ -176,7 +176,7 @@ async def _fetch_index_from_zoo_dev() -> KCLSamples:
     """Fetch the samples index from zoo.dev and return a KCLSamples instance."""
     samples = KCLSamples()
 
-    logger.info("Fetching KCL samples index from zoo.dev...")
+    logger.info(f"Fetching KCL samples index from {ZOO_BASE_URL}...")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         markdown = await fetch_markdown(client, _AQUARIUM_BASE_URL, "/aquarium")

@@ -120,7 +120,7 @@ async def _discover_doc_paths(client: httpx.AsyncClient) -> list[str]:
         response.raise_for_status()
         index_root = ET.fromstring(response.text)
     except (httpx.HTTPError, ET.ParseError) as e:
-        logger.warning(f"Failed to fetch zoo.dev sitemap index: {e}")
+        logger.warning(f"Failed to fetch sitemap index from {ZOO_BASE_URL}: {e}")
         return []
 
     child_urls: list[str] = []
@@ -155,7 +155,7 @@ async def _fetch_docs_from_zoo_dev() -> KCLDocs:
     """Fetch all KCL docs from zoo.dev."""
     docs = KCLDocs()
 
-    logger.info("Fetching KCL documentation from zoo.dev...")
+    logger.info(f"Fetching KCL documentation from {ZOO_BASE_URL}...")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         doc_paths = await _discover_doc_paths(client)
