@@ -27,6 +27,29 @@ def test_parse_index_markdown_basic():
     assert parsed["ball-bearing"]["description"] == "A rolling-element bearing"
 
 
+def test_parse_index_markdown_handles_missing_description():
+    """Entries without a ``- description`` chunk are still captured."""
+    markdown = "- [Bare Slug](/aquarium/bare-slug)\n"
+
+    parsed = kcl_samples._parse_index_markdown(markdown)
+
+    assert parsed["bare-slug"]["title"] == "Bare Slug"
+    assert parsed["bare-slug"]["description"] == ""
+
+
+def test_parse_index_markdown_strips_acronym_categories():
+    """All-caps acronym categories like ``(API)`` / ``(CAD)`` are stripped."""
+    markdown = (
+        "- [Widget](/aquarium/widget) - A widget (API, CAD)\n"
+        "- [Gizmo](/aquarium/gizmo) - A gizmo (CNC)\n"
+    )
+
+    parsed = kcl_samples._parse_index_markdown(markdown)
+
+    assert parsed["widget"]["description"] == "A widget"
+    assert parsed["gizmo"]["description"] == "A gizmo"
+
+
 def test_parse_index_markdown_keeps_url_parens_in_description():
     """Trailing ``(...)`` is only stripped when it looks like categories."""
     markdown = (
