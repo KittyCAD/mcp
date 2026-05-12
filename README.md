@@ -58,17 +58,17 @@ Individual tools can be used in your own python code as well
 
 ```python
 from mcp.server.fastmcp import FastMCP
-from zoo_mcp.ai_tools import text_to_cad
+from zoo_mcp.zoo_tools import zoo_execute_kcl
 
 mcp = FastMCP(name="My Example Server")
 
 
 @mcp.tool()
-async def my_text_text_to_cad(prompt: str) -> str:
+async def my_execute_kcl(kcl_code: str) -> tuple[bool, str]:
     """
-    Example tool that uses the text_to_cad function from zoo_mcp.tools
+    Example tool that uses the zoo_execute_kcl function from zoo_mcp.zoo_tools
     """
-    return await text_to_cad(prompt=prompt)
+    return await zoo_execute_kcl(kcl_code=kcl_code)
 ```
 
 The server can be integrated with [Claude desktop](https://claude.ai/download) using the following command
