@@ -6,12 +6,12 @@
     "url": "https://github.com/KittyCAD/mcp",
     "source": "github"
   },
-  "version": "0.15.1",
+  "version": "0.15.2",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "zoo_mcp",
-      "version": "0.15.1",
+      "version": "0.15.2",
       "transport": {
         "type": "stdio"
       },
