@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "zoo_mcp"
-version = "0.15.1"
+version = "0.15.2"
 requires-python = ">=3.11, <3.14"
 dependencies = [
     "aiofiles<26.0",
@@ -13,7 +13,7 @@ dependencies = [
     "pillow<13.0",
     "trimesh<5.0",
     "truststore<1.0",
-    "zoo-kcl==0.3.155",
+    "zoo-kcl==0.3.156",
 ]
 authors = [
     { name = "Ryan Barton", email = "ryan@zoo.dev" },
