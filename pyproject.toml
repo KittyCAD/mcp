@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "zoo_mcp"
-version = "0.15.2"
+version = "0.15.3"
 requires-python = ">=3.11, <3.14"
 dependencies = [
     "aiofiles<26.0",
