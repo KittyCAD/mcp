@@ -21,7 +21,7 @@ from typing import ClassVar, TypedDict
 
 import httpx
 
-from zoo_mcp import logger
+from zoo_mcp import ctx, logger
 from zoo_mcp.utils.data_retrieval_utils import (
     ZOO_BASE_URL,
     extract_excerpt,
@@ -195,7 +195,7 @@ async def _fetch_index_from_zoo_dev() -> KCLSamples:
 
     logger.info(f"Fetching KCL samples index from {ZOO_BASE_URL}...")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, verify=ctx) as client:
         markdown = await fetch_markdown(client, _AQUARIUM_BASE_URL, "/aquarium")
         if markdown is None:
             return samples
@@ -344,7 +344,7 @@ async def get_sample_content(sample_name: str) -> SampleData | None:
     if sample_name in samples.file_index:
         file_contents = samples.file_index[sample_name]
     else:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=ctx) as client:
             file_contents = await _fetch_sample_files(client, sample_name)
 
         if not file_contents:
