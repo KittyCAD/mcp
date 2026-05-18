@@ -21,7 +21,7 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 
-from zoo_mcp import logger
+from zoo_mcp import ctx, logger
 from zoo_mcp.utils.data_retrieval_utils import (
     ZOO_BASE_URL,
     ZOO_SITEMAP_URL,
@@ -158,7 +158,7 @@ async def _fetch_docs_from_zoo_dev() -> KCLDocs:
 
     logger.info(f"Fetching KCL documentation from {ZOO_BASE_URL}...")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, verify=ctx) as client:
         doc_paths = await _discover_doc_paths(client)
         if not doc_paths:
             return docs
