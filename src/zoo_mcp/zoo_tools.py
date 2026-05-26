@@ -508,7 +508,7 @@ async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
 
     Args:
         file_path (Path | str): The path to the file. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-        unit_vol (str): The unit volume to return. This should be one of 'cm3', 'ft3', 'in3', 'm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
+        unit_vol (str): The unit volume to return. This should be one of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
 
     Returns:
         float: If the volume of the file can be calculated, return the volume in the requested unit
@@ -565,7 +565,7 @@ async def zoo_calculate_cad_physical_properties(
         unit_density (str): The unit of density for the material. One of 'lb:ft3', 'kg:m3'.
         density (float): The density of the material.
         unit_area (str): The unit of area for surface area. One of 'cm2', 'dm2', 'ft2', 'in2', 'km2', 'm2', 'mm2', 'yd2'.
-        unit_vol (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
+        unit_vol (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
 
     Returns:
         dict: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass', and 'bounding_box'.
@@ -668,7 +668,7 @@ async def zoo_calculate_kcl_physical_properties(
         unit_density (str): The unit of density for the material. One of 'lb:ft3', 'kg:m3'.
         density (float): The density of the material.
         unit_area (str): The unit of area for surface area. One of 'cm2', 'dm2', 'ft2', 'in2', 'km2', 'm2', 'mm2', 'yd2'.
-        unit_vol (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
+        unit_vol (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
 
     Returns:
         dict: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass', and 'bounding_box'.
