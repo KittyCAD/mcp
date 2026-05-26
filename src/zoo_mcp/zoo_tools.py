@@ -90,8 +90,8 @@ UNIT_AREA_MAP: dict[str, kcl.UnitArea] = {
 }
 
 UNIT_VOLUME_MAP: dict[str, kcl.UnitVolume] = {
-    "mm3": kcl.UnitVolume.CubicMillimeters,
     "cm3": kcl.UnitVolume.CubicCentimeters,
+    "mm3": kcl.UnitVolume.CubicMillimeters,
     "ft3": kcl.UnitVolume.CubicFeet,
     "in3": kcl.UnitVolume.CubicInches,
     "m3": kcl.UnitVolume.CubicMeters,
