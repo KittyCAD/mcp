@@ -1,4 +1,5 @@
 import io
+from collections.abc import Awaitable, Callable
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
@@ -198,6 +199,66 @@ def _check_kcl_code_or_path(
     if not kcl_code and not kcl_path:
         logger.error("Neither code nor kcl_path provided")
         raise ZooMCPException("Neither code nor kcl_path provided")
+
+
+# KCL engine connections can hang up transiently. The kcl bindings flag such
+# errors via ``KclError.is_retryable()`` so callers can retry them. Mirror the
+# retry behavior the bindings' own tests use.
+MAX_EXECUTION_ATTEMPTS = 3
+
+_KclCoro = Callable[..., Awaitable[_T]]
+
+
+async def _execute_with_retries(
+    async_fn: _KclCoro[_T], *args: object, **kwargs: object
+) -> _T:
+    """Await a KCL execution coroutine, retrying on retryable engine errors.
+
+    The kcl bindings raise ``kcl.KclError`` for execution failures and expose
+    ``is_retryable()`` so transient errors (e.g. an engine hangup) can be
+    retried instead of bubbling up. Non-retryable errors are re-raised
+    immediately.
+
+    Args:
+        async_fn: The kcl coroutine function to call (e.g. ``kcl.execute_code``).
+        *args: Positional arguments forwarded to ``async_fn``.
+        **kwargs: Keyword arguments forwarded to ``async_fn``.
+
+    Returns:
+        Whatever ``async_fn`` returns on success.
+    """
+    retries_remaining = MAX_EXECUTION_ATTEMPTS - 1
+    while True:
+        try:
+            return await async_fn(*args, **kwargs)
+        except Exception as error:
+            is_retryable = getattr(error, "is_retryable", None)
+            if retries_remaining > 0 and callable(is_retryable) and is_retryable():
+                logger.warning(
+                    "Retryable KCL execution error, retrying (%d attempt(s) left): %s",
+                    retries_remaining,
+                    error,
+                )
+                retries_remaining -= 1
+                continue
+            raise
+
+
+def _format_execution_warnings(outcome: "kcl.ExecOutcome") -> list[str]:
+    """Render any warning-level compilation issues from an execution outcome.
+
+    ``kcl.execute`` / ``kcl.execute_code`` return an ``ExecOutcome`` whose
+    ``issues()`` may include non-fatal warnings (e.g. a CSG subtract with no
+    overlap). Each warning is rendered to a miette report string with the
+    relevant source snippet.
+
+    Args:
+        outcome: The outcome returned by a kcl execution call.
+
+    Returns:
+        A list of rendered warning reports (empty if there are no warnings).
+    """
+    return [outcome.report(issue) for issue in outcome.issues() if issue.is_warning()]
 
 
 class KCLExportFormat(Enum):
@@ -691,9 +752,13 @@ async def zoo_calculate_kcl_physical_properties(
     )
 
     if kcl_code:
-        response = await kcl.execute_code_and_measure(kcl_code, request)
+        response = await _execute_with_retries(
+            kcl.execute_code_and_measure, kcl_code, request
+        )
     else:
-        response = await kcl.execute_and_measure(str(kcl_path), request)
+        response = await _execute_with_retries(
+            kcl.execute_and_measure, str(kcl_path), request
+        )
 
     volume = response.get_volume()
     com = response.get_center_of_mass()
@@ -771,12 +836,14 @@ async def zoo_calculate_bounding_box_kcl(
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     if kcl_code:
-        response = await kcl.execute_code_and_bounding_box(
+        response = await _execute_with_retries(
+            kcl.execute_code_and_bounding_box,
             kcl_code,
             output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
         )
     else:
-        response = await kcl.execute_and_bounding_box(
+        response = await _execute_with_retries(
+            kcl.execute_and_bounding_box,
             str(kcl_path),
             output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
         )
@@ -947,7 +1014,7 @@ async def zoo_execute_kcl(
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
 
     Returns:
-        tuple(bool, str): Returns True if the KCL code executed successfully and a success message, False otherwise and the error message.
+        tuple(bool, str): Returns True if the KCL code executed successfully and a success message, False otherwise and the error message. The success message includes any non-fatal execution warnings (e.g. a CSG operation with no overlap) when present.
     """
     logger.info("Executing KCL code")
 
@@ -955,9 +1022,20 @@ async def zoo_execute_kcl(
 
     try:
         if kcl_code:
-            await kcl.execute_code(kcl_code)
+            outcome = await _execute_with_retries(kcl.execute_code, kcl_code)
         else:
-            await kcl.execute(str(kcl_path))
+            outcome = await _execute_with_retries(kcl.execute, str(kcl_path))
+
+        warnings = _format_execution_warnings(outcome)
+        if warnings:
+            logger.info(
+                "KCL code executed successfully with %d warning(s)", len(warnings)
+            )
+            message = "KCL code executed successfully with warnings:\n\n" + "\n\n".join(
+                warnings
+            )
+            return True, message
+
         logger.info("KCL code executed successfully")
         return True, "KCL code executed successfully"
     except Exception as e:
@@ -1032,13 +1110,15 @@ async def zoo_export_kcl(
     async with aiofiles.open(export_path, "wb") as out:
         if kcl_code:
             logger.info("Exporting KCL code to %s", str(kcl_code))
-            export_response = await kcl.execute_code_and_export(kcl_code, export_format)
+            export_response = await _execute_with_retries(
+                kcl.execute_code_and_export, kcl_code, export_format
+            )
         else:
             logger.info("Exporting KCL project to %s", str(kcl_path))
             assert kcl_path is not None  # _check_kcl_code_or_path ensures this
             kcl_path_resolved = Path(kcl_path)
-            export_response = await kcl.execute_and_export(
-                str(kcl_path_resolved.resolve()), export_format
+            export_response = await _execute_with_retries(
+                kcl.execute_and_export, str(kcl_path_resolved.resolve()), export_format
             )
         await out.write(bytes(export_response[0].contents))
 
@@ -1210,10 +1290,14 @@ async def zoo_get_sketch_constraint_status(
 
     try:
         if kcl_code:
-            report = await kcl.get_sketch_constraint_status_code(kcl_code)
+            report = await _execute_with_retries(
+                kcl.get_sketch_constraint_status_code, kcl_code
+            )
         else:
             assert kcl_path is not None
-            report = await kcl.get_sketch_constraint_status(str(kcl_path))
+            report = await _execute_with_retries(
+                kcl.get_sketch_constraint_status, str(kcl_path)
+            )
         return _format_constraint_report(report)
     except Exception as e:
         logger.error(e)
@@ -1626,7 +1710,8 @@ async def zoo_multi_isometric_snapshot_of_kcl(
                 list[bytes],
                 cast(
                     object,
-                    await kcl.execute_code_and_snapshot_views(
+                    await _execute_with_retries(
+                        kcl.execute_code_and_snapshot_views,
                         kcl_code,
                         kcl.ImageFormat.Jpeg,
                         snapshot_options=views,
@@ -1643,7 +1728,8 @@ async def zoo_multi_isometric_snapshot_of_kcl(
                 list[bytes],
                 cast(
                     object,
-                    await kcl.execute_and_snapshot_views(
+                    await _execute_with_retries(
+                        kcl.execute_and_snapshot_views,
                         str(kcl_path_resolved),
                         kcl.ImageFormat.Jpeg,
                         snapshot_options=views,
@@ -1718,7 +1804,8 @@ async def zoo_multiview_snapshot_of_kcl(
                 list[bytes],
                 cast(
                     object,
-                    await kcl.execute_code_and_snapshot_views(
+                    await _execute_with_retries(
+                        kcl.execute_code_and_snapshot_views,
                         kcl_code,
                         kcl.ImageFormat.Jpeg,
                         snapshot_options=views,
@@ -1735,7 +1822,8 @@ async def zoo_multiview_snapshot_of_kcl(
                 list[bytes],
                 cast(
                     object,
-                    await kcl.execute_and_snapshot_views(
+                    await _execute_with_retries(
+                        kcl.execute_and_snapshot_views,
                         str(kcl_path_resolved),
                         kcl.ImageFormat.Jpeg,
                         snapshot_options=views,
@@ -1927,7 +2015,8 @@ async def zoo_snapshot_of_kcl(
             list[bytes],
             cast(
                 object,
-                await kcl.execute_code_and_snapshot_views(
+                await _execute_with_retries(
+                    kcl.execute_code_and_snapshot_views,
                     kcl_code,
                     kcl.ImageFormat.Jpeg,
                     snapshot_options=[view],
@@ -1944,7 +2033,8 @@ async def zoo_snapshot_of_kcl(
             list[bytes],
             cast(
                 object,
-                await kcl.execute_and_snapshot_views(
+                await _execute_with_retries(
+                    kcl.execute_and_snapshot_views,
                     str(kcl_path_resolved),
                     kcl.ImageFormat.Jpeg,
                     snapshot_options=[view],
