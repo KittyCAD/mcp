@@ -438,6 +438,123 @@ async def test_execute_kcl_error():
     assert "Failed to execute KCL code" in result[1]
 
 
+class _FakeIssue:
+    """Stand-in for kcl.CompilationIssue."""
+
+    def __init__(self, *, warning: bool) -> None:
+        self._warning = warning
+
+    def is_warning(self) -> bool:
+        return self._warning
+
+
+class _FakeOutcome:
+    """Stand-in for kcl.ExecOutcome."""
+
+    def __init__(self, issues: list[_FakeIssue]) -> None:
+        self._issues = issues
+
+    def issues(self) -> list[_FakeIssue]:
+        return self._issues
+
+    def report(self, issue: _FakeIssue) -> str:
+        return "warning report" if issue.is_warning() else "error report"
+
+
+def test_format_execution_warnings_only_returns_warnings():
+    outcome = _FakeOutcome(
+        [_FakeIssue(warning=True), _FakeIssue(warning=False), _FakeIssue(warning=True)]
+    )
+    warnings = zoo_mcp.zoo_tools._format_execution_warnings(cast(Any, outcome))
+    assert warnings == ["warning report", "warning report"]
+
+
+def test_format_execution_warnings_empty_when_no_warnings():
+    outcome = _FakeOutcome([_FakeIssue(warning=False)])
+    assert zoo_mcp.zoo_tools._format_execution_warnings(cast(Any, outcome)) == []
+
+
+class _RetryableError(Exception):
+    def __init__(self, message: str, retryable: bool) -> None:
+        super().__init__(message)
+        self._retryable = retryable
+
+    def is_retryable(self) -> bool:
+        return self._retryable
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_succeeds_first_try():
+    calls = 0
+
+    async def fn(value: str) -> str:
+        nonlocal calls
+        calls += 1
+        return value
+
+    result = await zoo_mcp.zoo_tools._execute_with_retries(fn, "ok")
+    assert result == "ok"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_retries_then_succeeds():
+    calls = 0
+
+    async def fn() -> str:
+        nonlocal calls
+        calls += 1
+        if calls < zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS:
+            raise _RetryableError("hangup", retryable=True)
+        return "recovered"
+
+    result = await zoo_mcp.zoo_tools._execute_with_retries(fn)
+    assert result == "recovered"
+    assert calls == zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_exhausts_attempts():
+    calls = 0
+
+    async def fn() -> str:
+        nonlocal calls
+        calls += 1
+        raise _RetryableError("hangup", retryable=True)
+
+    with pytest.raises(_RetryableError):
+        await zoo_mcp.zoo_tools._execute_with_retries(fn)
+    assert calls == zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_does_not_retry_non_retryable():
+    calls = 0
+
+    async def fn() -> str:
+        nonlocal calls
+        calls += 1
+        raise _RetryableError("bad code", retryable=False)
+
+    with pytest.raises(_RetryableError):
+        await zoo_mcp.zoo_tools._execute_with_retries(fn)
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_does_not_retry_plain_exception():
+    calls = 0
+
+    async def fn() -> str:
+        nonlocal calls
+        calls += 1
+        raise ValueError("no is_retryable method")
+
+    with pytest.raises(ValueError):
+        await zoo_mcp.zoo_tools._execute_with_retries(fn)
+    assert calls == 1
+
+
 @pytest.mark.asyncio
 async def test_export_kcl(cube_kcl: str):
     response = await mcp.call_tool(
