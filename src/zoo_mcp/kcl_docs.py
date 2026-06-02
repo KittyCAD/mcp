@@ -84,7 +84,9 @@ class KCLDocs:
             cls._init_lock = asyncio.Lock()
         async with cls._init_lock:
             if cls._instance is None:
-                cls._instance = await _fetch_docs_from_zoo_dev()
+                result = await _fetch_docs_from_zoo_dev()
+                if result.docs:
+                    cls._instance = result
 
 
 def _categorize_doc_path(path: str) -> str | None:
