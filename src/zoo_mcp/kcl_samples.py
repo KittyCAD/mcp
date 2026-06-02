@@ -127,7 +127,9 @@ class KCLSamples:
             cls._init_lock = asyncio.Lock()
         async with cls._init_lock:
             if cls._instance is None:
-                cls._instance = await _fetch_index_from_zoo_dev()
+                result = await _fetch_index_from_zoo_dev()
+                if result.manifest:
+                    cls._instance = result
 
 
 def _parse_index_markdown(markdown: str) -> dict[str, SampleMetadata]:
