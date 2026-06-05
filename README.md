@@ -25,7 +25,7 @@ An [MCP server](https://modelcontextprotocol.io/docs/getting-started/intro) hous
 
 4. Install the package from GitHub
     ```bash
-    uv pip install git+ssh://git@github.com/KittyCAD/zoo-mcp.git
+    uv pip install git+ssh://git@github.com/KittyCAD/mcp.git
     ```
 
 ## Running the Server
