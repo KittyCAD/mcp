@@ -1160,7 +1160,7 @@ wheels = [
 
 [[package]]
 name = "zoo-mcp"
-version = "0.16.2"
+version = "0.16.3"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -1169,6 +1169,7 @@ dependencies = [
     { name = "pillow" },
     { name = "trimesh" },
     { name = "truststore" },
+    { name = "typing-extensions" },
     { name = "zoo-kcl" },
 ]
 
@@ -1191,6 +1192,7 @@ requires-dist = [
     { name = "pillow", specifier = "<13.0" },
     { name = "trimesh", specifier = "<5.0" },
     { name = "truststore", specifier = "<1.0" },
+    { name = "typing-extensions", specifier = ">=4.12" },
     { name = "zoo-kcl", specifier = ">=0.3.161" },
 ]
 

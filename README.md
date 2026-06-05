@@ -25,7 +25,7 @@ An [MCP server](https://modelcontextprotocol.io/docs/getting-started/intro) hous
 
 4. Install the package from GitHub
     ```bash
-    uv pip install git+ssh://git@github.com/KittyCAD/zoo-mcp.git
+    uv pip install git+ssh://git@github.com/KittyCAD/mcp.git
     ```
 
 ## Running the Server
@@ -44,6 +44,14 @@ The server can also be run with the [mcp package](https://github.com/modelcontex
 ```bash
 uv run mcp run src/zoo_mcp/server.py
 ```
+
+### Prebuilt binaries
+
+Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:
+```bash
+ZOO_API_TOKEN="your_api_key_here" ./zoo-mcp-linux-x86_64
+```
+> The binaries are not code-signed, so macOS Gatekeeper and Windows SmartScreen may warn on first run.
 
 ## Integrations
 

@@ -17,9 +17,14 @@ contents on demand.
 import asyncio
 import re
 from dataclasses import dataclass, field
-from typing import ClassVar, TypedDict
+from typing import ClassVar
 
 import httpx
+
+# pydantic requires typing_extensions.TypedDict (not typing.TypedDict) to build
+# schemas on Python < 3.12; the MCP tools expose these TypedDicts, so import the
+# backport for consistent behavior across 3.11-3.13.
+from typing_extensions import TypedDict
 
 from zoo_mcp import ctx, logger
 from zoo_mcp.utils.data_retrieval_utils import (
