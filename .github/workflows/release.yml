@@ -38,24 +38,97 @@ jobs:
           name: wheels
           path: dist/*
 
+  build-binaries:
+    name: Build binary (${{ matrix.os_label }}-${{ matrix.arch_label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os_label: linux
+            arch_label: x86_64
+            ext: ""
+          - runner: ubuntu-24.04-arm
+            os_label: linux
+            arch_label: arm64
+            ext: ""
+          - runner: macos-latest
+            os_label: macos
+            arch_label: arm64
+            ext: ""
+          - runner: macos-13
+            os_label: macos
+            arch_label: x86_64
+            ext: ""
+          - runner: windows-latest
+            os_label: windows
+            arch_label: x86_64
+            ext: ".exe"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the project
+        run: uv sync --no-dev
+
+      - name: Build binary
+        shell: bash
+        run: |
+          uv run --with pyinstaller pyinstaller \
+            --onefile --name zoo-mcp \
+            --copy-metadata zoo_mcp \
+            --collect-all mcp --collect-all kcl --collect-all kittycad \
+            --collect-all trimesh --collect-all truststore \
+            pyinstaller_entry.py
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          mv "dist/zoo-mcp${{ matrix.ext }}" \
+            "dist/zoo-mcp-${{ matrix.os_label }}-${{ matrix.arch_label }}${{ matrix.ext }}"
+
+      - name: Smoke test the binary
+        shell: bash
+        run: |
+          python scripts/smoke_launch.py \
+            "./dist/zoo-mcp-${{ matrix.os_label }}-${{ matrix.arch_label }}${{ matrix.ext }}"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.os_label }}-${{ matrix.arch_label }}
+          path: dist/zoo-mcp-${{ matrix.os_label }}-${{ matrix.arch_label }}${{ matrix.ext }}
+
   release:
     name: Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [ build ]
+    needs: [ build, build-binaries ]
     steps:
-      - name: Download wheels
+      - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
-          name: wheels
           path: dist
 
       - name: Create a Release
         uses: softprops/action-gh-release@v3
         with:
-          files: ./dist/*
+          files: |
+            dist/wheels/*
+            dist/binary-*/*
 
   publish-pyx:
     name: Publish to pyx
@@ -73,6 +146,7 @@ jobs:
       - name: Download wheels
         uses: actions/download-artifact@v8
         with:
+          name: wheels
           path: dist
 
       - name: Install uv
@@ -111,6 +185,7 @@ jobs:
       - name: Download wheels
         uses: actions/download-artifact@v8
         with:
+          name: wheels
           path: dist
 
       - name: Install uv
