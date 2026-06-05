@@ -52,7 +52,7 @@ jobs:
             os_label: linux
             arch_label: arm64
             ext: ""
-          - runner: macos-15
+          - runner: macos-26
             os_label: macos
             arch_label: arm64
             ext: ""
