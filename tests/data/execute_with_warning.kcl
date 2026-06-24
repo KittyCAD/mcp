@@ -1,0 +1,14 @@
+// Produces a warning-level compilation issue from the production engine:
+// unioning two solids that do not overlap is non-fatal but reported as a
+// warning ("The bodies in this union had no overlap").
+@settings(defaultLengthUnit = mm)
+
+partA = startSketchOn(XY)
+  |> circle(center = [0, 0], radius = 5)
+  |> extrude(length = 10)
+
+partB = startSketchOn(XY)
+  |> circle(center = [100, 100], radius = 5)
+  |> extrude(length = 10)
+
+joined = union([partA, partB])

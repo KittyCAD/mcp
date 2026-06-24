@@ -57,6 +57,27 @@ def cube_stp(tmp_path):
 
 
 @pytest.fixture
+def warning_kcl():
+    """KCL that executes successfully but emits a warning-level issue."""
+    test_file = Path(__file__).parent / "data" / "execute_with_warning.kcl"
+    yield f"{test_file.resolve()}"
+
+
+@pytest.fixture
+def error_kcl():
+    """KCL that executes successfully but emits error-level (non-fatal) issues."""
+    test_file = Path(__file__).parent / "data" / "execute_with_error.kcl"
+    yield f"{test_file.resolve()}"
+
+
+@pytest.fixture
+def fatal_error_kcl():
+    """KCL that aborts execution with a fatal error (raised by the engine)."""
+    test_file = Path(__file__).parent / "data" / "execute_with_fatal_error.kcl"
+    yield f"{test_file.resolve()}"
+
+
+@pytest.fixture
 def fully_constrained_kcl():
     test_file = Path(__file__).parent / "data" / "fully_constrained_sketch.kcl"
     yield f"{test_file.resolve()}"
