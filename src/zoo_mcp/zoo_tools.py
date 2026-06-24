@@ -1034,7 +1034,7 @@ async def zoo_execute_kcl(
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
 
     Returns:
-        tuple(bool, str): Returns True if the KCL code executed successfully and a success message, False otherwise and the error message. The success message includes any execution issues (warnings, errors, and fatal issues, e.g. a CSG operation with no overlap) when present.
+        tuple(bool, str): Returns True if the KCL code ran to completion and a result message, False otherwise and the error message. When the run completes, it may still report compilation issues (warnings, errors, and fatal issues, e.g. a CSG operation with no overlap); these are appended to the message rather than treated as a hard failure.
     """
     logger.info("Executing KCL code")
 
@@ -1049,7 +1049,7 @@ async def zoo_execute_kcl(
         issues = _format_execution_issues(outcome)
         if issues:
             total = sum(len(reports) for reports in issues.values())
-            logger.info("KCL code executed successfully with %d issue(s)", total)
+            logger.info("KCL code execution reported %d issue(s)", total)
             sections = [
                 f"{label}:\n\n" + "\n\n".join(issues[severity])
                 for severity, label in (
@@ -1059,8 +1059,9 @@ async def zoo_execute_kcl(
                 )
                 if severity in issues
             ]
-            message = "KCL code executed successfully with issues:\n\n" + "\n\n".join(
-                sections
+            message = (
+                "KCL code execution completed with the following issues:\n\n"
+                + "\n\n".join(sections)
             )
             return True, message
 

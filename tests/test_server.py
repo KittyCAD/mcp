@@ -448,7 +448,7 @@ async def test_execute_kcl_surfaces_warning_issue(warning_kcl: str):
     result = _meta_result(response)
     assert isinstance(result, (tuple, list))
     assert result[0] is True
-    assert "KCL code executed successfully with issues" in result[1]
+    assert "KCL code execution completed with the following issues" in result[1]
     assert "Warnings:" in result[1]
     assert "no overlap" in result[1]
     # A pure warning must not be mislabelled as an error/fatal.
@@ -466,7 +466,7 @@ async def test_execute_kcl_surfaces_error_issues(error_kcl: str):
     result = _meta_result(response)
     assert isinstance(result, (tuple, list))
     assert result[0] is True
-    assert "KCL code executed successfully with issues" in result[1]
+    assert "KCL code execution completed with the following issues" in result[1]
     assert "Errors:" in result[1]
 
 
@@ -551,7 +551,7 @@ async def test_execute_kcl_surfaces_all_issue_severities(monkeypatch):
 
     ok, message = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="anything")
     assert ok is True
-    assert message.startswith("KCL code executed successfully with issues:")
+    assert message.startswith("KCL code execution completed with the following issues:")
     assert "Fatal issues:\n\nfatal report" in message
     assert "Errors:\n\nerror report" in message
     assert "Warnings:\n\nwarning report" in message
