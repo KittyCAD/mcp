@@ -244,21 +244,41 @@ async def _execute_with_retries(
             raise
 
 
-def _format_execution_warnings(outcome: "kcl.ExecOutcome") -> list[str]:
-    """Render any warning-level compilation issues from an execution outcome.
+# Issue severities surfaced from an execution outcome, in descending order of
+# severity. Each entry maps a ``kcl.CompilationIssue`` predicate to the label
+# used when rendering that issue's report. ``is_fatal`` is checked before
+# ``is_err`` because a fatal issue may also report as an error.
+_EXECUTION_ISSUE_SEVERITIES = (
+    ("fatal", "is_fatal"),
+    ("error", "is_err"),
+    ("warning", "is_warning"),
+)
+
+
+def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]:
+    """Render compilation issues from an execution outcome, grouped by severity.
 
     ``kcl.execute`` / ``kcl.execute_code`` return an ``ExecOutcome`` whose
-    ``issues()`` may include non-fatal warnings (e.g. a CSG subtract with no
-    overlap). Each warning is rendered to a miette report string with the
-    relevant source snippet.
+    ``issues()`` may include warning-, error-, and fatal-level
+    ``CompilationIssue``s (e.g. a CSG subtract with no overlap surfaces as a
+    warning). Each issue is rendered to a miette report string with the
+    relevant source snippet and bucketed by its severity.
 
     Args:
         outcome: The outcome returned by a kcl execution call.
 
     Returns:
-        A list of rendered warning reports (empty if there are no warnings).
+        A mapping of severity label (``"fatal"``, ``"error"``, ``"warning"``)
+        to the rendered reports at that level. Severity levels with no issues
+        are omitted.
     """
-    return [outcome.report(issue) for issue in outcome.issues() if issue.is_warning()]
+    issues: dict[str, list[str]] = {}
+    for issue in outcome.issues():
+        for severity, predicate in _EXECUTION_ISSUE_SEVERITIES:
+            if getattr(issue, predicate)():
+                issues.setdefault(severity, []).append(outcome.report(issue))
+                break
+    return issues
 
 
 class KCLExportFormat(Enum):
@@ -1014,7 +1034,7 @@ async def zoo_execute_kcl(
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
 
     Returns:
-        tuple(bool, str): Returns True if the KCL code executed successfully and a success message, False otherwise and the error message. The success message includes any non-fatal execution warnings (e.g. a CSG operation with no overlap) when present.
+        tuple(bool, str): Returns True if the KCL code ran to completion and a result message, False otherwise and the error message. When the run completes, it may still report compilation issues (warnings, errors, and fatal issues, e.g. a CSG operation with no overlap); these are appended to the message rather than treated as a hard failure.
     """
     logger.info("Executing KCL code")
 
@@ -1026,13 +1046,22 @@ async def zoo_execute_kcl(
         else:
             outcome = await _execute_with_retries(kcl.execute, str(kcl_path))
 
-        warnings = _format_execution_warnings(outcome)
-        if warnings:
-            logger.info(
-                "KCL code executed successfully with %d warning(s)", len(warnings)
-            )
-            message = "KCL code executed successfully with warnings:\n\n" + "\n\n".join(
-                warnings
+        issues = _format_execution_issues(outcome)
+        if issues:
+            total = sum(len(reports) for reports in issues.values())
+            logger.info("KCL code execution reported %d issue(s)", total)
+            sections = [
+                f"{label}:\n\n" + "\n\n".join(issues[severity])
+                for severity, label in (
+                    ("fatal", "Fatal issues"),
+                    ("error", "Errors"),
+                    ("warning", "Warnings"),
+                )
+                if severity in issues
+            ]
+            message = (
+                "KCL code execution completed with the following issues:\n\n"
+                + "\n\n".join(sections)
             )
             return True, message
 

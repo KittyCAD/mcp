@@ -1,0 +1,6 @@
+// Produces a fatal compilation error from the production engine: `y` is never
+// defined, so execution cannot continue and the engine aborts (raised as a
+// KclError) rather than returning an outcome with non-fatal issues.
+@settings(defaultLengthUnit = mm)
+
+x = y + 1

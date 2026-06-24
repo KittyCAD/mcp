@@ -438,14 +438,66 @@ async def test_execute_kcl_error():
     assert "Failed to execute KCL code" in result[1]
 
 
+@pytest.mark.asyncio
+async def test_execute_kcl_surfaces_warning_issue(warning_kcl: str):
+    """A non-fatal warning (disjoint union) succeeds but is reported."""
+    response = await mcp.call_tool(
+        "execute_kcl",
+        arguments={"kcl_code": None, "kcl_path": warning_kcl},
+    )
+    result = _meta_result(response)
+    assert isinstance(result, (tuple, list))
+    assert result[0] is True
+    assert "KCL code execution completed with the following issues" in result[1]
+    assert "Warnings:" in result[1]
+    assert "no overlap" in result[1]
+    # A pure warning must not be mislabelled as an error/fatal.
+    assert "Errors:" not in result[1]
+    assert "Fatal issues:" not in result[1]
+
+
+@pytest.mark.asyncio
+async def test_execute_kcl_surfaces_error_issues(error_kcl: str):
+    """Non-fatal errors (labelled `extrude` arg) succeed but are reported."""
+    response = await mcp.call_tool(
+        "execute_kcl",
+        arguments={"kcl_code": None, "kcl_path": error_kcl},
+    )
+    result = _meta_result(response)
+    assert isinstance(result, (tuple, list))
+    assert result[0] is True
+    assert "KCL code execution completed with the following issues" in result[1]
+    assert "Errors:" in result[1]
+
+
+@pytest.mark.asyncio
+async def test_execute_kcl_reports_fatal_error(fatal_error_kcl: str):
+    """A fatal error aborts execution and is reported as a failure."""
+    response = await mcp.call_tool(
+        "execute_kcl",
+        arguments={"kcl_code": None, "kcl_path": fatal_error_kcl},
+    )
+    result = _meta_result(response)
+    assert isinstance(result, (tuple, list))
+    assert result[0] is False
+    assert "Failed to execute KCL code" in result[1]
+
+
 class _FakeIssue:
     """Stand-in for kcl.CompilationIssue."""
 
-    def __init__(self, *, warning: bool) -> None:
-        self._warning = warning
+    def __init__(self, *, severity: str) -> None:
+        self.severity = severity
 
     def is_warning(self) -> bool:
-        return self._warning
+        return self.severity == "warning"
+
+    def is_err(self) -> bool:
+        # kcl reports fatal issues as errors too.
+        return self.severity in ("error", "fatal")
+
+    def is_fatal(self) -> bool:
+        return self.severity == "fatal"
 
 
 class _FakeOutcome:
@@ -458,20 +510,57 @@ class _FakeOutcome:
         return self._issues
 
     def report(self, issue: _FakeIssue) -> str:
-        return "warning report" if issue.is_warning() else "error report"
+        return f"{issue.severity} report"
 
 
-def test_format_execution_warnings_only_returns_warnings():
+def test_format_execution_issues_groups_by_severity():
     outcome = _FakeOutcome(
-        [_FakeIssue(warning=True), _FakeIssue(warning=False), _FakeIssue(warning=True)]
+        [
+            _FakeIssue(severity="warning"),
+            _FakeIssue(severity="error"),
+            _FakeIssue(severity="fatal"),
+            _FakeIssue(severity="warning"),
+        ]
     )
-    warnings = zoo_mcp.zoo_tools._format_execution_warnings(cast(Any, outcome))
-    assert warnings == ["warning report", "warning report"]
+    issues = zoo_mcp.zoo_tools._format_execution_issues(cast(Any, outcome))
+    assert issues == {
+        "warning": ["warning report", "warning report"],
+        "error": ["error report"],
+        "fatal": ["fatal report"],
+    }
 
 
-def test_format_execution_warnings_empty_when_no_warnings():
-    outcome = _FakeOutcome([_FakeIssue(warning=False)])
-    assert zoo_mcp.zoo_tools._format_execution_warnings(cast(Any, outcome)) == []
+def test_format_execution_issues_empty_when_no_issues():
+    assert zoo_mcp.zoo_tools._format_execution_issues(cast(Any, _FakeOutcome([]))) == {}
+
+
+@pytest.mark.asyncio
+async def test_execute_kcl_surfaces_all_issue_severities(monkeypatch):
+    outcome = _FakeOutcome(
+        [
+            _FakeIssue(severity="warning"),
+            _FakeIssue(severity="error"),
+            _FakeIssue(severity="fatal"),
+        ]
+    )
+
+    async def fake_execute_code(code: str):
+        return outcome
+
+    monkeypatch.setattr(zoo_mcp.zoo_tools.kcl, "execute_code", fake_execute_code)
+
+    ok, message = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="anything")
+    assert ok is True
+    assert message.startswith("KCL code execution completed with the following issues:")
+    assert "Fatal issues:\n\nfatal report" in message
+    assert "Errors:\n\nerror report" in message
+    assert "Warnings:\n\nwarning report" in message
+    # Severities are rendered fatal -> error -> warning.
+    assert (
+        message.index("Fatal issues:")
+        < message.index("Errors:")
+        < message.index("Warnings:")
+    )
 
 
 class _RetryableError(Exception):
