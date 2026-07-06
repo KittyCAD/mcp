@@ -1098,8 +1098,8 @@ async def zoo_export_kcl(
     if not export_format:
         logger.warning("No export format provided, defaulting to step")
         export_format = kcl.FileExportFormat.Step
-    else:
-        if export_format not in KCLExportFormat.formats.value.keys():
+    elif isinstance(export_format, str):
+        if export_format not in KCLExportFormat.formats.value:
             logger.warning(
                 "Invalid export format %s provided, defaulting to step", export_format
             )
