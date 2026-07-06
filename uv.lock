@@ -1160,7 +1160,7 @@ wheels = [
 
 [[package]]
 name = "zoo-mcp"
-version = "0.16.9"
+version = "0.16.10"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
