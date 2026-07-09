@@ -1856,3 +1856,89 @@ async def test_list_and_search_org_dataset_live(monkeypatch: pytest.MonkeyPatch)
     matches = _meta_result(search_response)
     assert isinstance(matches, list)
     assert len(matches) >= 1, "expected at least one semantic-search match"
+
+
+@pytest.mark.asyncio
+async def test_list_org_skills_success(monkeypatch: pytest.MonkeyPatch):
+    fake_skills = [
+        SimpleNamespace(
+            id="uuid-1",
+            name="alpha",
+            description="first skill",
+            markdown="# Alpha",
+        ),
+        SimpleNamespace(
+            id="uuid-2",
+            name="beta",
+            description="second skill",
+            markdown="# Beta",
+        ),
+    ]
+    monkeypatch.setattr(
+        zoo_mcp.kittycad_client.orgs,
+        "list_org_skills",
+        MagicMock(return_value=fake_skills),
+    )
+
+    response = await mcp.call_tool("list_org_skills", arguments={})
+    result = _meta_result(response)
+    assert result == [
+        {
+            "id": "uuid-1",
+            "name": "alpha",
+            "description": "first skill",
+            "markdown": "# Alpha",
+        },
+        {
+            "id": "uuid-2",
+            "name": "beta",
+            "description": "second skill",
+            "markdown": "# Beta",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_org_skills_empty_when_404(monkeypatch: pytest.MonkeyPatch):
+    def raise_404(*args: Any, **kwargs: Any):
+        raise KittyCADClientError(message="No org found", status_code=404)
+
+    monkeypatch.setattr(
+        zoo_mcp.kittycad_client.orgs,
+        "list_org_skills",
+        raise_404,
+    )
+
+    response = await mcp.call_tool("list_org_skills", arguments={})
+    result = _meta_result(response)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_org_skills_empty_when_none(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        zoo_mcp.kittycad_client.orgs,
+        "list_org_skills",
+        MagicMock(return_value=None),
+    )
+
+    response = await mcp.call_tool("list_org_skills", arguments={})
+    result = _meta_result(response)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_org_skills_error(monkeypatch: pytest.MonkeyPatch):
+    def raise_500(*args: Any, **kwargs: Any):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        zoo_mcp.kittycad_client.orgs,
+        "list_org_skills",
+        raise_500,
+    )
+
+    response = await mcp.call_tool("list_org_skills", arguments={})
+    result = _meta_result(response)
+    assert isinstance(result, str)
+    assert result.startswith("There was an error listing org skills")

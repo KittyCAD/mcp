@@ -2098,6 +2098,32 @@ def zoo_list_org_datasets() -> list[dict[str, str | None]]:
     ]
 
 
+def zoo_list_org_skills() -> list[dict[str, str]]:
+    """List all skills visible to the org tied to the current ZOO_API_TOKEN.
+
+    Returns:
+        A list of {"id": <uuid str>, "name": <str>, "description": <str>,
+        "markdown": <str>} entries, possibly empty.
+    """
+    logger.info("Listing org skills")
+    try:
+        skills = kittycad_client.orgs.list_org_skills()
+    except KittyCADClientError as exc:
+        if exc.status_code == 404:
+            return []
+        raise ZooMCPException(f"Failed to list org skills: {exc}") from exc
+
+    return [
+        {
+            "id": str(s.id),
+            "name": s.name,
+            "description": s.description,
+            "markdown": s.markdown,
+        }
+        for s in (skills or [])
+    ]
+
+
 def zoo_search_org_dataset_semantic(
     dataset_id: str,
     query: str,

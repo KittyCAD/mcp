@@ -39,6 +39,7 @@ from zoo_mcp.zoo_tools import (
     zoo_get_sketch_constraint_status,
     zoo_lint_and_fix_kcl,
     zoo_list_org_datasets,
+    zoo_list_org_skills,
     zoo_mock_execute_kcl,
     zoo_multi_isometric_snapshot_of_cad,
     zoo_multi_isometric_snapshot_of_kcl,
@@ -853,6 +854,26 @@ async def list_org_datasets() -> list[dict] | str:
         return zoo_list_org_datasets()
     except Exception as e:
         return f"There was an error listing org datasets: {e}"
+
+
+@mcp.tool()
+async def list_org_skills() -> list[dict] | str:
+    """List the skills available to the user's organization.
+
+    Each skill has a UUID `id`, a human-readable `name`, a `description`, and a
+    `markdown` body containing the skill's full content.
+
+    Returns:
+        A list of {"id": str, "name": str, "description": str, "markdown": str}
+        entries, or an error message if the operation fails.
+    """
+
+    logger.info("list_org_skills tool called")
+
+    try:
+        return zoo_list_org_skills()
+    except Exception as e:
+        return f"There was an error listing org skills: {e}"
 
 
 @mcp.tool()
