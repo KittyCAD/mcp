@@ -14,7 +14,7 @@ dependencies = [
     "trimesh<5.0",
     "truststore<1.0",
     "typing-extensions>=4.12",
-    "zoo-kcl>=0.3.168",
+    "zoo-kcl>=0.3.169",
 ]
 authors = [
     { name = "Ryan Barton", email = "ryan@zoo.dev" },
