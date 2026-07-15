@@ -21,7 +21,11 @@ from zoo_mcp.kcl_samples import (
     list_available_samples,
     search_samples,
 )
-from zoo_mcp.utils.image_utils import encode_image, save_image_to_disk
+from zoo_mcp.utils.image_utils import (
+    encode_image,
+    save_image_bytes_to_disk,
+    save_image_to_disk,
+)
 from zoo_mcp.zoo_tools import (
     CameraView,
     zoo_calculate_bounding_box_cad,
@@ -552,6 +556,7 @@ async def mock_execute_kcl(
 async def multiview_snapshot_of_cad(
     input_file: str,
     zoom: bool = True,
+    output_path: str | None = None,
 ) -> ImageContent | str:
     """Save a multiview snapshot of a CAD file. The input file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
 
@@ -564,9 +569,10 @@ async def multiview_snapshot_of_cad(
     Args:
         input_file (str): The path of the file to get the mass from. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
         zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
+        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
 
     Returns:
-        ImageContent | str: The multiview snapshot of the CAD file as an image, or an error message if the operation fails.
+        ImageContent | str: The multiview snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
     """
 
     logger.info("multiview_snapshot_of_cad tool called for file: %s", input_file)
@@ -576,6 +582,8 @@ async def multiview_snapshot_of_cad(
             input_path=input_file,
             zoom=zoom,
         )
+        if output_path is not None:
+            return save_image_bytes_to_disk(image, output_path)
         return encode_image(image)
     except Exception as e:
         return f"There was an error creating the multiview snapshot: {e}"
@@ -586,6 +594,7 @@ async def multiview_snapshot_of_kcl(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     zoom: bool = True,
+    output_path: str | None = None,
 ) -> ImageContent | str:
     """Save a multiview snapshot of KCL code. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -599,9 +608,10 @@ async def multiview_snapshot_of_kcl(
         kcl_code (str | None): The KCL code to export to a CAD file.
         kcl_path (str | None): The path to a KCL file to export to a CAD file. The path should point to a .kcl file or a directory containing a main.kcl file.
         zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
+        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
 
     Returns:
-        ImageContent | str: The multiview snapshot of the KCL code as an image, or an error message if the operation fails.
+        ImageContent | str: The multiview snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
     """
 
     logger.info("multiview_snapshot_of_kcl tool called")
@@ -612,6 +622,8 @@ async def multiview_snapshot_of_kcl(
             kcl_path=kcl_path,
             zoom=zoom,
         )
+        if output_path is not None:
+            return save_image_bytes_to_disk(image, output_path)
         return encode_image(image)
     except Exception as e:
         return f"There was an error creating the multiview snapshot: {e}"
@@ -621,6 +633,7 @@ async def multiview_snapshot_of_kcl(
 async def multi_isometric_snapshot_of_cad(
     input_file: str,
     zoom: bool = True,
+    output_path: str | None = None,
 ) -> ImageContent | str:
     """Save a multi-isometric snapshot of a CAD file showing 4 isometric views. The input file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
 
@@ -633,9 +646,10 @@ async def multi_isometric_snapshot_of_cad(
     Args:
         input_file (str): The path of the file to snapshot. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
         zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
+        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
 
     Returns:
-        ImageContent | str: The multi-isometric snapshot of the CAD file as an image, or an error message if the operation fails.
+        ImageContent | str: The multi-isometric snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
     """
 
     logger.info("multi_isometric_snapshot_of_cad tool called for file: %s", input_file)
@@ -645,6 +659,8 @@ async def multi_isometric_snapshot_of_cad(
             input_path=input_file,
             zoom=zoom,
         )
+        if output_path is not None:
+            return save_image_bytes_to_disk(image, output_path)
         return encode_image(image)
     except Exception as e:
         return f"There was an error creating the multi-isometric snapshot: {e}"
@@ -655,6 +671,7 @@ async def multi_isometric_snapshot_of_kcl(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     zoom: bool = True,
+    output_path: str | None = None,
 ) -> ImageContent | str:
     """Save a multi-isometric snapshot of KCL code showing 4 isometric views. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -668,9 +685,10 @@ async def multi_isometric_snapshot_of_kcl(
         kcl_code (str | None): The KCL code to export to a CAD file.
         kcl_path (str | None): The path to a KCL file to export to a CAD file. The path should point to a .kcl file or a directory containing a main.kcl file.
         zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
+        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
 
     Returns:
-        ImageContent | str: The multi-isometric snapshot of the KCL code as an image, or an error message if the operation fails.
+        ImageContent | str: The multi-isometric snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
     """
 
     logger.info("multi_isometric_snapshot_of_kcl tool called")
@@ -681,6 +699,8 @@ async def multi_isometric_snapshot_of_kcl(
             kcl_path=kcl_path,
             zoom=zoom,
         )
+        if output_path is not None:
+            return save_image_bytes_to_disk(image, output_path)
         return encode_image(image)
     except Exception as e:
         return f"There was an error creating the multi-isometric snapshot: {e}"
@@ -691,6 +711,7 @@ async def snapshot_of_cad(
     input_file: str,
     camera_view: dict[str, list[float]] | str = "isometric",
     zoom: bool = True,
+    output_path: str | None = None,
 ) -> ImageContent | str:
     """Save a snapshot of a CAD file.
 
@@ -704,9 +725,10 @@ async def snapshot_of_cad(
                "up" (list of 3 floats) defining the up vector of the camera, "vantage" (list of 3 floats), and "center" (list of 3 floats).
                For example camera = {"up": [0, 0, 1], "vantage": [0, -1, 0], "center": [0, 0, 0]} would set the camera to be looking at the origin from the front side (-y direction).
         zoom (bool): Whether to zoom-to-fit the model before the snapshot. Default is True.
+        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
 
     Returns:
-        ImageContent | str: The snapshot of the CAD file as an image, or an error message if the operation fails.
+        ImageContent | str: The snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
     """
 
     logger.info("snapshot_of_cad tool called for file: %s", input_file)
@@ -742,6 +764,8 @@ async def snapshot_of_cad(
             camera=camera,
             zoom=zoom,
         )
+        if output_path is not None:
+            return save_image_bytes_to_disk(image, output_path)
         return encode_image(image)
     except Exception as e:
         return f"There was an error creating the snapshot: {e}"
@@ -753,6 +777,7 @@ async def snapshot_of_kcl(
     kcl_path: str | None = None,
     camera_view: dict[str, list[float]] | str = "isometric",
     zoom: bool = True,
+    output_path: str | None = None,
 ) -> ImageContent | str:
     """Save a snapshot of a model represented by KCL. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -767,9 +792,10 @@ async def snapshot_of_kcl(
                "up" (list of 3 floats) defining the up vector of the camera, "vantage" (list of 3 floats), and "center" (list of 3 floats).
                For example camera = {"up": [0, 0, 1], "vantage": [0, -1, 0], "center": [0, 0, 0]} would set the camera to be looking at the origin from the front side (-y direction).
         zoom (bool): Whether to zoom-to-fit the model before the snapshot. Default is True.
+        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
 
     Returns:
-        ImageContent | str: The snapshot of the CAD file as an image, or an error message if the operation fails.
+        ImageContent | str: The snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
     """
 
     logger.info("snapshot_of_kcl tool called")
@@ -806,6 +832,8 @@ async def snapshot_of_kcl(
             camera=camera,
             zoom=zoom,
         )
+        if output_path is not None:
+            return save_image_bytes_to_disk(image, output_path)
         return encode_image(image)
     except Exception as e:
         return f"There was an error creating the snapshot: {e}"
@@ -820,7 +848,7 @@ async def save_image(
 
     Args:
         image (ImageContent): The ImageContent object to save. This is typically returned by snapshot tools like snapshot_of_kcl, snapshot_of_cad, multiview_snapshot_of_kcl, or multiview_snapshot_of_cad.
-        output_path (str | None): The path where the image should be saved. Can be a file path (e.g., '/path/to/image.png') or a directory (e.g., '/path/to/dir'). If a directory is provided, the file will be named 'image.png'. If not provided, a temporary file will be created.
+        output_path (str | None): The path where the image should be saved. Can be a file path (e.g., '/path/to/image.jpg') or a directory (e.g., '/path/to/dir'). If a directory is provided, the file will be named 'image.jpg'. If not provided, a temporary file will be created.
 
     Returns:
         str: The absolute path to the saved image file, or an error message if the operation fails.
