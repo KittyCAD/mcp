@@ -96,14 +96,14 @@ def encode_image(img_bytes: bytes) -> ImageContent:
     return img_obj.to_image_content()
 
 
-def save_image_to_disk(image: ImageContent, output_path: str | None = None) -> str:
+def save_image_bytes_to_disk(img_bytes: bytes, output_path: str | None = None) -> str:
     """
-    Saves an ImageContent object to disk.
+    Writes raw JPEG image bytes to disk.
 
     Args:
-        image: The ImageContent object containing base64-encoded image data.
+        img_bytes: The raw JPEG image bytes to write.
         output_path: The path where the image should be saved. If a directory is
-            provided, a file named 'image.png' will be created in that directory.
+            provided, a file named 'image.jpg' will be created in that directory.
             If None, a temporary file will be created.
 
     Returns:
@@ -111,22 +111,35 @@ def save_image_to_disk(image: ImageContent, output_path: str | None = None) -> s
     """
     if output_path is None:
         # Create a temporary file
-        _, temp_path = tempfile.mkstemp(suffix=".png")
+        _, temp_path = tempfile.mkstemp(suffix=".jpg")
         path = Path(temp_path)
     else:
         path = Path(output_path)
 
         # If path is a directory, create a default filename
         if path.is_dir():
-            path = path / "image.png"
+            path = path / "image.jpg"
 
         # Ensure parent directory exists
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Decode base64 data
-    image_data = base64.b64decode(image.data)
-
     # Write to disk
-    path.write_bytes(image_data)
+    path.write_bytes(img_bytes)
 
     return str(path.resolve())
+
+
+def save_image_to_disk(image: ImageContent, output_path: str | None = None) -> str:
+    """
+    Saves an ImageContent object to disk.
+
+    Args:
+        image: The ImageContent object containing base64-encoded image data.
+        output_path: The path where the image should be saved. If a directory is
+            provided, a file named 'image.jpg' will be created in that directory.
+            If None, a temporary file will be created.
+
+    Returns:
+        str: The absolute path to the saved image file.
+    """
+    return save_image_bytes_to_disk(base64.b64decode(image.data), output_path)

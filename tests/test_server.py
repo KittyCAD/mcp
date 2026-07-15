@@ -1178,6 +1178,125 @@ async def test_snapshot_of_kcl_view_error(cube_kcl: str):
 
 
 @pytest.mark.asyncio
+async def test_multiview_snapshot_of_cad_output_path(cube_stl: str, tmp_path):
+    """When output_path is provided, the tool writes to disk and returns the path."""
+    output_path = tmp_path / "snap.jpg"
+    response = await mcp.call_tool(
+        "multiview_snapshot_of_cad",
+        arguments={
+            "input_file": cube_stl,
+            "output_path": str(output_path),
+        },
+    )
+    result = _meta_result(response)
+    assert Path(result) == output_path.resolve()
+    assert Path(result).exists()
+    assert Path(result).stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_multiview_snapshot_of_kcl_output_path(cube_kcl: str, tmp_path):
+    output_path = tmp_path / "snap.jpg"
+    response = await mcp.call_tool(
+        "multiview_snapshot_of_kcl",
+        arguments={
+            "kcl_code": None,
+            "kcl_path": cube_kcl,
+            "output_path": str(output_path),
+        },
+    )
+    result = _meta_result(response)
+    assert Path(result) == output_path.resolve()
+    assert Path(result).exists()
+    assert Path(result).stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_multi_isometric_snapshot_of_cad_output_path(cube_stl: str, tmp_path):
+    output_path = tmp_path / "snap.jpg"
+    response = await mcp.call_tool(
+        "multi_isometric_snapshot_of_cad",
+        arguments={
+            "input_file": cube_stl,
+            "output_path": str(output_path),
+        },
+    )
+    result = _meta_result(response)
+    assert Path(result) == output_path.resolve()
+    assert Path(result).exists()
+    assert Path(result).stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_multi_isometric_snapshot_of_kcl_output_path(cube_kcl: str, tmp_path):
+    output_path = tmp_path / "snap.jpg"
+    response = await mcp.call_tool(
+        "multi_isometric_snapshot_of_kcl",
+        arguments={
+            "kcl_code": None,
+            "kcl_path": cube_kcl,
+            "output_path": str(output_path),
+        },
+    )
+    result = _meta_result(response)
+    assert Path(result) == output_path.resolve()
+    assert Path(result).exists()
+    assert Path(result).stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_of_cad_output_path(cube_stl: str, tmp_path):
+    output_path = tmp_path / "snap.jpg"
+    response = await mcp.call_tool(
+        "snapshot_of_cad",
+        arguments={
+            "input_file": cube_stl,
+            "camera_view": "isometric",
+            "output_path": str(output_path),
+        },
+    )
+    result = _meta_result(response)
+    assert Path(result) == output_path.resolve()
+    assert Path(result).exists()
+    assert Path(result).stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_of_cad_output_path_directory(cube_stl: str, tmp_path):
+    """A directory output_path writes image.jpg into that directory."""
+    response = await mcp.call_tool(
+        "snapshot_of_cad",
+        arguments={
+            "input_file": cube_stl,
+            "camera_view": "isometric",
+            "output_path": str(tmp_path),
+        },
+    )
+    result = _meta_result(response)
+    assert Path(result).name == "image.jpg"
+    assert Path(result).exists()
+    assert Path(result).stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_of_kcl_output_path(cube_kcl: str, tmp_path):
+    output_path = tmp_path / "snap.jpg"
+    response = await mcp.call_tool(
+        "snapshot_of_kcl",
+        arguments={
+            "kcl_code": None,
+            "kcl_path": cube_kcl,
+            "camera_view": "isometric",
+            "output_path": str(output_path),
+        },
+    )
+    result = _meta_result(response)
+    assert Path(result) == output_path.resolve()
+    assert Path(result).exists()
+    assert Path(result).stat().st_size > 0
+
+
+@pytest.mark.asyncio
 async def test_text_to_cad_tools_are_not_registered():
     tools = await mcp.list_tools()
     tool_names = {tool.name for tool in tools}
@@ -1635,7 +1754,7 @@ async def test_save_image(cube_stl: str, tmp_path):
 
 @pytest.mark.asyncio
 async def test_save_image_to_directory(cube_stl: str, tmp_path):
-    """Test saving an image to a directory creates image.png."""
+    """Test saving an image to a directory creates image.jpg."""
     # First get an image from snapshot_of_cad
     snapshot_response = await mcp.call_tool(
         "snapshot_of_cad",
@@ -1657,7 +1776,7 @@ async def test_save_image_to_directory(cube_stl: str, tmp_path):
     )
     result = _meta_result(response)
     assert Path(result).exists()
-    assert Path(result).name == "image.png"
+    assert Path(result).name == "image.jpg"
     assert Path(result).stat().st_size > 0
 
 
@@ -1712,7 +1831,7 @@ async def test_save_image_to_temp_file(cube_stl: str):
     )
     result = _meta_result(response)
     assert Path(result).exists()
-    assert Path(result).suffix == ".png"
+    assert Path(result).suffix == ".jpg"
     assert Path(result).stat().st_size > 0
 
 
