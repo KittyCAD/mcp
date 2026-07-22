@@ -1141,7 +1141,7 @@ wheels = [
 
 [[package]]
 name = "zoo-mcp"
-version = "0.18.0"
+version = "0.18.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -1174,7 +1174,7 @@ requires-dist = [
     { name = "trimesh", specifier = "<5.0" },
     { name = "truststore", specifier = "<1.0" },
     { name = "typing-extensions", specifier = ">=4.12" },
-    { name = "zoo-kcl", specifier = ">=0.3.169" },
+    { name = "zoo-kcl", specifier = ">=0.3.170" },
 ]
 
 [package.metadata.requires-dev]
