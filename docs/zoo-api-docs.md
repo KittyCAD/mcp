@@ -33,6 +33,12 @@ url = "https://mcp.zoo.dev/api-docs/mcp"
 claude mcp add --transport http zoo-api-docs https://mcp.zoo.dev/api-docs/mcp
 ```
 
+### Gemini CLI
+
+```bash
+gemini mcp add --transport http zoo-api-docs https://mcp.zoo.dev/api-docs/mcp
+```
+
 ### VS Code
 
 Add this to your user or workspace `mcp.json`:
@@ -47,6 +53,34 @@ Add this to your user or workspace `mcp.json`:
   }
 }
 ```
+
+## Install with the lookup skill
+
+The raw MCP installation commands above receive the server's concise lookup instructions.
+The platform bundles below also install the shared `zoo-api-docs` Agent Skill for more detailed, on-demand guidance.
+
+### Codex plugin
+
+```bash
+codex plugin marketplace add KittyCAD/mcp
+codex plugin add zoo-api-docs@zoo
+```
+
+### Claude Code plugin
+
+```bash
+claude plugin marketplace add KittyCAD/mcp
+claude plugin install zoo-api-docs@zoo
+```
+
+### Gemini CLI extension
+
+```bash
+gemini extensions install https://github.com/KittyCAD/mcp
+```
+
+The bundle uses one platform-neutral `skills/zoo-api-docs/SKILL.md`.
+Only the installation manifests and Streamable HTTP configuration differ by client.
 
 ## Local fallback
 

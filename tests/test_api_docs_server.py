@@ -24,6 +24,19 @@ async def test_docs_profile_exposes_only_four_read_only_tools():
         assert tool.annotations.destructiveHint is False
         assert tool.annotations.idempotentHint is True
         assert tool.annotations.openWorldHint is False
+    assert tools[0].inputSchema["properties"]["limit"]["default"] == 3
+
+
+def test_docs_profile_instructions_prioritize_token_efficient_lookup():
+    instructions = mcp.instructions
+
+    assert instructions is not None
+    assert len(instructions.encode()) < 2_048
+    assert "Start with search_zoo_api" in instructions
+    assert "limit 3" in instructions
+    assert "If search already returns enough" in instructions
+    assert "get_zoo_api_schema one named schema at a time" in instructions
+    assert "Do not prefetch" in instructions
 
 
 @pytest.mark.asyncio
@@ -48,6 +61,18 @@ async def test_docs_tools_return_structured_results():
     assert operation["canonical_curl"]
     assert operation["openapi_source_commit"]
     assert operation["guide_source_revision"]
+
+
+@pytest.mark.asyncio
+async def test_search_defaults_to_three_results():
+    response = cast(
+        tuple[list[object], dict[str, Any]],
+        await mcp.call_tool("search_zoo_api", {"query": "convert"}),
+    )
+    result = response[1]
+
+    assert isinstance(result, dict)
+    assert 0 < result["results_count"] <= 3
 
 
 @pytest.mark.asyncio

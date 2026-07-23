@@ -38,8 +38,17 @@ READ_ONLY_ANNOTATIONS = ToolAnnotations(
 mcp = FastMCP(
     name="Zoo API Docs",
     instructions=(
-        "Search and retrieve pinned public Zoo API reference documentation. "
-        "This server is read-only and never executes Zoo API operations."
+        "Use this read-only server for pinned public Zoo API reference lookups; "
+        "it never executes Zoo operations. Start with search_zoo_api using two "
+        "to six distinctive terms and limit 3. If search already returns enough "
+        "to answer, such as the HTTP method and path, stop. Use "
+        "get_zoo_api_operation only for exact parameters, authentication, "
+        "content types, responses, or curl. Fetch get_zoo_api_schema one named "
+        "schema at a time only when exact fields or enum values are required. "
+        "Use get_zoo_api_guide only for tutorials or concepts. Do not prefetch "
+        "details, schemas, or guides. Call tools directly instead of wrapping "
+        "them in code execution. Do not browse the web when the pinned docs "
+        "answer. Cite documentation_url and never invent missing API details."
     ),
     log_level="WARNING",
     host="127.0.0.1",
@@ -110,8 +119,15 @@ async def search_zoo_api(
     ] = None,
     limit: Annotated[
         int,
-        Field(ge=1, le=10, description="Maximum number of ranked results."),
-    ] = 5,
+        Field(
+            ge=1,
+            le=10,
+            description=(
+                "Maximum number of ranked results. Use 3 unless broader "
+                "discovery is required."
+            ),
+        ),
+    ] = 3,
     include_deprecated: Annotated[
         bool,
         Field(description="Include deprecated operations in search results."),

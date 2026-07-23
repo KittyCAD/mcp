@@ -1,0 +1,41 @@
+{
+  "name": "zoo-api-docs",
+  "version": "0.1.0",
+  "description": "Find Zoo API endpoints, schemas, guides, and curl examples with a read-only documentation server.",
+  "author": {
+    "name": "Zoo"
+  },
+  "homepage": "https://zoo.dev/docs/developer-tools/api",
+  "repository": "https://github.com/KittyCAD/mcp",
+  "license": "MIT",
+  "keywords": [
+    "zoo",
+    "api",
+    "documentation",
+    "cad"
+  ],
+  "skills": "./skills/",
+  "mcpServers": {
+    "zoo-api-docs": {
+      "type": "http",
+      "url": "https://mcp.zoo.dev/api-docs/mcp"
+    }
+  },
+  "interface": {
+    "displayName": "Zoo API Docs",
+    "shortDescription": "Find Zoo API endpoints efficiently",
+    "longDescription": "Search pinned Zoo API operations, schemas, official guides, and canonical curl examples without executing Zoo API operations.",
+    "developerName": "Zoo",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://zoo.dev/docs/developer-tools/api",
+    "defaultPrompt": [
+      "Find the Zoo API endpoint for converting STEP to OBJ.",
+      "Show the request shape for a Zoo API operation."
+    ],
+    "brandColor": "#6E49CB",
+    "screenshots": []
+  }
+}

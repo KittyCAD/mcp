@@ -1,0 +1,21 @@
+{
+  "name": "zoo",
+  "interface": {
+    "displayName": "Zoo"
+  },
+  "plugins": [
+    {
+      "name": "zoo-api-docs",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/KittyCAD/mcp.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

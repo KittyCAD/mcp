@@ -1,0 +1,11 @@
+interface:
+  display_name: "Zoo API Docs"
+  short_description: "Find Zoo API endpoints efficiently"
+  default_prompt: "Find the Zoo API endpoint and exact request shape for this task."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "zoo-api-docs"
+      description: "Read-only Zoo API reference documentation"
+      transport: "streamable_http"
+      url: "https://mcp.zoo.dev/api-docs/mcp"

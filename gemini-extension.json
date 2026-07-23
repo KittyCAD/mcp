@@ -1,0 +1,10 @@
+{
+  "name": "zoo-api-docs",
+  "version": "0.1.0",
+  "description": "Find Zoo API endpoints, schemas, guides, and curl examples with a read-only documentation server.",
+  "mcpServers": {
+    "zoo-api-docs": {
+      "httpUrl": "https://mcp.zoo.dev/api-docs/mcp"
+    }
+  }
+}

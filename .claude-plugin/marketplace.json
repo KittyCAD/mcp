@@ -1,0 +1,23 @@
+{
+  "name": "zoo",
+  "owner": {
+    "name": "Zoo"
+  },
+  "description": "Zoo developer tools for Claude Code.",
+  "plugins": [
+    {
+      "name": "zoo-api-docs",
+      "source": {
+        "source": "github",
+        "repo": "KittyCAD/mcp"
+      },
+      "description": "Search the public Zoo API reference without executing Zoo operations.",
+      "category": "Developer Tools",
+      "tags": [
+        "api",
+        "documentation",
+        "cad"
+      ]
+    }
+  ]
+}
