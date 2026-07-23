@@ -6,6 +6,8 @@ on:
     paths:
       - '**.py'
       - 'pyproject.toml'
+      - 'src/zoo_mcp/api_docs/data/**'
+      - 'tests/data/api_docs_retrieval_eval.json'
 jobs:
   pytest:
     runs-on: ubuntu-latest-16-cores

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "allowed_host": "zoo.dev",
+  "guides": [
+    {
+      "id": "api-overview",
+      "title": "Zoo API Overview",
+      "url": "https://zoo.dev/docs/developer-tools/api",
+      "tags": ["api", "overview", "getting-started"]
+    },
+    {
+      "id": "authentication",
+      "title": "Zoo API Authentication",
+      "url": "https://zoo.dev/docs/developer-tools/api/authentication",
+      "tags": ["api", "authentication", "security"]
+    },
+    {
+      "id": "errors",
+      "title": "Zoo API Errors",
+      "url": "https://zoo.dev/docs/developer-tools/api/errors",
+      "tags": ["api", "errors", "debugging"]
+    },
+    {
+      "id": "file-api-beginner",
+      "title": "File Format API",
+      "url": "https://zoo.dev/docs/developer-tools/file-format-api",
+      "tags": ["file", "conversion", "beginner", "tutorial"]
+    },
+    {
+      "id": "engine-api-beginner",
+      "title": "Create Your First CAD Model with TypeScript",
+      "url": "https://zoo.dev/docs/developer-tools/tutorials/beginner-onboarding-js",
+      "tags": ["modeling", "engine", "websocket", "beginner", "tutorial"]
+    },
+    {
+      "id": "agent-api-beginner",
+      "title": "Send Your First Zookeeper Prompt with Python",
+      "url": "https://zoo.dev/docs/developer-tools/tutorials/beginner-onboarding-py",
+      "tags": ["agent", "zookeeper", "ml", "websocket", "beginner", "tutorial"]
+    }
+  ]
+}

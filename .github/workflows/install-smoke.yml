@@ -10,6 +10,8 @@ on:
       - 'pyproject.toml'
       - '.github/workflows/install-smoke.yml'
       - 'scripts/smoke_launch.py'
+      - 'scripts/smoke_api_docs.py'
+      - 'src/zoo_mcp/api_docs/**'
   workflow_dispatch:
 
 jobs:
@@ -90,6 +92,11 @@ jobs:
         shell: bash
         run: python scripts/smoke_launch.py python -m zoo_mcp
 
+      - name: Zoo API Docs contract smoke without credentials (pip)
+        if: matrix.installer == 'pip'
+        shell: bash
+        run: python scripts/smoke_api_docs.py
+
       # --- uv path: install into a fresh uv venv ---
       - name: Install with uv
         if: matrix.installer == 'uv'
@@ -107,3 +114,8 @@ jobs:
         if: matrix.installer == 'uv'
         shell: bash
         run: uv run --no-sync python scripts/smoke_launch.py python -m zoo_mcp
+
+      - name: Zoo API Docs contract smoke without credentials (uv)
+        if: matrix.installer == 'uv'
+        shell: bash
+        run: uv run --no-sync python scripts/smoke_api_docs.py

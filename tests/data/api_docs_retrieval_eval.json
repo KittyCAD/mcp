@@ -1,0 +1,130 @@
+[
+  {
+    "question": "How do I convert a STEP file to OBJ?",
+    "expected": ["create_file_conversion", "create_file_conversion_options", "file-api-beginner"]
+  },
+  {
+    "question": "calculate the volume of a CAD file",
+    "expected": ["create_file_volume"]
+  },
+  {
+    "question": "calculate mass from a CAD file and material density",
+    "expected": ["create_file_mass"]
+  },
+  {
+    "question": "find the surface area of an uploaded model",
+    "expected": ["create_file_surface_area"]
+  },
+  {
+    "question": "where is the center of mass for my part",
+    "expected": ["create_file_center_of_mass"]
+  },
+  {
+    "question": "get the density of a CAD file",
+    "expected": ["create_file_density"]
+  },
+  {
+    "question": "open the modeling engine WebSocket",
+    "expected": ["modeling_commands_ws", "engine-api-beginner"]
+  },
+  {
+    "question": "create a first CAD cube with TypeScript",
+    "expected": ["engine-api-beginner"]
+  },
+  {
+    "question": "send a Zookeeper prompt from Python",
+    "expected": ["agent-api-beginner", "ml_copilot_ws"]
+  },
+  {
+    "question": "beginner guide for the Agent API",
+    "expected": ["agent-api-beginner"]
+  },
+  {
+    "question": "how do bearer tokens authenticate requests",
+    "expected": ["authentication"]
+  },
+  {
+    "question": "what does a 401 API error mean",
+    "expected": ["errors"]
+  },
+  {
+    "question": "list all members in my organization",
+    "expected": ["list_org_members"]
+  },
+  {
+    "question": "add a new member to an org",
+    "expected": ["create_org_member"]
+  },
+  {
+    "question": "create a new organization",
+    "expected": ["create_org"]
+  },
+  {
+    "question": "list API calls and usage for my organization",
+    "expected": ["org_list_api_calls"]
+  },
+  {
+    "question": "inspect one API call for a user while debugging",
+    "expected": ["get_api_call_for_user"]
+  },
+  {
+    "question": "check the status of an asynchronous conversion operation",
+    "expected": ["get_async_operation"]
+  },
+  {
+    "question": "list my API tokens",
+    "expected": ["list_api_tokens_for_user"]
+  },
+  {
+    "question": "create an organization service account",
+    "expected": ["create_service_account_for_org"]
+  },
+  {
+    "question": "convert length units",
+    "expected": ["get_length_unit_conversion"]
+  },
+  {
+    "question": "convert temperature units",
+    "expected": ["get_temperature_unit_conversion"]
+  },
+  {
+    "question": "new prompt-to-edit ML copilot integration",
+    "expected": ["ml_copilot_ws", "agent-api-beginner"]
+  },
+  {
+    "question": "generate KCL code completions",
+    "expected": ["create_kcl_code_completions"]
+  },
+  {
+    "question": "semantic search over an org dataset",
+    "expected": ["search_org_dataset_semantic"]
+  },
+  {
+    "question": "upload source files into an organization dataset",
+    "expected": ["upload_org_dataset_files"]
+  },
+  {
+    "question": "get privacy settings for an org",
+    "expected": ["get_org_privacy_settings"]
+  },
+  {
+    "question": "list invoices for my organization",
+    "expected": ["list_invoices_for_org"]
+  },
+  {
+    "question": "browse publicly visible community projects",
+    "expected": ["list_public_projects"]
+  },
+  {
+    "question": "create a share link for my project",
+    "expected": ["create_project_share_link"]
+  },
+  {
+    "question": "register a personal OAuth application",
+    "expected": ["create_user_oauth2_app"]
+  },
+  {
+    "question": "florbulate the quantum banana sprocket",
+    "expected": []
+  }
+]

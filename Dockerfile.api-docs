@@ -1,0 +1,39 @@
+FROM ghcr.io/astral-sh/uv:0.11.16 AS uv
+
+FROM python:3.13-slim AS builder
+
+COPY --from=uv /uv /bin/uv
+
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY src ./src
+
+RUN uv sync --frozen --only-group api-docs-runtime --no-install-project \
+  && uv build --wheel --out-dir /tmp/dist \
+  && uv pip install --python /app/.venv/bin/python --no-deps /tmp/dist/*.whl
+
+FROM python:3.13-slim
+
+LABEL org.opencontainers.image.source="https://github.com/KittyCAD/mcp"
+LABEL org.opencontainers.image.description="Read-only Zoo API documentation MCP server"
+LABEL io.modelcontextprotocol.server.name="io.github.KittyCAD/zoo-api-docs"
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+WORKDIR /app
+
+COPY --from=builder /app/.venv /app/.venv
+
+USER 65532:65532
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["python", "-c", "import json, urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3); assert json.load(response)['ready']"]
+
+ENTRYPOINT ["zoo-api-docs"]
+CMD ["--http", "--host", "0.0.0.0", "--port", "8000"]

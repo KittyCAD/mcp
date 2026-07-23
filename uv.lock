@@ -1145,6 +1145,7 @@ version = "0.18.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
+    { name = "httpx" },
     { name = "kittycad" },
     { name = "mcp", extra = ["cli"] },
     { name = "pillow" },
@@ -1155,6 +1156,10 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
+api-docs-runtime = [
+    { name = "httpx" },
+    { name = "mcp", extra = ["cli"] },
+]
 dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-httpx" },
@@ -1168,6 +1173,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = "<26.0" },
+    { name = "httpx", specifier = ">=0.27,<1.0" },
     { name = "kittycad", specifier = ">=1.4.0,<2.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.27.1,<2.0" },
     { name = "pillow", specifier = "<13.0" },
@@ -1178,6 +1184,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
+api-docs-runtime = [
+    { name = "httpx", specifier = ">=0.27,<1.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.27.1,<2.0" },
+]
 dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-httpx" },

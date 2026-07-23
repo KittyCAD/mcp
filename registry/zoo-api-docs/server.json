@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.KittyCAD/zoo-api-docs",
+  "title": "Zoo API Docs",
+  "description": "Unauthenticated, read-only Zoo API endpoint, schema, guide, and canonical curl search.",
+  "repository": {
+    "url": "https://github.com/KittyCAD/mcp",
+    "source": "github"
+  },
+  "version": "0.18.1",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.zoo.dev/api-docs/mcp"
+    }
+  ]
+}

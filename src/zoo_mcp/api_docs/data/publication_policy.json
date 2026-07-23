@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "canonical_api_base_url": "https://api.zoo.dev",
+  "canonical_docs_base_url": "https://zoo.dev/docs/developer-tools/api",
+  "default_authentication": "bearer",
+  "curl_multipart_fields": {
+    "create_file_conversion_options": [
+      {
+        "kind": "json",
+        "name": "body",
+        "schema": "ConversionParams"
+      },
+      {
+        "kind": "file",
+        "multiple": true,
+        "name": "files"
+      }
+    ]
+  },
+  "exclude_path_prefixes": [
+    "/internal/"
+  ],
+  "exclude_tags": [
+    "hidden"
+  ],
+  "unauthenticated_operation_ids": [
+    "download_public_project",
+    "get_announcements",
+    "get_public_project",
+    "get_public_project_thumbnail",
+    "get_schema",
+    "list_project_categories",
+    "list_public_projects",
+    "ping"
+  ]
+}

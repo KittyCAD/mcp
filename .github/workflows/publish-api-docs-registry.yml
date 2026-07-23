@@ -1,0 +1,109 @@
+name: publish-zoo-api-docs-registry
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Registry version for the deployed server
+        required: true
+        type: string
+      image_digest:
+        description: Production image digest, including sha256 prefix
+        required: true
+        type: string
+      index_revision:
+        description: Production index revision, including sha256 prefix
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: zoo-api-docs-production
+    env:
+      VERSION: ${{ inputs.version }}
+      IMAGE_DIGEST: ${{ inputs.image_digest }}
+      INDEX_REVISION: ${{ inputs.index_revision }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Validate release identifiers
+        shell: bash
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo 'version must be a semantic version without a leading v' >&2
+            exit 1
+          fi
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo 'image_digest must be a sha256 OCI digest' >&2
+            exit 1
+          fi
+          if [[ ! "$INDEX_REVISION" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo 'index_revision must be a sha256 digest' >&2
+            exit 1
+          fi
+
+      - name: Verify production health and revision
+        shell: bash
+        run: |
+          curl --fail --silent https://mcp.zoo.dev/healthz \
+            | jq --exit-status --arg revision "$INDEX_REVISION" \
+              '.ready == true and .index_revision == $revision' >/dev/null
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.3.0
+        with:
+          python-version-file: pyproject.toml
+
+      - name: Install the MCP smoke client
+        run: uv sync --frozen --no-dev
+
+      - name: Verify the production MCP contract
+        run: |
+          uv run python scripts/smoke_api_docs.py \
+            --url https://mcp.zoo.dev/api-docs/mcp
+
+      - name: Install the pinned MCP Registry publisher
+        shell: bash
+        run: |
+          curl --fail --location \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.7.9/mcp-publisher_linux_amd64.tar.gz \
+            --output /tmp/mcp-publisher.tar.gz
+          echo 'ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac  /tmp/mcp-publisher.tar.gz' \
+            | sha256sum --check
+          tar xzf /tmp/mcp-publisher.tar.gz mcp-publisher
+
+      - name: Prepare Zoo API Docs Registry metadata
+        shell: bash
+        run: |
+          mkdir --parents "$RUNNER_TEMP/zoo-api-docs-registry"
+          jq --arg version "$VERSION" '.version = $version' \
+            registry/zoo-api-docs/server.json \
+            > "$RUNNER_TEMP/zoo-api-docs-registry/server.json"
+
+      - name: Authenticate to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish Zoo API Docs to the MCP Registry
+        working-directory: ${{ runner.temp }}/zoo-api-docs-registry
+        run: "$GITHUB_WORKSPACE/mcp-publisher publish"
+
+      - name: Record the production artifact
+        run: |
+          {
+            echo '## Zoo API Docs Registry publication'
+            echo
+            echo "- Version: \`$VERSION\`"
+            echo "- Image: \`ghcr.io/kittycad/zoo-api-docs@$IMAGE_DIGEST\`"
+            echo "- Index: \`$INDEX_REVISION\`"
+          } >> "$GITHUB_STEP_SUMMARY"

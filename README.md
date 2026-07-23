@@ -3,6 +3,10 @@
 An [MCP server](https://modelcontextprotocol.io/docs/getting-started/intro) housing various Zoo built utilities
 
 <!-- mcp-name: io.github.KittyCAD/zoo-mcp -->
+<!-- mcp-name: io.github.KittyCAD/zoo-api-docs -->
+
+This repository also ships [Zoo API Docs](docs/zoo-api-docs.md), a separate unauthenticated and read-only server for searching the public Zoo API reference.
+Zoo API Docs does not load or change the authenticated CAD tools described below.
 
 ## Prerequisites
 

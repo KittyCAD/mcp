@@ -1,0 +1,85 @@
+name: update-api-docs-index
+
+on:
+  repository_dispatch:
+    types:
+      - zoo-api-docs-source-update
+  workflow_dispatch:
+    inputs:
+      api_commit:
+        description: Full KittyCAD/api commit SHA; empty keeps the current pin
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-api-docs-index
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    env:
+      DISPATCH_API_COMMIT: ${{ github.event.client_payload.api_commit }}
+      MANUAL_API_COMMIT: ${{ inputs.api_commit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.3.0
+        with:
+          python-version-file: pyproject.toml
+
+      - name: Install the project
+        run: uv sync --frozen --dev
+
+      - name: Resolve pinned source revisions
+        id: source
+        shell: bash
+        run: |
+          current_commit=$(jq --raw-output '.openapi_source.commit' \
+            src/zoo_mcp/api_docs/data/index.json)
+          api_commit=${MANUAL_API_COMMIT:-${DISPATCH_API_COMMIT:-$current_commit}}
+          if [[ ! "$api_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo 'api_commit must be a full lowercase Git commit SHA' >&2
+            exit 1
+          fi
+          echo "api_commit=$api_commit" >> "$GITHUB_OUTPUT"
+          echo "short_commit=${api_commit:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch allowlisted sources and rebuild the index
+        env:
+          API_COMMIT: ${{ steps.source.outputs.api_commit }}
+        shell: bash
+        run: |
+          uv run python -m zoo_mcp.api_docs.builder \
+            --api-commit "$API_COMMIT" \
+            --output src/zoo_mcp/api_docs/data/index.json
+
+      - name: Run policy tests and retrieval evaluation
+        run: uv run pytest tests/test_api_docs_*.py
+
+      - name: Smoke-test the rebuilt profile without credentials
+        run: uv run python scripts/smoke_api_docs.py
+
+      - name: Create the index update pull request
+        uses: peter-evans/create-pull-request@v8.1.1
+        with:
+          branch: automation/zoo-api-docs-index
+          delete-branch: true
+          commit-message: 'chore: update Zoo API documentation index'
+          title: 'Update Zoo API Docs index (${{ steps.source.outputs.short_commit }})'
+          body: |
+            Refreshes the pinned Zoo API Docs index from the explicit source allowlist.
+            The policy tests, retrieval evaluation, and tokenless MCP smoke test passed before this pull request was created.
+            OpenAPI source commit: `${{ steps.source.outputs.api_commit }}`.
+          add-paths: src/zoo_mcp/api_docs/data/index.json
