@@ -31,7 +31,12 @@ env = {
 
 try:
     proc = subprocess.run(
-        cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=60, env=env
+        cmd,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=60,
+        env=env,
+        check=False,
     )
     err = proc.stderr.decode(errors="replace")
 except subprocess.TimeoutExpired as exc:

@@ -282,7 +282,7 @@ def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]
 
 
 class KCLExportFormat(Enum):
-    formats = {
+    formats = {  # noqa: RUF012
         "fbx": kcl.FileExportFormat.Fbx,
         "gltf": kcl.FileExportFormat.Gltf,
         "glb": kcl.FileExportFormat.Glb,
@@ -294,7 +294,7 @@ class KCLExportFormat(Enum):
 
 
 class CameraView(Enum):
-    views = {
+    views = {  # noqa: RUF012
         "front": {
             "up": [0.0, 0.0, 1.0],
             "vantage": [0.0, -1.0, 0.0],
@@ -713,7 +713,7 @@ async def zoo_calculate_cad_physical_properties(
             raise ZooMCPException(
                 "Failed to convert file for bounding box calculation, no output"
             )
-        bbox = _compute_stl_bounding_box(list(stl_result.outputs.values())[0])
+        bbox = _compute_stl_bounding_box(next(iter(stl_result.outputs.values())))
 
     physical_properties = {
         "volume": volume_result.volume,
@@ -923,7 +923,7 @@ async def zoo_calculate_bounding_box_cad(
             "Failed to convert file for bounding box calculation, no output"
         )
 
-    stl_data = list(stl_result.outputs.values())[0]
+    stl_data = next(iter(stl_result.outputs.values()))
 
     return _compute_stl_bounding_box(stl_data)
 
@@ -1016,7 +1016,7 @@ async def zoo_convert_cad_file(
         raise ZooMCPException("Failed to convert file no output response")
 
     async with aiofiles.open(export_path, "wb") as out:
-        await out.write(list(export_response.outputs.values())[0])
+        await out.write(next(iter(export_response.outputs.values())))
 
     logger.info("KCL project exported successfully to %s", str(export_path.resolve()))
 
