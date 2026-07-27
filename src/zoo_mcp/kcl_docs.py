@@ -46,10 +46,7 @@ def _is_safe_doc_path(path: str) -> bool:
         return False
 
     normalized = normpath(unquote(path))
-    if not normalized.startswith("docs/"):
-        return False
-
-    return True
+    return normalized.startswith("docs/")
 
 
 @dataclass

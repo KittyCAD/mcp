@@ -29,10 +29,7 @@ def is_safe_path_component(value: str, pattern: re.Pattern[str]) -> bool:
         return False
 
     normalized = posixpath.normpath(decoded)
-    if normalized != decoded or normalized.startswith(".."):
-        return False
-
-    return True
+    return normalized == decoded and not normalized.startswith("..")
 
 
 async def fetch_url(
