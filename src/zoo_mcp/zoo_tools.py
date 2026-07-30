@@ -356,6 +356,22 @@ async def _execute_with_retries(
             ) from error
 
 
+def _snapshot_view_kwargs(
+    snapshot_options: list[kcl.SnapshotOptions],
+    *,
+    zoom: bool,
+    highlight_edges: bool | None,
+) -> dict[str, object]:
+    """Build snapshot kwargs, omitting optional edge visibility when unset."""
+    kwargs: dict[str, object] = {
+        "snapshot_options": snapshot_options,
+        "zoom": zoom,
+    }
+    if highlight_edges is not None:
+        kwargs["highlight_edges"] = highlight_edges
+    return kwargs
+
+
 # Issue severities surfaced from an execution outcome, in descending order of
 # severity. Each entry maps a ``kcl.CompilationIssue`` predicate to the label
 # used when rendering that issue's report. ``is_fatal`` is checked before
@@ -1826,6 +1842,7 @@ async def zoo_multi_isometric_snapshot_of_kcl(
     padding: float = 0.1,
     max_image_dimension: int = 512,
     zoom: bool = True,
+    highlight_edges: bool | None = None,
 ) -> bytes:
     """Execute the KCL code and save a multi-isometric snapshot showing 4 isometric views. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -1835,6 +1852,7 @@ async def zoo_multi_isometric_snapshot_of_kcl(
         padding (float): The padding to apply to the snapshot. Default is 0.1.
         max_image_dimension (int): The maximum width or height of the returned image in pixels. Default is 512.
         zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
+        highlight_edges (bool | None): Whether rendered edges should be highlighted. If None, the zoo-kcl default is used.
 
     Returns:
         bytes or None: The JPEG image contents if successful
@@ -1868,8 +1886,11 @@ async def zoo_multi_isometric_snapshot_of_kcl(
                         kcl.execute_code_and_snapshot_views,
                         kcl_code,
                         kcl.ImageFormat.Jpeg,
-                        snapshot_options=views,
-                        zoom=zoom,
+                        **_snapshot_view_kwargs(
+                            views,
+                            zoom=zoom,
+                            highlight_edges=highlight_edges,
+                        ),
                     ),
                 ),
             )
@@ -1886,8 +1907,11 @@ async def zoo_multi_isometric_snapshot_of_kcl(
                         kcl.execute_and_snapshot_views,
                         str(kcl_path_resolved),
                         kcl.ImageFormat.Jpeg,
-                        snapshot_options=views,
-                        zoom=zoom,
+                        **_snapshot_view_kwargs(
+                            views,
+                            zoom=zoom,
+                            highlight_edges=highlight_edges,
+                        ),
                     ),
                 ),
             )
@@ -1910,6 +1934,7 @@ async def zoo_multiview_snapshot_of_kcl(
     padding: float = 0.1,
     max_image_dimension: int = 512,
     zoom: bool = True,
+    highlight_edges: bool | None = None,
 ) -> bytes:
     """Execute the KCL code and save a multiview snapshot of the resulting CAD model. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -1919,6 +1944,7 @@ async def zoo_multiview_snapshot_of_kcl(
         padding (float): The padding to apply to the snapshot. Default is 0.1.
         max_image_dimension (int): The maximum width or height of the returned image in pixels. Default is 512.
         zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
+        highlight_edges (bool | None): Whether rendered edges should be highlighted. If None, the zoo-kcl default is used.
 
     Returns:
         bytes or None: The JPEG image contents if successful
@@ -1965,8 +1991,11 @@ async def zoo_multiview_snapshot_of_kcl(
                         kcl.execute_code_and_snapshot_views,
                         kcl_code,
                         kcl.ImageFormat.Jpeg,
-                        snapshot_options=views,
-                        zoom=zoom,
+                        **_snapshot_view_kwargs(
+                            views,
+                            zoom=zoom,
+                            highlight_edges=highlight_edges,
+                        ),
                     ),
                 ),
             )
@@ -1983,8 +2012,11 @@ async def zoo_multiview_snapshot_of_kcl(
                         kcl.execute_and_snapshot_views,
                         str(kcl_path_resolved),
                         kcl.ImageFormat.Jpeg,
-                        snapshot_options=views,
-                        zoom=zoom,
+                        **_snapshot_view_kwargs(
+                            views,
+                            zoom=zoom,
+                            highlight_edges=highlight_edges,
+                        ),
                     ),
                 ),
             )
@@ -2148,6 +2180,7 @@ async def zoo_snapshot_of_kcl(
     padding: float = 0.1,
     max_image_dimension: int = 512,
     zoom: bool = True,
+    highlight_edges: bool | None = None,
 ) -> bytes:
     """Execute the KCL code and save a single view snapshot of the resulting CAD model. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -2158,6 +2191,7 @@ async def zoo_snapshot_of_kcl(
         padding (float): The padding to apply to the snapshot. Default is 0.1.
         max_image_dimension (int): The maximum width or height of the returned image in pixels. Default is 512.
         zoom (bool): Whether to zoom-to-fit the model before the snapshot. Default is True.
+        highlight_edges (bool | None): Whether rendered edges should be highlighted. If None, the zoo-kcl default is used.
 
     Returns:
         bytes or None: The JPEG image contents if successful
@@ -2179,8 +2213,11 @@ async def zoo_snapshot_of_kcl(
                     kcl.execute_code_and_snapshot_views,
                     kcl_code,
                     kcl.ImageFormat.Jpeg,
-                    snapshot_options=[view],
-                    zoom=zoom,
+                    **_snapshot_view_kwargs(
+                        [view],
+                        zoom=zoom,
+                        highlight_edges=highlight_edges,
+                    ),
                 ),
             ),
         )
@@ -2197,8 +2234,11 @@ async def zoo_snapshot_of_kcl(
                     kcl.execute_and_snapshot_views,
                     str(kcl_path_resolved),
                     kcl.ImageFormat.Jpeg,
-                    snapshot_options=[view],
-                    zoom=zoom,
+                    **_snapshot_view_kwargs(
+                        [view],
+                        zoom=zoom,
+                        highlight_edges=highlight_edges,
+                    ),
                 ),
             ),
         )
