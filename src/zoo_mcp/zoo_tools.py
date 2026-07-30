@@ -1,4 +1,8 @@
+import asyncio
 import io
+import random
+import re
+import time
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from pathlib import Path
@@ -67,7 +71,7 @@ from kittycad.models.modeling_cmd import (
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
 
-from zoo_mcp import ZooMCPException, kittycad_client, logger
+from zoo_mcp import ZooKclEngineError, ZooMCPException, kittycad_client, logger
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
 
 SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
@@ -206,18 +210,98 @@ def _check_kcl_code_or_path(
 # retry behavior the bindings' own tests use.
 MAX_EXECUTION_ATTEMPTS = 3
 
+# Delay before the first retry
+RETRY_INITIAL_DELAY_SECONDS = 1.0
+RETRY_MAX_DELAY_SECONDS = 8.0
+RETRY_JITTER_SECONDS = 0.5
+
+# Gates whether a *new* attempt starts; it does not bound the call. An attempt
+# already under way runs as long as the engine takes, so a single slow failure
+# can still outlast this budget -- what the budget prevents is spending that long
+# again on a retry.
+RETRY_TIME_BUDGET_SECONDS = 300.0
+
+# The engine quotes its own identifiers in some messages, e.g. "Modeling command
+# timed out `<uuid>` (API call ID: <uuid>)". They are the handles the engine team
+# needs, so lift them out of the prose rather than making callers parse it.
+_UUID_PATTERN = r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}"
+_MODELING_COMMAND_ID_RE = re.compile(rf"[Mm]odeling command[^`]*`({_UUID_PATTERN})`")
+_API_CALL_ID_RE = re.compile(rf"API call ID:\s*({_UUID_PATTERN})")
+
 _KclCoro = Callable[..., Awaitable[_T]]
+
+
+def _engine_error_message(error: BaseException) -> str:
+    """Return the engine's message without the PyO3 tuple repr around it.
+
+    ``str(kcl.KclError)`` renders as ``("engine: ...", False)``, but ``args[0]``
+    holds the message on its own.
+    """
+    args = getattr(error, "args", ())
+    if args and isinstance(args[0], str):
+        return args[0]
+    return str(error)
+
+
+# Only the kcl bindings' own errors carry the engine's message and retryable
+# flag, so only they can be spoken for as engine failures. Resolved at import so
+# a renamed symbol surfaces here rather than raising from inside an ``except``
+# block, where it would swallow the error being handled.
+_KCL_ERROR_TYPE: type[BaseException] | None = getattr(kcl, "KclError", None)
+
+
+def _is_kcl_engine_error(error: BaseException) -> bool:
+    """Return whether ``error`` came from the kcl bindings.
+
+    Anything else -- a ``TypeError`` from a bad call, an ``OSError`` from a
+    vanished file -- is a local failure that must not be relabelled as the
+    engine's, or callers keying off ``ZooKclEngineError`` misattribute it.
+    """
+    if _KCL_ERROR_TYPE is not None and isinstance(error, _KCL_ERROR_TYPE):
+        return True
+    # Fall back to the duck type the retryable check already relies on.
+    return callable(getattr(error, "is_retryable", None))
+
+
+def _as_engine_error(
+    error: BaseException, *, operation: str, attempts: int
+) -> ZooKclEngineError:
+    """Convert a kcl binding failure into a structured engine error."""
+    message = _engine_error_message(error)
+    is_retryable = getattr(error, "is_retryable", None)
+    retryable = bool(is_retryable()) if callable(is_retryable) else False
+    modeling_command_id = _MODELING_COMMAND_ID_RE.search(message)
+    api_call_id = _API_CALL_ID_RE.search(message)
+    return ZooKclEngineError(
+        message,
+        operation=operation,
+        retryable=retryable,
+        attempts=attempts,
+        modeling_command_id=(
+            modeling_command_id.group(1) if modeling_command_id else None
+        ),
+        api_call_id=api_call_id.group(1) if api_call_id else None,
+    )
 
 
 async def _execute_with_retries(
     async_fn: _KclCoro[_T], *args: object, **kwargs: object
 ) -> _T:
-    """Await a KCL execution coroutine, retrying on retryable engine errors.
+    """Await a KCL coroutine, retrying retryable engine errors with backoff.
 
-    The kcl bindings raise ``kcl.KclError`` for execution failures and expose
-    ``is_retryable()`` so transient errors (e.g. an engine hangup) can be
-    retried instead of bubbling up. Non-retryable errors are re-raised
-    immediately.
+    The kcl bindings raise ``kcl.KclError`` for engine failures and expose
+    ``is_retryable()`` so transient errors (e.g. an engine hangup) can be retried
+    instead of bubbling up. Retries stop at ``MAX_EXECUTION_ATTEMPTS`` or once
+    ``RETRY_TIME_BUDGET_SECONDS`` of wall clock has been spent, whichever comes
+    first.
+
+    A terminal *engine* failure is re-raised as ``ZooKclEngineError``, so every
+    retried operation reports the engine's message, its retryable flag, and the
+    modeling command / API call IDs the same way -- whether the caller propagates
+    the exception (the analysis tools) or renders it into an in-band message
+    (``zoo_execute_kcl`` and friends). Failures that did not come from the kcl
+    bindings propagate unchanged, so a local bug keeps its own type instead of
+    being reported as the engine's.
 
     Args:
         async_fn: The kcl coroutine function to call (e.g. ``kcl.execute_code``).
@@ -226,22 +310,50 @@ async def _execute_with_retries(
 
     Returns:
         Whatever ``async_fn`` returns on success.
+
+    Raises:
+        ZooKclEngineError: If the engine fails on the final attempt.
     """
-    retries_remaining = MAX_EXECUTION_ATTEMPTS - 1
+    operation = getattr(async_fn, "__name__", repr(async_fn))
+    started_at = time.monotonic()
+    delay_seconds = RETRY_INITIAL_DELAY_SECONDS
+    attempts = 0
     while True:
+        attempts += 1
         try:
             return await async_fn(*args, **kwargs)
         except Exception as error:
+            if not _is_kcl_engine_error(error):
+                raise
+            retries_remaining = MAX_EXECUTION_ATTEMPTS - attempts
             is_retryable = getattr(error, "is_retryable", None)
-            if retries_remaining > 0 and callable(is_retryable) and is_retryable():
+            retryable = callable(is_retryable) and is_retryable()
+            elapsed_seconds = time.monotonic() - started_at
+            wait_seconds = delay_seconds + random.uniform(0, RETRY_JITTER_SECONDS)
+            budget_spent = elapsed_seconds + wait_seconds >= RETRY_TIME_BUDGET_SECONDS
+            if retryable and retries_remaining > 0 and not budget_spent:
                 logger.warning(
-                    "Retryable KCL execution error, retrying (%d attempt(s) left): %s",
+                    "Retryable KCL execution error, retrying in %.1fs "
+                    "(%d attempt(s) left, %.1fs elapsed): %s",
+                    wait_seconds,
                     retries_remaining,
+                    elapsed_seconds,
                     error,
                 )
-                retries_remaining -= 1
+                await asyncio.sleep(wait_seconds)
+                delay_seconds = min(delay_seconds * 2, RETRY_MAX_DELAY_SECONDS)
                 continue
-            raise
+            if retryable and retries_remaining > 0:
+                logger.warning(
+                    "Retryable KCL execution error, but the %.0fs retry budget is "
+                    "spent after %.1fs; giving up: %s",
+                    RETRY_TIME_BUDGET_SECONDS,
+                    elapsed_seconds,
+                    error,
+                )
+            raise _as_engine_error(
+                error, operation=operation, attempts=attempts
+            ) from error
 
 
 # Issue severities surfaced from an execution outcome, in descending order of
@@ -753,6 +865,11 @@ async def zoo_calculate_kcl_physical_properties(
 
     Returns:
         dict: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass', and 'bounding_box'.
+
+    Raises:
+        ZooKclEngineError: If the engine cannot measure the model. Carries the
+            engine's message, its retryable flag, the number of attempts made,
+            and the modeling command / API call IDs when the engine quoted them.
     """
     logger.info("Calculating physical properties of KCL")
 
@@ -850,6 +967,11 @@ async def zoo_calculate_bounding_box_kcl(
 
     Returns:
         dict: A dictionary with 'center' (dict with x,y,z) and 'dimensions' (dict with x,y,z).
+
+    Raises:
+        ZooKclEngineError: If the engine cannot measure the model. Carries the
+            engine's message, its retryable flag, the number of attempts made,
+            and the modeling command / API call IDs when the engine quoted them.
     """
     logger.info("Calculating bounding box of KCL")
 
@@ -1328,9 +1450,12 @@ async def zoo_get_sketch_constraint_status(
                 kcl.get_sketch_constraint_status, str(kcl_path)
             )
         return _format_constraint_report(report)
+    except ZooKclEngineError:
+        # Already structured; re-wrapping would flatten it to a string.
+        raise
     except Exception as e:
         logger.error(e)
-        raise ZooMCPException(f"Failed to get sketch constraint status: {e}")
+        raise ZooMCPException(f"Failed to get sketch constraint status: {e}") from e
 
 
 async def zoo_mock_execute_kcl(
@@ -1771,9 +1896,12 @@ async def zoo_multi_isometric_snapshot_of_kcl(
 
         return resize_image(collage, max_image_dimension)
 
+    except ZooKclEngineError:
+        # Already structured; re-wrapping would flatten it to a string.
+        raise
     except Exception as e:
         logger.error("Failed to take multi-isometric snapshot: %s", e)
-        raise ZooMCPException(f"Failed to take multi-isometric snapshot: {e}")
+        raise ZooMCPException(f"Failed to take multi-isometric snapshot: {e}") from e
 
 
 async def zoo_multiview_snapshot_of_kcl(
@@ -1865,9 +1993,12 @@ async def zoo_multiview_snapshot_of_kcl(
 
         return resize_image(collage, max_image_dimension)
 
+    except ZooKclEngineError:
+        # Already structured; re-wrapping would flatten it to a string.
+        raise
     except Exception as e:
         logger.error("Failed to take multiview snapshot: %s", e)
-        raise ZooMCPException(f"Failed to take multiview snapshot: {e}")
+        raise ZooMCPException(f"Failed to take multiview snapshot: {e}") from e
 
 
 def zoo_snapshot_of_cad(
