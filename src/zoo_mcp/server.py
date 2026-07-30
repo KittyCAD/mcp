@@ -595,7 +595,7 @@ async def multiview_snapshot_of_kcl(
     kcl_path: str | None = None,
     zoom: bool = True,
     output_path: str | None = None,
-    highlight_edges: bool | None = None,
+    highlight_edges: bool = False,
 ) -> ImageContent | str:
     """Save a multiview snapshot of KCL code. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -610,7 +610,7 @@ async def multiview_snapshot_of_kcl(
         kcl_path (str | None): The path to a KCL file to export to a CAD file. The path should point to a .kcl file or a directory containing a main.kcl file.
         zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
         output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
-        highlight_edges (bool | None): Whether rendered edges should be highlighted. If None, the zoo-kcl default is used.
+        highlight_edges (bool): Whether rendered edges should be highlighted. Default is False.
 
     Returns:
         ImageContent | str: The multiview snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
@@ -675,7 +675,7 @@ async def multi_isometric_snapshot_of_kcl(
     kcl_path: str | None = None,
     zoom: bool = True,
     output_path: str | None = None,
-    highlight_edges: bool | None = None,
+    highlight_edges: bool = False,
 ) -> ImageContent | str:
     """Save a multi-isometric snapshot of KCL code showing 4 isometric views. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -690,7 +690,7 @@ async def multi_isometric_snapshot_of_kcl(
         kcl_path (str | None): The path to a KCL file to export to a CAD file. The path should point to a .kcl file or a directory containing a main.kcl file.
         zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
         output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
-        highlight_edges (bool | None): Whether rendered edges should be highlighted. If None, the zoo-kcl default is used.
+        highlight_edges (bool): Whether rendered edges should be highlighted. Default is False.
 
     Returns:
         ImageContent | str: The multi-isometric snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
@@ -784,7 +784,7 @@ async def snapshot_of_kcl(
     camera_view: dict[str, list[float]] | str = "isometric",
     zoom: bool = True,
     output_path: str | None = None,
-    highlight_edges: bool | None = None,
+    highlight_edges: bool = False,
 ) -> ImageContent | str:
     """Save a snapshot of a model represented by KCL. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -800,7 +800,7 @@ async def snapshot_of_kcl(
                For example camera = {"up": [0, 0, 1], "vantage": [0, -1, 0], "center": [0, 0, 0]} would set the camera to be looking at the origin from the front side (-y direction).
         zoom (bool): Whether to zoom-to-fit the model before the snapshot. Default is True.
         output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
-        highlight_edges (bool | None): Whether rendered edges should be highlighted. If None, the zoo-kcl default is used.
+        highlight_edges (bool): Whether rendered edges should be highlighted. Default is False.
 
     Returns:
         ImageContent | str: The snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.

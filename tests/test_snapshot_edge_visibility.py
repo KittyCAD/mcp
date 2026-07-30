@@ -97,7 +97,7 @@ async def test_kcl_snapshot_omits_highlight_edges_by_default(cube_kcl: str):
     SERVER_SNAPSHOT_FUNCTIONS,
     ids=lambda value: value.__name__ if callable(value) else value,
 )
-async def test_server_snapshot_tool_forwards_highlight_edges(
+async def test_server_snapshot_tool_disables_highlight_edges_by_default(
     snapshot_function: ServerSnapshotFunction,
     implementation_name: str,
 ):
@@ -107,13 +107,35 @@ async def test_server_snapshot_tool_forwards_highlight_edges(
         patch.object(server, implementation_name, new=implementation),
         patch.object(server, "encode_image", return_value="encoded"),
     ):
-        result = await snapshot_function(
-            kcl_code="cube()",
-            highlight_edges=False,
-        )
+        result = await snapshot_function(kcl_code="cube()")
 
     assert result == "encoded"
     implementation.assert_awaited_once()
     await_args = implementation.await_args
     assert await_args is not None
     assert await_args.kwargs["highlight_edges"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_function", "implementation_name"),
+    SERVER_SNAPSHOT_FUNCTIONS,
+    ids=lambda value: value.__name__ if callable(value) else value,
+)
+async def test_server_snapshot_tool_allows_highlight_edges_override(
+    snapshot_function: ServerSnapshotFunction,
+    implementation_name: str,
+):
+    implementation = AsyncMock(return_value=b"snapshot")
+
+    with (
+        patch.object(server, implementation_name, new=implementation),
+        patch.object(server, "encode_image", return_value="encoded"),
+    ):
+        result = await snapshot_function(kcl_code="cube()", highlight_edges=True)
+
+    assert result == "encoded"
+    implementation.assert_awaited_once()
+    await_args = implementation.await_args
+    assert await_args is not None
+    assert await_args.kwargs["highlight_edges"] is True
