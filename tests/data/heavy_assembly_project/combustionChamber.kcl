@@ -1,0 +1,236 @@
+// F-1 combustion chamber
+// Regeneratively cooled chamber shell with fuel manifold, flanges, and inspection hardware.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+import unitCylinderX, unitCylinderY, unitCylinderZ, unitRingX, unitRingY from "primitives.kcl"
+
+outerBottomSketch = sketch(on = offsetPlane(XY, offset = -650mm)) {
+  wall = circle(start = [var 520mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 1040mm
+}
+outerLowSketch = sketch(on = offsetPlane(XY, offset = -420mm)) {
+  wall = circle(start = [var 575mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 1150mm
+}
+outerHighSketch = sketch(on = offsetPlane(XY, offset = 360mm)) {
+  wall = circle(start = [var 610mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 1220mm
+}
+outerTopSketch = sketch(on = offsetPlane(XY, offset = 650mm)) {
+  wall = circle(start = [var 700mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 1400mm
+}
+outerBottomRegion = region(segments = [outerBottomSketch.wall])
+outerLowRegion = region(segments = [outerLowSketch.wall])
+outerHighRegion = region(segments = [outerHighSketch.wall])
+outerTopRegion = region(segments = [outerTopSketch.wall])
+outerChamberLoft = loft(
+  [
+    outerBottomRegion,
+    outerLowRegion,
+    outerHighRegion,
+    outerTopRegion
+  ],
+  vDegree = 3,
+)
+
+innerBottomSketch = sketch(on = offsetPlane(XY, offset = -720mm)) {
+  void = circle(start = [var 375mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 750mm
+}
+innerLowSketch = sketch(on = offsetPlane(XY, offset = -420mm)) {
+  void = circle(start = [var 420mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 840mm
+}
+innerHighSketch = sketch(on = offsetPlane(XY, offset = 360mm)) {
+  void = circle(start = [var 450mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 900mm
+}
+innerTopSketch = sketch(on = offsetPlane(XY, offset = 720mm)) {
+  void = circle(start = [var 500mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 1000mm
+}
+innerBottomRegion = region(segments = [innerBottomSketch.void])
+innerLowRegion = region(segments = [innerLowSketch.void])
+innerHighRegion = region(segments = [innerHighSketch.void])
+innerTopRegion = region(segments = [innerTopSketch.void])
+innerChamberLoft = loft(
+  [
+    innerBottomRegion,
+    innerLowRegion,
+    innerHighRegion,
+    innerTopRegion
+  ],
+  vDegree = 3,
+)
+chamberShell = subtract(outerChamberLoft, tools = [innerChamberLoft])
+  |> appearance(color = "#2b2b2d", metalness = 84, roughness = 35)
+
+lowerFlangeSketch = sketch(on = offsetPlane(XY, offset = -620mm)) {
+  outer = circle(start = [var 670mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 380mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1340mm
+  diameter(inner) == 760mm
+}
+lowerFlangeRegion = region(point = [520mm, 0mm], sketch = lowerFlangeSketch)
+lowerThroatFlange = extrude(lowerFlangeRegion, length = 120mm, symmetric = true)
+  |> appearance(color = "#747779", metalness = 88, roughness = 29)
+
+topFlangeSketch = sketch(on = offsetPlane(XY, offset = 610mm)) {
+  outer = circle(start = [var 850mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 500mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1700mm
+  diameter(inner) == 1000mm
+}
+topFlangeRegion = region(point = [675mm, 0mm], sketch = topFlangeSketch)
+injectorInterfaceFlange = extrude(topFlangeRegion, length = 130mm, symmetric = true)
+  |> appearance(color = "#837d72", metalness = 84, roughness = 33)
+
+fuelManifoldSketch = sketch(on = offsetPlane(XY, offset = 300mm)) {
+  outer = circle(start = [var 760mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 585mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1520mm
+  diameter(inner) == 1170mm
+}
+fuelManifoldRegion = region(point = [675mm, 0mm], sketch = fuelManifoldSketch)
+fuelManifold = extrude(fuelManifoldRegion, length = 150mm, symmetric = true)
+  |> appearance(color = "#8a684b", metalness = 78, roughness = 38)
+
+fuelInletBossRight = clone(unitCylinderX)
+  |> scale(
+       x = 650,
+       y = 430,
+       z = 430,
+       global = true,
+     )
+  |> translate(x = 890mm, z = 300mm, global = true)
+  |> appearance(color = "#8a684b", metalness = 78, roughness = 38)
+fuelInletBossLeft = clone(fuelInletBossRight)
+  |> rotate(axis = Z, angle = 180deg, global = true)
+fuelInletFlangeRight = clone(unitRingX)
+  |> scale(
+       x = 95,
+       y = 560,
+       z = 560,
+       global = true,
+     )
+  |> translate(x = 1215mm, z = 300mm, global = true)
+  |> appearance(color = "#b4a28c", metalness = 84, roughness = 31)
+fuelInletFlangeLeft = clone(fuelInletFlangeRight)
+  |> rotate(axis = Z, angle = 180deg, global = true)
+
+chamberRibSeed = clone(unitCylinderZ)
+  |> scale(
+       x = 34,
+       y = 34,
+       z = 920,
+       global = true,
+     )
+  |> translate(x = 600mm, z = -40mm, global = true)
+  |> appearance(color = "#444649", metalness = 78, roughness = 43)
+chamberCoolingRibs = patternCircular3d(
+  chamberRibSeed,
+  instances = 28,
+  axis = Z,
+  center = [0mm, 0mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+inspectionCoverFront = clone(unitCylinderY)
+  |> scale(
+       x = 300,
+       y = 45,
+       z = 300,
+       global = true,
+     )
+  |> translate(y = -610mm, z = 40mm, global = true)
+  |> appearance(color = "#85898c", metalness = 86, roughness = 28)
+inspectionCoverRear = clone(inspectionCoverFront)
+  |> rotate(axis = Z, angle = 180deg, global = true)
+inspectionCoverRingFront = clone(unitRingY)
+  |> scale(
+       x = 360,
+       y = 35,
+       z = 360,
+       global = true,
+     )
+  |> translate(y = -635mm, z = 40mm, global = true)
+  |> appearance(color = "#52565a", metalness = 80, roughness = 37)
+inspectionCoverRingRear = clone(inspectionCoverRingFront)
+  |> rotate(axis = Z, angle = 180deg, global = true)
+
+flangeBoltSeed = clone(unitCylinderZ)
+  |> scale(
+       x = 52,
+       y = 52,
+       z = 75,
+       global = true,
+     )
+  |> translate(x = 780mm, z = 675mm, global = true)
+  |> appearance(color = "#c2c5c6", metalness = 91, roughness = 22)
+flangeBolts = patternCircular3d(
+  flangeBoltSeed,
+  instances = 20,
+  axis = Z,
+  center = [0mm, 0mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+outerBottomSketchHidden = hide(outerBottomSketch)
+outerLowSketchHidden = hide(outerLowSketch)
+outerHighSketchHidden = hide(outerHighSketch)
+outerTopSketchHidden = hide(outerTopSketch)
+innerBottomSketchHidden = hide(innerBottomSketch)
+innerLowSketchHidden = hide(innerLowSketch)
+innerHighSketchHidden = hide(innerHighSketch)
+innerTopSketchHidden = hide(innerTopSketch)
+lowerFlangeSketchHidden = hide(lowerFlangeSketch)
+topFlangeSketchHidden = hide(topFlangeSketch)
+fuelManifoldSketchHidden = hide(fuelManifoldSketch)
+
+export combustionChamber = flatten([
+  chamberShell,
+  lowerThroatFlange,
+  injectorInterfaceFlange,
+  fuelManifold,
+  fuelInletBossRight,
+  fuelInletBossLeft,
+  fuelInletFlangeRight,
+  fuelInletFlangeLeft,
+  chamberCoolingRibs,
+  inspectionCoverFront,
+  inspectionCoverRear,
+  inspectionCoverRingFront,
+  inspectionCoverRingRear,
+  flangeBolts
+])

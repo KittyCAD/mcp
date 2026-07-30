@@ -1,0 +1,635 @@
+// F-1 propellant duct assembly
+// Routed LOX and RP-1 feed and discharge plumbing with smooth elbows, reducers, bellows, clamps, and bolted interfaces.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+import unitBlock, unitCylinderX, unitCylinderY, unitCylinderZ, unitRingX, unitRingY, unitRingZ from "primitives.kcl"
+
+loxFeedProfileSketch = sketch(on = XY) {
+  tube = circle(start = [var 230mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([tube.center, ORIGIN])
+  horizontal([tube.center, tube.start])
+  diameter(tube) == 460mm
+}
+loxFeedProfile = region(segments = [loxFeedProfileSketch.tube])
+loxFeedPathSketch = sketch(on = offsetPlane(XZ, offset = 170mm)) {
+  rise = line(start = [var -585mm, var 795mm], end = [var -585mm, var 1175mm])
+  upperElbow = arc(start = [var -585mm, var 1175mm], end = [var -885mm, var 1475mm], center = [var -885mm, var 1175mm])
+  interfaceRun = line(start = [var -885mm, var 1475mm], end = [var -1200mm, var 1475mm])
+  coincident([rise.end, upperElbow.start])
+  coincident([upperElbow.end, interfaceRun.start])
+  tangent([rise, upperElbow])
+  tangent([upperElbow, interfaceRun])
+  vertical(rise)
+  horizontal(interfaceRun)
+  horizontalDistance([ORIGIN, rise.start]) == -585mm
+  verticalDistance([ORIGIN, rise.start]) == 795mm
+  distance([rise.start, rise.end]) == 380mm
+  horizontalDistance([ORIGIN, upperElbow.center]) == -885mm
+  verticalDistance([ORIGIN, upperElbow.center]) == 1175mm
+  horizontalDistance([ORIGIN, upperElbow.end]) == -885mm
+  verticalDistance([ORIGIN, upperElbow.end]) == 1475mm
+  distance([interfaceRun.start, interfaceRun.end]) == 315mm
+}
+loxFeedDuct = sweep(
+  loxFeedProfile,
+  path = [
+    loxFeedPathSketch.rise,
+    loxFeedPathSketch.upperElbow,
+    loxFeedPathSketch.interfaceRun
+  ],
+  translateProfileToPath = true,
+  orientProfilePerpendicular = true,
+  version = 2,
+)
+  |> appearance(color = "#9aa3a7", metalness = 88, roughness = 30)
+
+loxReducerStartSketch = sketch(on = offsetPlane(YZ, offset = -1200mm)) {
+  section = circle(start = [var 60mm, var 1475mm], center = [var -170mm, var 1475mm])
+  horizontal([section.center, section.start])
+  horizontalDistance([ORIGIN, section.center]) == -170mm
+  verticalDistance([ORIGIN, section.center]) == 1475mm
+  diameter(section) == 460mm
+}
+loxReducerMidSketch = sketch(on = offsetPlane(YZ, offset = -1320mm)) {
+  section = circle(start = [var 100mm, var 1475mm], center = [var -170mm, var 1475mm])
+  horizontal([section.center, section.start])
+  horizontalDistance([ORIGIN, section.center]) == -170mm
+  verticalDistance([ORIGIN, section.center]) == 1475mm
+  diameter(section) == 540mm
+}
+loxReducerEndSketch = sketch(on = offsetPlane(YZ, offset = -1440mm)) {
+  section = circle(start = [var 140mm, var 1475mm], center = [var -170mm, var 1475mm])
+  horizontal([section.center, section.start])
+  horizontalDistance([ORIGIN, section.center]) == -170mm
+  verticalDistance([ORIGIN, section.center]) == 1475mm
+  diameter(section) == 620mm
+}
+loxReducerStartRegion = region(segments = [loxReducerStartSketch.section])
+loxReducerMidRegion = region(segments = [loxReducerMidSketch.section])
+loxReducerEndRegion = region(segments = [loxReducerEndSketch.section])
+loxFeedReducer = loft(
+  [
+    loxReducerStartRegion,
+    loxReducerMidRegion,
+    loxReducerEndRegion
+  ],
+  vDegree = 2,
+)
+  |> appearance(color = "#a8b0b3", metalness = 89, roughness = 28)
+loxExternalFlange = clone(unitRingX)
+  |> scale(
+       x = 105,
+       y = 760,
+       z = 760,
+       global = true,
+     )
+  |> translate(
+       x = -1490mm,
+       y = -170mm,
+       z = 1475mm,
+       global = true,
+     )
+  |> appearance(color = "#c1c6c8", metalness = 92, roughness = 22)
+
+loxVerticalClampLower = clone(unitRingZ)
+  |> scale(
+       x = 550,
+       y = 550,
+       z = 55,
+       global = true,
+     )
+  |> translate(
+       x = -585mm,
+       y = -170mm,
+       z = 965mm,
+       global = true,
+     )
+  |> appearance(color = "#626b70", metalness = 84, roughness = 34)
+loxVerticalClampUpper = clone(loxVerticalClampLower)
+  |> translate(z = 165mm, global = true)
+loxBellowsSeed = clone(unitRingX)
+  |> scale(
+       x = 32,
+       y = 535,
+       z = 535,
+       global = true,
+     )
+  |> translate(
+       x = -930mm,
+       y = -170mm,
+       z = 1475mm,
+       global = true,
+     )
+  |> appearance(color = "#8e989c", metalness = 87, roughness = 31)
+loxFeedBellows = patternLinear3d(
+  loxBellowsSeed,
+  instances = 6,
+  distance = -42mm,
+  axis = X,
+)
+loxSupportFoot = clone(unitBlock)
+  |> scale(
+       x = 250,
+       y = 210,
+       z = 110,
+       global = true,
+     )
+  |> translate(
+       x = -720mm,
+       y = -170mm,
+       z = 725mm,
+       global = true,
+     )
+  |> appearance(color = "#434b50", metalness = 79, roughness = 40)
+loxSupportWeb = clone(unitBlock)
+  |> scale(
+       x = 90,
+       y = 190,
+       z = 260,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = -28deg, global = true)
+  |> translate(
+       x = -690mm,
+       y = -170mm,
+       z = 820mm,
+       global = true,
+     )
+  |> appearance(color = "#4c555a", metalness = 80, roughness = 38)
+
+loxTransferClamp = clone(unitRingY)
+  |> scale(
+       x = 735,
+       y = 72,
+       z = 735,
+       global = true,
+     )
+  |> translate(
+       x = -500mm,
+       y = 610mm,
+       z = 35mm,
+       global = true,
+     )
+  |> appearance(color = "#a38b70", metalness = 82, roughness = 35)
+loxTransferBoltSeed = clone(unitCylinderY)
+  |> scale(
+       x = 42,
+       y = 110,
+       z = 42,
+       global = true,
+     )
+  |> translate(
+       x = -500mm,
+       y = 610mm,
+       z = 355mm,
+       global = true,
+     )
+  |> appearance(color = "#c7cbcc", metalness = 93, roughness = 19)
+loxTransferBolts = patternCircular3d(
+  loxTransferBoltSeed,
+  instances = 12,
+  axis = Y,
+  center = [-500mm, 610mm, 35mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+fuelFeedProfileSketch = sketch(on = XY) {
+  tube = circle(start = [var 180mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([tube.center, ORIGIN])
+  horizontal([tube.center, tube.start])
+  diameter(tube) == 360mm
+}
+fuelFeedProfile = region(segments = [fuelFeedProfileSketch.tube])
+fuelFeedPathSketch = sketch(on = offsetPlane(YZ, offset = -40mm)) {
+  lowerRun = line(start = [var -815mm, var 120mm], end = [var -1120mm, var 120mm])
+  feedElbow = arc(start = [var -1120mm, var 120mm], end = [var -1370mm, var 370mm], center = [var -1120mm, var 370mm])
+  riser = line(start = [var -1370mm, var 370mm], end = [var -1370mm, var 950mm])
+  coincident([lowerRun.end, feedElbow.start])
+  coincident([feedElbow.end, riser.start])
+  tangent([lowerRun, feedElbow])
+  tangent([feedElbow, riser])
+  horizontal(lowerRun)
+  vertical(riser)
+  horizontalDistance([ORIGIN, lowerRun.start]) == -815mm
+  verticalDistance([ORIGIN, lowerRun.start]) == 120mm
+  distance([lowerRun.start, lowerRun.end]) == 305mm
+  horizontalDistance([ORIGIN, feedElbow.center]) == -1120mm
+  verticalDistance([ORIGIN, feedElbow.center]) == 370mm
+  horizontalDistance([ORIGIN, feedElbow.end]) == -1370mm
+  verticalDistance([ORIGIN, feedElbow.end]) == 370mm
+  distance([riser.start, riser.end]) == 580mm
+}
+fuelFeedDuct = sweep(
+  fuelFeedProfile,
+  path = [
+    fuelFeedPathSketch.lowerRun,
+    fuelFeedPathSketch.feedElbow,
+    fuelFeedPathSketch.riser
+  ],
+  translateProfileToPath = true,
+  orientProfilePerpendicular = true,
+  version = 2,
+)
+  |> appearance(color = "#aab1b3", metalness = 89, roughness = 28)
+
+fuelReducerStartSketch = sketch(on = offsetPlane(XY, offset = 950mm)) {
+  section = circle(start = [var 140mm, var -1370mm], center = [var -40mm, var -1370mm])
+  horizontal([section.center, section.start])
+  horizontalDistance([ORIGIN, section.center]) == -40mm
+  verticalDistance([ORIGIN, section.center]) == -1370mm
+  diameter(section) == 360mm
+}
+fuelReducerMidSketch = sketch(on = offsetPlane(XY, offset = 1050mm)) {
+  section = circle(start = [var 170mm, var -1370mm], center = [var -40mm, var -1370mm])
+  horizontal([section.center, section.start])
+  horizontalDistance([ORIGIN, section.center]) == -40mm
+  verticalDistance([ORIGIN, section.center]) == -1370mm
+  diameter(section) == 420mm
+}
+fuelReducerEndSketch = sketch(on = offsetPlane(XY, offset = 1150mm)) {
+  section = circle(start = [var 195mm, var -1370mm], center = [var -40mm, var -1370mm])
+  horizontal([section.center, section.start])
+  horizontalDistance([ORIGIN, section.center]) == -40mm
+  verticalDistance([ORIGIN, section.center]) == -1370mm
+  diameter(section) == 470mm
+}
+fuelReducerStartRegion = region(segments = [fuelReducerStartSketch.section])
+fuelReducerMidRegion = region(segments = [fuelReducerMidSketch.section])
+fuelReducerEndRegion = region(segments = [fuelReducerEndSketch.section])
+fuelFeedReducer = loft(
+  [
+    fuelReducerStartRegion,
+    fuelReducerMidRegion,
+    fuelReducerEndRegion
+  ],
+  vDegree = 2,
+)
+  |> appearance(color = "#b2b8ba", metalness = 89, roughness = 27)
+fuelExternalFlange = clone(unitRingZ)
+  |> scale(
+       x = 590,
+       y = 590,
+       z = 95,
+       global = true,
+     )
+  |> translate(
+       x = -40mm,
+       y = -1370mm,
+       z = 1205mm,
+       global = true,
+     )
+  |> appearance(color = "#c6cacc", metalness = 92, roughness = 21)
+fuelBellowsSeed = clone(unitRingZ)
+  |> scale(
+       x = 430,
+       y = 430,
+       z = 30,
+       global = true,
+     )
+  |> translate(
+       x = -40mm,
+       y = -1370mm,
+       z = 650mm,
+       global = true,
+     )
+  |> appearance(color = "#959da0", metalness = 87, roughness = 31)
+fuelFeedBellows = patternLinear3d(
+  fuelBellowsSeed,
+  instances = 6,
+  distance = 42mm,
+  axis = Z,
+)
+fuelFeedClamp = clone(unitRingY)
+  |> scale(
+       x = 445,
+       y = 55,
+       z = 445,
+       global = true,
+     )
+  |> translate(
+       x = -40mm,
+       y = -1020mm,
+       z = 120mm,
+       global = true,
+     )
+  |> appearance(color = "#6d7579", metalness = 85, roughness = 33)
+
+fuelDischargeProfileSketch = sketch(on = XY) {
+  tube = circle(start = [var 170mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([tube.center, ORIGIN])
+  horizontal([tube.center, tube.start])
+  diameter(tube) == 340mm
+}
+fuelDischargeProfile = region(segments = [fuelDischargeProfileSketch.tube])
+fuelDischargeProfileBSketch = sketch(on = XY) {
+  tube = circle(start = [var 170mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([tube.center, ORIGIN])
+  horizontal([tube.center, tube.start])
+  diameter(tube) == 340mm
+}
+fuelDischargeProfileB = region(segments = [fuelDischargeProfileBSketch.tube])
+fuelDischargePathASketch = sketch(on = offsetPlane(YZ, offset = 300mm)) {
+  pumpDrop = line(start = [var 250mm, var -790mm], end = [var 250mm, var -1090mm])
+  lowerElbow = arc(start = [var 250mm, var -1090mm], end = [var 550mm, var -1390mm], center = [var 550mm, var -1090mm])
+  crossover = line(start = [var 550mm, var -1390mm], end = [var 1600mm, var -1390mm])
+  returnElbow = arc(start = [var 1600mm, var -1390mm], end = [var 1900mm, var -1090mm], center = [var 1600mm, var -1090mm])
+  chamberRise = line(start = [var 1900mm, var -1090mm], end = [var 1900mm, var -920mm])
+  coincident([pumpDrop.end, lowerElbow.start])
+  coincident([lowerElbow.end, crossover.start])
+  coincident([crossover.end, returnElbow.start])
+  coincident([returnElbow.end, chamberRise.start])
+  tangent([pumpDrop, lowerElbow])
+  tangent([lowerElbow, crossover])
+  tangent([crossover, returnElbow])
+  tangent([returnElbow, chamberRise])
+  vertical(pumpDrop)
+  horizontal(crossover)
+  vertical(chamberRise)
+  horizontalDistance([ORIGIN, pumpDrop.start]) == 250mm
+  verticalDistance([ORIGIN, pumpDrop.start]) == -790mm
+  distance([pumpDrop.start, pumpDrop.end]) == 300mm
+  horizontalDistance([ORIGIN, lowerElbow.center]) == 550mm
+  verticalDistance([ORIGIN, lowerElbow.center]) == -1090mm
+  horizontalDistance([ORIGIN, lowerElbow.end]) == 550mm
+  verticalDistance([ORIGIN, lowerElbow.end]) == -1390mm
+  distance([crossover.start, crossover.end]) == 1050mm
+  horizontalDistance([ORIGIN, returnElbow.center]) == 1600mm
+  verticalDistance([ORIGIN, returnElbow.center]) == -1090mm
+  horizontalDistance([ORIGIN, returnElbow.end]) == 1900mm
+  verticalDistance([ORIGIN, returnElbow.end]) == -1090mm
+  distance([chamberRise.start, chamberRise.end]) == 170mm
+}
+fuelDischargePathBSketch = sketch(on = offsetPlane(XZ, offset = -1900mm)) {
+  finalElbow = arc(start = [var 300mm, var -920mm], end = [var 600mm, var -620mm], center = [var 600mm, var -920mm])
+  manifoldRun = line(start = [var 600mm, var -620mm], end = [var 715mm, var -620mm])
+  coincident([finalElbow.end, manifoldRun.start])
+  tangent([finalElbow, manifoldRun])
+  horizontal(manifoldRun)
+  horizontalDistance([ORIGIN, finalElbow.start]) == 300mm
+  verticalDistance([ORIGIN, finalElbow.start]) == -920mm
+  horizontalDistance([ORIGIN, finalElbow.center]) == 600mm
+  verticalDistance([ORIGIN, finalElbow.center]) == -920mm
+  horizontalDistance([ORIGIN, finalElbow.end]) == 600mm
+  verticalDistance([ORIGIN, finalElbow.end]) == -620mm
+  distance([manifoldRun.start, manifoldRun.end]) == 115mm
+}
+fuelDischargeDuctA = sweep(
+  fuelDischargeProfile,
+  path = [
+    fuelDischargePathASketch.pumpDrop,
+    fuelDischargePathASketch.lowerElbow,
+    fuelDischargePathASketch.crossover,
+    fuelDischargePathASketch.returnElbow,
+    fuelDischargePathASketch.chamberRise
+  ],
+  translateProfileToPath = true,
+  orientProfilePerpendicular = true,
+  version = 2,
+)
+  |> appearance(color = "#959da0", metalness = 87, roughness = 32)
+fuelDischargeDuctB = sweep(
+  fuelDischargeProfileB,
+  path = [
+    fuelDischargePathBSketch.finalElbow,
+    fuelDischargePathBSketch.manifoldRun
+  ],
+  translateProfileToPath = true,
+  orientProfilePerpendicular = true,
+  version = 2,
+)
+  |> appearance(color = "#959da0", metalness = 87, roughness = 32)
+
+fuelCrossoverBellowsSeed = clone(unitRingY)
+  |> scale(
+       x = 410,
+       y = 30,
+       z = 410,
+       global = true,
+     )
+  |> translate(
+       x = 300mm,
+       y = 980mm,
+       z = -1390mm,
+       global = true,
+     )
+  |> appearance(color = "#858e92", metalness = 86, roughness = 34)
+fuelCrossoverBellows = patternLinear3d(
+  fuelCrossoverBellowsSeed,
+  instances = 7,
+  distance = 44mm,
+  axis = Y,
+)
+fuelLowerClamp = clone(unitRingY)
+  |> scale(
+       x = 430,
+       y = 58,
+       z = 430,
+       global = true,
+     )
+  |> translate(
+       x = 300mm,
+       y = 700mm,
+       z = -1390mm,
+       global = true,
+     )
+  |> appearance(color = "#79634f", metalness = 78, roughness = 41)
+fuelUpperClamp = clone(unitRingZ)
+  |> scale(
+       x = 430,
+       y = 430,
+       z = 58,
+       global = true,
+     )
+  |> translate(
+       x = 300mm,
+       y = 1900mm,
+       z = -1000mm,
+       global = true,
+     )
+  |> appearance(color = "#79634f", metalness = 78, roughness = 41)
+fuelManifoldClamp = clone(unitRingX)
+  |> scale(
+       x = 75,
+       y = 500,
+       z = 500,
+       global = true,
+     )
+  |> translate(
+       x = 680mm,
+       y = 1900mm,
+       z = -620mm,
+       global = true,
+     )
+  |> appearance(color = "#a88c6d", metalness = 81, roughness = 37)
+
+fuelPipeSupportA = clone(unitBlock)
+  |> scale(
+       x = 260,
+       y = 120,
+       z = 140,
+       global = true,
+     )
+  |> translate(
+       x = 300mm,
+       y = 1050mm,
+       z = -1640mm,
+       global = true,
+     )
+  |> appearance(color = "#424a4f", metalness = 79, roughness = 40)
+fuelPipeSupportWebA = clone(unitBlock)
+  |> scale(
+       x = 90,
+       y = 120,
+       z = 330,
+       global = true,
+     )
+  |> translate(
+       x = 300mm,
+       y = 1050mm,
+       z = -1510mm,
+       global = true,
+     )
+  |> appearance(color = "#4c555a", metalness = 80, roughness = 38)
+fuelPipeSupportB = clone(unitBlock)
+  |> scale(
+       x = 240,
+       y = 120,
+       z = 130,
+       global = true,
+     )
+  |> translate(
+       x = 300mm,
+       y = 1680mm,
+       z = -1640mm,
+       global = true,
+     )
+  |> appearance(color = "#424a4f", metalness = 79, roughness = 40)
+fuelPipeSupportWebB = clone(unitBlock)
+  |> scale(
+       x = 85,
+       y = 120,
+       z = 320,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = 18deg, global = true)
+  |> translate(
+       x = 300mm,
+       y = 1680mm,
+       z = -1510mm,
+       global = true,
+     )
+  |> appearance(color = "#4c555a", metalness = 80, roughness = 38)
+
+loxInterfaceBoltSeed = clone(unitCylinderX)
+  |> scale(
+       x = 65,
+       y = 40,
+       z = 40,
+       global = true,
+     )
+  |> translate(
+       x = -1540mm,
+       y = -170mm,
+       z = 1810mm,
+       global = true,
+     )
+  |> appearance(color = "#cbd0d1", metalness = 93, roughness = 18)
+loxInterfaceBolts = patternCircular3d(
+  loxInterfaceBoltSeed,
+  instances = 14,
+  axis = X,
+  center = [-1540mm, -170mm, 1475mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+fuelInterfaceBoltSeed = clone(unitCylinderZ)
+  |> scale(
+       x = 38,
+       y = 38,
+       z = 65,
+       global = true,
+     )
+  |> translate(
+       x = -40mm,
+       y = -1105mm,
+       z = 1255mm,
+       global = true,
+     )
+  |> appearance(color = "#cbd0d1", metalness = 93, roughness = 18)
+fuelInterfaceBolts = patternCircular3d(
+  fuelInterfaceBoltSeed,
+  instances = 12,
+  axis = Z,
+  center = [-40mm, -1370mm, 1255mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+fuelManifoldBoltSeed = clone(unitCylinderX)
+  |> scale(
+       x = 70,
+       y = 38,
+       z = 38,
+       global = true,
+     )
+  |> translate(
+       x = 755mm,
+       y = 1900mm,
+       z = -390mm,
+       global = true,
+     )
+  |> appearance(color = "#c7cbcc", metalness = 92, roughness = 20)
+fuelManifoldBolts = patternCircular3d(
+  fuelManifoldBoltSeed,
+  instances = 10,
+  axis = X,
+  center = [755mm, 1900mm, -620mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+loxFeedProfileSketchHidden = hide(loxFeedProfileSketch)
+loxFeedPathSketchHidden = hide(loxFeedPathSketch)
+loxReducerStartSketchHidden = hide(loxReducerStartSketch)
+loxReducerMidSketchHidden = hide(loxReducerMidSketch)
+loxReducerEndSketchHidden = hide(loxReducerEndSketch)
+fuelFeedProfileSketchHidden = hide(fuelFeedProfileSketch)
+fuelFeedPathSketchHidden = hide(fuelFeedPathSketch)
+fuelReducerStartSketchHidden = hide(fuelReducerStartSketch)
+fuelReducerMidSketchHidden = hide(fuelReducerMidSketch)
+fuelReducerEndSketchHidden = hide(fuelReducerEndSketch)
+fuelDischargeProfileSketchHidden = hide(fuelDischargeProfileSketch)
+fuelDischargeProfileBSketchHidden = hide(fuelDischargeProfileBSketch)
+fuelDischargePathASketchHidden = hide(fuelDischargePathASketch)
+fuelDischargePathBSketchHidden = hide(fuelDischargePathBSketch)
+
+export propellantDuctAssembly = flatten([
+  loxFeedDuct,
+  loxFeedReducer,
+  loxExternalFlange,
+  loxVerticalClampLower,
+  loxVerticalClampUpper,
+  loxFeedBellows,
+  loxSupportFoot,
+  loxSupportWeb,
+  loxTransferClamp,
+  loxTransferBolts,
+  fuelFeedDuct,
+  fuelFeedReducer,
+  fuelExternalFlange,
+  fuelFeedBellows,
+  fuelFeedClamp,
+  fuelDischargeDuctA,
+  fuelDischargeDuctB,
+  fuelCrossoverBellows,
+  fuelLowerClamp,
+  fuelUpperClamp,
+  fuelManifoldClamp,
+  fuelPipeSupportA,
+  fuelPipeSupportWebA,
+  fuelPipeSupportB,
+  fuelPipeSupportWebB,
+  loxInterfaceBolts,
+  fuelInterfaceBolts,
+  fuelManifoldBolts
+])

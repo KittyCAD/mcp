@@ -1,0 +1,239 @@
+// F-1 injector head
+// Layered injector dome with LOX manifold, inlet flanges, gimbal pedestal, and bolt fields.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+import unitBlock, unitCylinderY, unitCylinderZ, unitRingY from "primitives.kcl"
+
+lowerFlangeSketch = sketch(on = offsetPlane(XY, offset = -310mm)) {
+  outer = circle(start = [var 860mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 500mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1720mm
+  diameter(inner) == 1000mm
+}
+lowerFlangeRegion = region(point = [680mm, 0mm], sketch = lowerFlangeSketch)
+injectorLowerFlange = extrude(lowerFlangeRegion, length = 145mm, symmetric = true)
+  |> appearance(color = "#81786a", metalness = 84, roughness = 33)
+
+domeBaseSketch = sketch(on = offsetPlane(XY, offset = -210mm)) {
+  shell = circle(start = [var 700mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 1400mm
+}
+domeLowSketch = sketch(on = offsetPlane(XY, offset = 10mm)) {
+  shell = circle(start = [var 650mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 1300mm
+}
+domeHighSketch = sketch(on = offsetPlane(XY, offset = 240mm)) {
+  shell = circle(start = [var 470mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 940mm
+}
+domeTopSketch = sketch(on = offsetPlane(XY, offset = 380mm)) {
+  shell = circle(start = [var 235mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 470mm
+}
+domeBaseRegion = region(segments = [domeBaseSketch.shell])
+domeLowRegion = region(segments = [domeLowSketch.shell])
+domeHighRegion = region(segments = [domeHighSketch.shell])
+domeTopRegion = region(segments = [domeTopSketch.shell])
+injectorDome = loft(
+  [
+    domeBaseRegion,
+    domeLowRegion,
+    domeHighRegion,
+    domeTopRegion
+  ],
+  vDegree = 3,
+)
+  |> appearance(color = "#6e6253", metalness = 78, roughness = 37)
+
+loxManifoldSketch = sketch(on = offsetPlane(XY, offset = 20mm)) {
+  outer = circle(start = [var 810mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 610mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1620mm
+  diameter(inner) == 1220mm
+}
+loxManifoldRegion = region(point = [710mm, 0mm], sketch = loxManifoldSketch)
+loxManifold = extrude(loxManifoldRegion, length = 155mm, symmetric = true)
+  |> appearance(color = "#a07b58", metalness = 79, roughness = 36)
+
+upperCollarSketch = sketch(on = offsetPlane(XY, offset = 285mm)) {
+  outer = circle(start = [var 500mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 315mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1000mm
+  diameter(inner) == 630mm
+}
+upperCollarRegion = region(point = [405mm, 0mm], sketch = upperCollarSketch)
+upperDomeCollar = extrude(upperCollarRegion, length = 110mm, symmetric = true)
+  |> appearance(color = "#80705e", metalness = 81, roughness = 34)
+
+gimbalPedestal = clone(unitCylinderZ)
+  |> scale(
+       x = 470,
+       y = 470,
+       z = 260,
+       global = true,
+     )
+  |> translate(z = 465mm, global = true)
+  |> appearance(color = "#54595d", metalness = 86, roughness = 29)
+gimbalCap = clone(unitCylinderZ)
+  |> scale(
+       x = 610,
+       y = 610,
+       z = 110,
+       global = true,
+     )
+  |> translate(z = 570mm, global = true)
+  |> appearance(color = "#73787c", metalness = 88, roughness = 27)
+
+loxInletBossFront = clone(unitCylinderY)
+  |> scale(
+       x = 560,
+       y = 720,
+       z = 560,
+       global = true,
+     )
+  |> translate(y = -960mm, z = 35mm, global = true)
+  |> appearance(color = "#a07b58", metalness = 79, roughness = 36)
+loxInletBossRear = clone(loxInletBossFront)
+  |> translate(y = 1920mm, z = 95mm, global = true)
+loxInletFlangeFront = clone(unitRingY)
+  |> scale(
+       x = 700,
+       y = 105,
+       z = 700,
+       global = true,
+     )
+  |> translate(y = -1320mm, z = 35mm, global = true)
+  |> appearance(color = "#b9aa96", metalness = 85, roughness = 30)
+loxInletFlangeRear = clone(loxInletFlangeFront)
+  |> translate(y = 2640mm, z = 60mm, global = true)
+
+actuatorLugRight = clone(unitBlock)
+  |> scale(
+       x = 280,
+       y = 210,
+       z = 300,
+       global = true,
+     )
+  |> translate(
+       x = 760mm,
+       y = -150mm,
+       z = -120mm,
+       global = true,
+     )
+  |> appearance(color = "#4e5458", metalness = 82, roughness = 34)
+actuatorLugLeft = clone(actuatorLugRight)
+  |> rotate(axis = Z, angle = 180deg, global = true)
+actuatorLugRear = clone(actuatorLugRight)
+  |> rotate(axis = Z, angle = 90deg, global = true)
+
+outerBoltSeed = clone(unitCylinderZ)
+  |> scale(
+       x = 54,
+       y = 54,
+       z = 90,
+       global = true,
+     )
+  |> translate(x = 790mm, z = -245mm, global = true)
+  |> appearance(color = "#c6c9ca", metalness = 92, roughness = 21)
+outerFlangeBolts = patternCircular3d(
+  outerBoltSeed,
+  instances = 24,
+  axis = Z,
+  center = [0mm, 0mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+innerBoltSeed = clone(unitCylinderZ)
+  |> scale(
+       x = 42,
+       y = 42,
+       z = 70,
+       global = true,
+     )
+  |> translate(x = 455mm, z = 325mm, global = true)
+  |> appearance(color = "#b5b9bb", metalness = 90, roughness = 24)
+upperCollarBolts = patternCircular3d(
+  innerBoltSeed,
+  instances = 12,
+  axis = Z,
+  center = [0mm, 0mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+instrumentBoss = clone(unitCylinderY)
+  |> scale(
+       x = 180,
+       y = 120,
+       z = 180,
+       global = true,
+     )
+  |> translate(
+       x = 410mm,
+       y = -570mm,
+       z = 210mm,
+       global = true,
+     )
+  |> appearance(color = "#6d7479", metalness = 82, roughness = 32)
+instrumentCover = clone(unitCylinderY)
+  |> scale(
+       x = 225,
+       y = 38,
+       z = 225,
+       global = true,
+     )
+  |> translate(
+       x = 410mm,
+       y = -645mm,
+       z = 210mm,
+       global = true,
+     )
+  |> appearance(color = "#979c9f", metalness = 88, roughness = 26)
+
+lowerFlangeSketchHidden = hide(lowerFlangeSketch)
+domeBaseSketchHidden = hide(domeBaseSketch)
+domeLowSketchHidden = hide(domeLowSketch)
+domeHighSketchHidden = hide(domeHighSketch)
+domeTopSketchHidden = hide(domeTopSketch)
+loxManifoldSketchHidden = hide(loxManifoldSketch)
+upperCollarSketchHidden = hide(upperCollarSketch)
+
+export injectorHead = flatten([
+  injectorLowerFlange,
+  injectorDome,
+  loxManifold,
+  upperDomeCollar,
+  gimbalPedestal,
+  gimbalCap,
+  loxInletBossFront,
+  loxInletBossRear,
+  loxInletFlangeFront,
+  loxInletFlangeRear,
+  actuatorLugRight,
+  actuatorLugLeft,
+  actuatorLugRear,
+  outerFlangeBolts,
+  upperCollarBolts,
+  instrumentBoss,
+  instrumentCover
+])

@@ -34,6 +34,27 @@ def kcl_project():
     yield f"{project_path.resolve()}"
 
 
+# Module-scoped so a module-scoped fixture can measure the project once: a single
+# whole-assembly attempt has been seen to cost ~10 minutes.
+@pytest.fixture(scope="module")
+def heavy_assembly_project():
+    """A multi-module assembly the engine currently cannot measure as a whole.
+
+    See ``tests/data/heavy_assembly_project/README.md``.
+    """
+    project_path = Path(__file__).parent / "data" / "heavy_assembly_project"
+    yield f"{project_path.resolve()}"
+
+
+@pytest.fixture(scope="module")
+def heavy_assembly_sub_module():
+    """One sub-assembly of ``heavy_assembly_project``, which does measure."""
+    test_file = (
+        Path(__file__).parent / "data" / "heavy_assembly_project" / "injectorHead.kcl"
+    )
+    yield f"{test_file.resolve()}"
+
+
 @pytest.fixture
 def box_with_linter_errors():
     test_file = Path(__file__).parent / "data" / "box_with_linter_errors.kcl"

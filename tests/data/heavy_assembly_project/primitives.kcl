@@ -1,0 +1,114 @@
+// Engine primitive library
+// Origin-centered solids for reusable assembly detail.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+unitBlockSketch = sketch(on = XY) {
+  lower = line(start = [var -0.5mm, var -0.5mm], end = [var 0.5mm, var -0.5mm])
+  right = line(start = [var 0.5mm, var -0.5mm], end = [var 0.5mm, var 0.5mm])
+  upper = line(start = [var 0.5mm, var 0.5mm], end = [var -0.5mm, var 0.5mm])
+  left = line(start = [var -0.5mm, var 0.5mm], end = [var -0.5mm, var -0.5mm])
+  coincident([lower.end, right.start])
+  coincident([right.end, upper.start])
+  coincident([upper.end, left.start])
+  coincident([left.end, lower.start])
+  horizontal(lower)
+  vertical(right)
+  horizontal(upper)
+  vertical(left)
+  horizontalDistance([ORIGIN, lower.start]) == -0.5mm
+  verticalDistance([ORIGIN, lower.start]) == -0.5mm
+  horizontalDistance([lower.start, lower.end]) == 1mm
+  verticalDistance([right.start, right.end]) == 1mm
+}
+unitBlockRegion = region(
+  segments = [
+    unitBlockSketch.lower,
+    unitBlockSketch.right
+  ],
+  intersectionIndex = -1,
+  direction = CCW,
+)
+export unitBlock = extrude(unitBlockRegion, length = 1mm, symmetric = true)
+unitBlockSketchHidden = hide(unitBlockSketch)
+
+unitCylinderZSketch = sketch(on = XY) {
+  outer = circle(start = [var 0.5mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  horizontal([outer.center, outer.start])
+  diameter(outer) == 1mm
+}
+unitCylinderZRegion = region(segments = [unitCylinderZSketch.outer])
+export unitCylinderZ = extrude(unitCylinderZRegion, length = 1mm, symmetric = true)
+unitCylinderZSketchHidden = hide(unitCylinderZSketch)
+
+unitCylinderXSketch = sketch(on = YZ) {
+  outer = circle(start = [var 0.5mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  horizontal([outer.center, outer.start])
+  diameter(outer) == 1mm
+}
+unitCylinderXRegion = region(segments = [unitCylinderXSketch.outer])
+export unitCylinderX = extrude(unitCylinderXRegion, length = 1mm, symmetric = true)
+unitCylinderXSketchHidden = hide(unitCylinderXSketch)
+
+unitCylinderYSketch = sketch(on = XZ) {
+  outer = circle(start = [var 0.5mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  horizontal([outer.center, outer.start])
+  diameter(outer) == 1mm
+}
+unitCylinderYRegion = region(segments = [unitCylinderYSketch.outer])
+export unitCylinderY = extrude(unitCylinderYRegion, length = 1mm, symmetric = true)
+unitCylinderYSketchHidden = hide(unitCylinderYSketch)
+
+unitRingZSketch = sketch(on = XY) {
+  outer = circle(start = [var 0.5mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 0.35mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1mm
+  diameter(inner) == 0.7mm
+}
+unitRingZRegion = region(point = [0.425mm, 0mm], sketch = unitRingZSketch)
+export unitRingZ = extrude(unitRingZRegion, length = 1mm, symmetric = true)
+unitRingZSketchHidden = hide(unitRingZSketch)
+
+unitRingXSketch = sketch(on = YZ) {
+  outer = circle(start = [var 0.5mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 0.35mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1mm
+  diameter(inner) == 0.7mm
+}
+unitRingXRegion = region(point = [0.425mm, 0mm], sketch = unitRingXSketch)
+export unitRingX = extrude(unitRingXRegion, length = 1mm, symmetric = true)
+unitRingXSketchHidden = hide(unitRingXSketch)
+
+unitRingYSketch = sketch(on = XZ) {
+  outer = circle(start = [var 0.5mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 0.35mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1mm
+  diameter(inner) == 0.7mm
+}
+unitRingYRegion = region(point = [0.425mm, 0mm], sketch = unitRingYSketch)
+export unitRingY = extrude(unitRingYRegion, length = 1mm, symmetric = true)
+unitRingYSketchHidden = hide(unitRingYSketch)
+
+export primitiveSet = flatten([
+  unitBlock,
+  unitCylinderX,
+  unitCylinderY,
+  unitCylinderZ,
+  unitRingX,
+  unitRingY,
+  unitRingZ
+])

@@ -1,0 +1,525 @@
+// F-1 mounting and controls assembly
+// Gimbal frame, trunnions, hydraulic actuators, brackets, and routed instrumentation conduits.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+import unitBlock, unitCylinderX, unitCylinderY, unitCylinderZ, unitRingX, unitRingY, unitRingZ from "primitives.kcl"
+
+upperMountRing = clone(unitRingZ)
+  |> scale(
+       x = 2800,
+       y = 2800,
+       z = 180,
+       global = true,
+     )
+  |> translate(z = 220mm, global = true)
+  |> appearance(color = "#50585c", metalness = 83, roughness = 35)
+lowerGimbalRing = clone(unitRingZ)
+  |> scale(
+       x = 1560,
+       y = 1560,
+       z = 120,
+       global = true,
+     )
+  |> translate(z = -110mm, global = true)
+  |> appearance(color = "#6f777b", metalness = 87, roughness = 29)
+
+rightMountPad = clone(unitBlock)
+  |> scale(
+       x = 360,
+       y = 620,
+       z = 210,
+       global = true,
+     )
+  |> translate(x = 1240mm, z = 220mm, global = true)
+  |> appearance(color = "#444c50", metalness = 80, roughness = 39)
+leftMountPad = clone(rightMountPad)
+  |> translate(x = -2480mm, global = true)
+frontMountPad = clone(unitBlock)
+  |> scale(
+       x = 620,
+       y = 360,
+       z = 210,
+       global = true,
+     )
+  |> translate(y = -1240mm, z = 220mm, global = true)
+  |> appearance(color = "#444c50", metalness = 80, roughness = 39)
+rearMountPad = clone(frontMountPad)
+  |> translate(y = 2480mm, global = true)
+
+rightTrunnionBlock = clone(unitBlock)
+  |> scale(
+       x = 300,
+       y = 520,
+       z = 330,
+       global = true,
+     )
+  |> translate(x = 930mm, z = -110mm, global = true)
+  |> appearance(color = "#3e464a", metalness = 79, roughness = 41)
+leftTrunnionBlock = clone(rightTrunnionBlock)
+  |> translate(x = -1860mm, global = true)
+frontTrunnionBlock = clone(unitBlock)
+  |> scale(
+       x = 520,
+       y = 300,
+       z = 330,
+       global = true,
+     )
+  |> translate(y = -930mm, z = -110mm, global = true)
+  |> appearance(color = "#3e464a", metalness = 79, roughness = 41)
+rearTrunnionBlock = clone(frontTrunnionBlock)
+  |> translate(y = 1860mm, global = true)
+
+rightTrunnionPin = clone(unitCylinderX)
+  |> scale(
+       x = 540,
+       y = 190,
+       z = 190,
+       global = true,
+     )
+  |> translate(x = 760mm, z = -110mm, global = true)
+  |> appearance(color = "#b1b7b9", metalness = 91, roughness = 22)
+leftTrunnionPin = clone(rightTrunnionPin)
+  |> translate(x = -1520mm, global = true)
+frontTrunnionPin = clone(unitCylinderY)
+  |> scale(
+       x = 190,
+       y = 540,
+       z = 190,
+       global = true,
+     )
+  |> translate(y = -760mm, z = -110mm, global = true)
+  |> appearance(color = "#b1b7b9", metalness = 91, roughness = 22)
+rearTrunnionPin = clone(frontTrunnionPin)
+  |> translate(y = 1520mm, global = true)
+
+rightYokeStrut = clone(unitCylinderZ)
+  |> scale(
+       x = 150,
+       y = 150,
+       z = 470,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = 52.4deg, global = true)
+  |> translate(x = 1040mm, z = 25mm, global = true)
+  |> appearance(color = "#475055", metalness = 80, roughness = 39)
+leftYokeStrut = clone(rightYokeStrut)
+  |> rotate(axis = Z, angle = 180deg, global = true)
+frontYokeStrut = clone(unitCylinderZ)
+  |> scale(
+       x = 150,
+       y = 150,
+       z = 470,
+       global = true,
+     )
+  |> rotate(axis = X, angle = 52.4deg, global = true)
+  |> translate(y = -1040mm, z = 25mm, global = true)
+  |> appearance(color = "#475055", metalness = 80, roughness = 39)
+rearYokeStrut = clone(frontYokeStrut)
+  |> rotate(axis = Z, angle = 180deg, global = true)
+
+xActuatorHousing = clone(unitCylinderZ)
+  |> scale(
+       x = 245,
+       y = 245,
+       z = 720,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = 23.6deg, global = true)
+  |> translate(
+       x = 1106mm,
+       y = -150mm,
+       z = 70mm,
+       global = true,
+     )
+  |> appearance(color = "#353b3f", metalness = 75, roughness = 46)
+xActuatorRod = clone(unitCylinderZ)
+  |> scale(
+       x = 112,
+       y = 112,
+       z = 520,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = 23.6deg, global = true)
+  |> translate(
+       x = 861mm,
+       y = -150mm,
+       z = -490mm,
+       global = true,
+     )
+  |> appearance(color = "#bdc2c4", metalness = 92, roughness = 20)
+xActuatorCollar = clone(unitRingZ)
+  |> scale(
+       x = 300,
+       y = 300,
+       z = 65,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = 23.6deg, global = true)
+  |> translate(
+       x = 963mm,
+       y = -150mm,
+       z = -260mm,
+       global = true,
+     )
+  |> appearance(color = "#777f83", metalness = 86, roughness = 31)
+xUpperEye = clone(unitRingY)
+  |> scale(
+       x = 310,
+       y = 145,
+       z = 310,
+       global = true,
+     )
+  |> translate(
+       x = 1250mm,
+       y = -150mm,
+       z = 400mm,
+       global = true,
+     )
+  |> appearance(color = "#596166", metalness = 82, roughness = 35)
+xLowerEye = clone(xUpperEye)
+  |> translate(x = -490mm, z = -1120mm, global = true)
+xUpperPin = clone(unitCylinderY)
+  |> scale(
+       x = 120,
+       y = 250,
+       z = 120,
+       global = true,
+     )
+  |> translate(
+       x = 1250mm,
+       y = -150mm,
+       z = 400mm,
+       global = true,
+     )
+  |> appearance(color = "#c3c7c8", metalness = 92, roughness = 20)
+xLowerPin = clone(xUpperPin)
+  |> translate(x = -490mm, z = -1120mm, global = true)
+xUpperClevis = clone(unitBlock)
+  |> scale(
+       x = 270,
+       y = 330,
+       z = 190,
+       global = true,
+     )
+  |> translate(
+       x = 1250mm,
+       y = -150mm,
+       z = 300mm,
+       global = true,
+     )
+  |> appearance(color = "#424a4f", metalness = 79, roughness = 40)
+
+xHydraulicLineUpper = clone(unitCylinderZ)
+  |> scale(
+       x = 34,
+       y = 34,
+       z = 660,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = 23.6deg, global = true)
+  |> translate(
+       x = 1025mm,
+       y = -292mm,
+       z = 80mm,
+       global = true,
+     )
+  |> appearance(color = "#7f898d", metalness = 86, roughness = 32)
+xHydraulicLineLower = clone(unitCylinderZ)
+  |> scale(
+       x = 30,
+       y = 30,
+       z = 445,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = 23.6deg, global = true)
+  |> translate(
+       x = 825mm,
+       y = -292mm,
+       z = -440mm,
+       global = true,
+     )
+  |> appearance(color = "#7f898d", metalness = 86, roughness = 32)
+
+yActuatorHousing = clone(unitCylinderZ)
+  |> scale(
+       x = 245,
+       y = 245,
+       z = 720,
+       global = true,
+     )
+  |> rotate(axis = X, angle = -23.6deg, global = true)
+  |> translate(
+       x = 150mm,
+       y = 1106mm,
+       z = 70mm,
+       global = true,
+     )
+  |> appearance(color = "#353b3f", metalness = 75, roughness = 46)
+yActuatorRod = clone(unitCylinderZ)
+  |> scale(
+       x = 112,
+       y = 112,
+       z = 520,
+       global = true,
+     )
+  |> rotate(axis = X, angle = -23.6deg, global = true)
+  |> translate(
+       x = 150mm,
+       y = 861mm,
+       z = -490mm,
+       global = true,
+     )
+  |> appearance(color = "#bdc2c4", metalness = 92, roughness = 20)
+yActuatorCollar = clone(unitRingZ)
+  |> scale(
+       x = 300,
+       y = 300,
+       z = 65,
+       global = true,
+     )
+  |> rotate(axis = X, angle = -23.6deg, global = true)
+  |> translate(
+       x = 150mm,
+       y = 963mm,
+       z = -260mm,
+       global = true,
+     )
+  |> appearance(color = "#777f83", metalness = 86, roughness = 31)
+yUpperEye = clone(unitRingX)
+  |> scale(
+       x = 145,
+       y = 310,
+       z = 310,
+       global = true,
+     )
+  |> translate(
+       x = 150mm,
+       y = 1250mm,
+       z = 400mm,
+       global = true,
+     )
+  |> appearance(color = "#596166", metalness = 82, roughness = 35)
+yLowerEye = clone(yUpperEye)
+  |> translate(y = -490mm, z = -1120mm, global = true)
+yUpperPin = clone(unitCylinderX)
+  |> scale(
+       x = 250,
+       y = 120,
+       z = 120,
+       global = true,
+     )
+  |> translate(
+       x = 150mm,
+       y = 1250mm,
+       z = 400mm,
+       global = true,
+     )
+  |> appearance(color = "#c3c7c8", metalness = 92, roughness = 20)
+yLowerPin = clone(yUpperPin)
+  |> translate(y = -490mm, z = -1120mm, global = true)
+yUpperClevis = clone(unitBlock)
+  |> scale(
+       x = 330,
+       y = 270,
+       z = 190,
+       global = true,
+     )
+  |> translate(
+       x = 150mm,
+       y = 1250mm,
+       z = 300mm,
+       global = true,
+     )
+  |> appearance(color = "#424a4f", metalness = 79, roughness = 40)
+
+yHydraulicLineUpper = clone(unitCylinderZ)
+  |> scale(
+       x = 34,
+       y = 34,
+       z = 660,
+       global = true,
+     )
+  |> rotate(axis = X, angle = -23.6deg, global = true)
+  |> translate(
+       x = 292mm,
+       y = 1025mm,
+       z = 80mm,
+       global = true,
+     )
+  |> appearance(color = "#7f898d", metalness = 86, roughness = 32)
+yHydraulicLineLower = clone(unitCylinderZ)
+  |> scale(
+       x = 30,
+       y = 30,
+       z = 445,
+       global = true,
+     )
+  |> rotate(axis = X, angle = -23.6deg, global = true)
+  |> translate(
+       x = 292mm,
+       y = 825mm,
+       z = -440mm,
+       global = true,
+     )
+  |> appearance(color = "#7f898d", metalness = 86, roughness = 32)
+
+instrumentConduitProfileSketch = sketch(on = XY) {
+  cable = circle(start = [var 14mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([cable.center, ORIGIN])
+  horizontal([cable.center, cable.start])
+  diameter(cable) == 28mm
+}
+instrumentConduitProfile = region(segments = [instrumentConduitProfileSketch.cable])
+instrumentConduitPathSketch = sketch(on = offsetPlane(XZ, offset = -645mm)) {
+  sensorRise = line(start = [var 410mm, var -390mm], end = [var 410mm, var -120mm])
+  serviceElbow = arc(start = [var 410mm, var -120mm], end = [var 620mm, var 90mm], center = [var 620mm, var -120mm])
+  junctionRun = line(start = [var 620mm, var 90mm], end = [var 900mm, var 90mm])
+  coincident([sensorRise.end, serviceElbow.start])
+  coincident([serviceElbow.end, junctionRun.start])
+  tangent([sensorRise, serviceElbow])
+  tangent([serviceElbow, junctionRun])
+  vertical(sensorRise)
+  horizontal(junctionRun)
+  horizontalDistance([ORIGIN, sensorRise.start]) == 410mm
+  verticalDistance([ORIGIN, sensorRise.start]) == -390mm
+  distance([sensorRise.start, sensorRise.end]) == 270mm
+  horizontalDistance([ORIGIN, serviceElbow.center]) == 620mm
+  verticalDistance([ORIGIN, serviceElbow.center]) == -120mm
+  horizontalDistance([ORIGIN, serviceElbow.end]) == 620mm
+  verticalDistance([ORIGIN, serviceElbow.end]) == 90mm
+  distance([junctionRun.start, junctionRun.end]) == 280mm
+}
+instrumentConduitPrimary = sweep(
+  instrumentConduitProfile,
+  path = [
+    instrumentConduitPathSketch.sensorRise,
+    instrumentConduitPathSketch.serviceElbow,
+    instrumentConduitPathSketch.junctionRun
+  ],
+  translateProfileToPath = true,
+  orientProfilePerpendicular = true,
+  version = 2,
+)
+  |> appearance(color = "#697378", metalness = 84, roughness = 35)
+instrumentConduitSecondary = clone(instrumentConduitPrimary)
+  |> translate(y = 38mm, global = true)
+instrumentConduitTertiary = clone(instrumentConduitPrimary)
+  |> translate(y = 76mm, global = true)
+
+instrumentJunctionBox = clone(unitBlock)
+  |> scale(
+       x = 255,
+       y = 190,
+       z = 185,
+       global = true,
+     )
+  |> translate(
+       x = 1025mm,
+       y = -607mm,
+       z = 95mm,
+       global = true,
+     )
+  |> appearance(color = "#30363a", metalness = 71, roughness = 50)
+instrumentJunctionCover = clone(unitBlock)
+  |> scale(
+       x = 205,
+       y = 38,
+       z = 135,
+       global = true,
+     )
+  |> translate(
+       x = 1025mm,
+       y = -721mm,
+       z = 95mm,
+       global = true,
+     )
+  |> appearance(color = "#798185", metalness = 85, roughness = 32)
+connectorBankSeed = clone(unitCylinderY)
+  |> scale(
+       x = 38,
+       y = 80,
+       z = 38,
+       global = true,
+     )
+  |> translate(
+       x = 955mm,
+       y = -720mm,
+       z = 95mm,
+       global = true,
+     )
+  |> appearance(color = "#adb3b5", metalness = 89, roughness = 26)
+connectorBank = patternLinear3d(
+  connectorBankSeed,
+  instances = 3,
+  distance = 70mm,
+  axis = X,
+)
+
+mountBoltSeed = clone(unitCylinderZ)
+  |> scale(
+       x = 52,
+       y = 52,
+       z = 105,
+       global = true,
+     )
+  |> translate(x = 1250mm, z = 315mm, global = true)
+  |> appearance(color = "#c5c9ca", metalness = 93, roughness = 19)
+mountRingBolts = patternCircular3d(
+  mountBoltSeed,
+  instances = 20,
+  axis = Z,
+  center = [0mm, 0mm, 315mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+instrumentConduitProfileSketchHidden = hide(instrumentConduitProfileSketch)
+instrumentConduitPathSketchHidden = hide(instrumentConduitPathSketch)
+
+export mountingAndControlsAssembly = flatten([
+  upperMountRing,
+  lowerGimbalRing,
+  rightMountPad,
+  leftMountPad,
+  frontMountPad,
+  rearMountPad,
+  rightTrunnionBlock,
+  leftTrunnionBlock,
+  frontTrunnionBlock,
+  rearTrunnionBlock,
+  rightTrunnionPin,
+  leftTrunnionPin,
+  frontTrunnionPin,
+  rearTrunnionPin,
+  rightYokeStrut,
+  leftYokeStrut,
+  frontYokeStrut,
+  rearYokeStrut,
+  xActuatorHousing,
+  xActuatorRod,
+  xActuatorCollar,
+  xUpperEye,
+  xLowerEye,
+  xUpperPin,
+  xLowerPin,
+  xUpperClevis,
+  xHydraulicLineUpper,
+  xHydraulicLineLower,
+  yActuatorHousing,
+  yActuatorRod,
+  yActuatorCollar,
+  yUpperEye,
+  yLowerEye,
+  yUpperPin,
+  yLowerPin,
+  yUpperClevis,
+  yHydraulicLineUpper,
+  yHydraulicLineLower,
+  instrumentConduitPrimary,
+  instrumentConduitSecondary,
+  instrumentConduitTertiary,
+  instrumentJunctionBox,
+  instrumentJunctionCover,
+  connectorBank,
+  mountRingBolts
+])

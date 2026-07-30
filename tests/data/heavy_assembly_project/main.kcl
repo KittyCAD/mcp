@@ -1,0 +1,87 @@
+// Saturn V F-1 engine assembly
+// Hero-scale exterior engine with separate propulsion, machinery, plumbing, exhaust, and mounting modules.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+import nozzleAssembly from "nozzleAssembly.kcl"
+import combustionChamber from "combustionChamber.kcl"
+import injectorHead from "injectorHead.kcl"
+import turbopumpAssembly from "turbopumpAssembly.kcl"
+import propellantDuctAssembly from "propellantDuctAssembly.kcl"
+import gasGeneratorAssembly from "gasGeneratorAssembly.kcl"
+import turbineExhaustDuctAssembly from "turbineExhaustDuctAssembly.kcl"
+import mountingAndControlsAssembly from "mountingAndControlsAssembly.kcl"
+
+nozzleModule = nozzleAssembly
+  |> translate(
+       x = 0mm,
+       y = 0mm,
+       z = 0mm,
+       global = true,
+     )
+
+chamberModule = combustionChamber
+  |> translate(
+       x = 0mm,
+       y = 0mm,
+       z = 1880mm,
+       global = true,
+     )
+
+injectorModule = injectorHead
+  |> translate(
+       x = 0mm,
+       y = 0mm,
+       z = 2800mm,
+       global = true,
+     )
+
+turbopumpModule = turbopumpAssembly
+  |> translate(
+       x = 500mm,
+       y = -1900mm,
+       z = 2800mm,
+       global = true,
+     )
+
+propellantDuctModule = propellantDuctAssembly
+  |> translate(
+       x = 500mm,
+       y = -1900mm,
+       z = 2800mm,
+       global = true,
+     )
+
+gasGeneratorModule = gasGeneratorAssembly
+  |> translate(
+       x = 1190mm,
+       y = -2100mm,
+       z = 3940mm,
+       global = true,
+     )
+
+turbineExhaustModule = turbineExhaustDuctAssembly
+  |> translate(
+       x = 1150mm,
+       y = -270mm,
+       z = 1440mm,
+       global = true,
+     )
+
+mountingAndControlsModule = mountingAndControlsAssembly
+  |> translate(
+       x = 0mm,
+       y = 0mm,
+       z = 3480mm,
+       global = true,
+     )
+
+engineAssembly = flatten([
+  nozzleModule,
+  chamberModule,
+  injectorModule,
+  turbopumpModule,
+  propellantDuctModule,
+  gasGeneratorModule,
+  turbineExhaustModule,
+  mountingAndControlsModule
+])

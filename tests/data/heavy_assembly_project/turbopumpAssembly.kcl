@@ -1,0 +1,653 @@
+// F-1 turbopump assembly
+// Coupled oxidizer pump, fuel pump, turbine, shaft line, volutes, covers, and mounting cradle.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+import unitBlock, unitCylinderX, unitCylinderY, unitCylinderZ, unitRingX, unitRingY, unitRingZ from "primitives.kcl"
+
+mainDriveShaft = clone(unitCylinderX)
+  |> scale(
+       x = 1900,
+       y = 180,
+       z = 180,
+       global = true,
+     )
+  |> appearance(color = "#9ea5a8", metalness = 91, roughness = 22)
+
+innerShaftCollar = clone(unitRingX)
+  |> scale(
+       x = 90,
+       y = 330,
+       z = 330,
+       global = true,
+     )
+  |> translate(x = -320mm, global = true)
+  |> appearance(color = "#6f777b", metalness = 87, roughness = 28)
+outerShaftCollar = clone(innerShaftCollar)
+  |> translate(x = 650mm, global = true)
+
+loxPumpCore = clone(unitCylinderX)
+  |> scale(
+       x = 560,
+       y = 850,
+       z = 850,
+       global = true,
+     )
+  |> translate(x = -570mm, global = true)
+  |> appearance(color = "#7d8588", metalness = 86, roughness = 31)
+loxPumpVolute = clone(unitRingX)
+  |> scale(
+       x = 270,
+       y = 1120,
+       z = 1120,
+       global = true,
+     )
+  |> translate(x = -545mm, global = true)
+  |> appearance(color = "#9b8367", metalness = 80, roughness = 38)
+loxPumpInnerRing = clone(unitRingX)
+  |> scale(
+       x = 95,
+       y = 930,
+       z = 930,
+       global = true,
+     )
+  |> translate(x = -265mm, global = true)
+  |> appearance(color = "#b0a08a", metalness = 84, roughness = 31)
+loxPumpOuterRing = clone(unitRingX)
+  |> scale(
+       x = 85,
+       y = 900,
+       z = 900,
+       global = true,
+     )
+  |> translate(x = -865mm, global = true)
+  |> appearance(color = "#aeb5b7", metalness = 88, roughness = 27)
+loxPumpEndCover = clone(unitCylinderX)
+  |> scale(
+       x = 105,
+       y = 720,
+       z = 720,
+       global = true,
+     )
+  |> translate(x = -930mm, global = true)
+  |> appearance(color = "#8d9598", metalness = 88, roughness = 29)
+loxPumpEndCap = clone(unitCylinderX)
+  |> scale(
+       x = 65,
+       y = 310,
+       z = 310,
+       global = true,
+     )
+  |> translate(x = -1010mm, global = true)
+  |> appearance(color = "#60686c", metalness = 84, roughness = 35)
+
+loxFeedBoss = clone(unitCylinderZ)
+  |> scale(
+       x = 560,
+       y = 560,
+       z = 500,
+       global = true,
+     )
+  |> translate(
+       x = -585mm,
+       y = -170mm,
+       z = 520mm,
+       global = true,
+     )
+  |> appearance(color = "#8a9397", metalness = 87, roughness = 29)
+loxFeedFlange = clone(unitRingZ)
+  |> scale(
+       x = 700,
+       y = 700,
+       z = 95,
+       global = true,
+     )
+  |> translate(
+       x = -585mm,
+       y = -170mm,
+       z = 795mm,
+       global = true,
+     )
+  |> appearance(color = "#c0c5c6", metalness = 91, roughness = 23)
+loxDischargeBoss = clone(unitCylinderY)
+  |> scale(
+       x = 520,
+       y = 430,
+       z = 520,
+       global = true,
+     )
+  |> translate(
+       x = -500mm,
+       y = 405mm,
+       z = 35mm,
+       global = true,
+     )
+  |> appearance(color = "#9c876d", metalness = 81, roughness = 36)
+loxDischargeFlange = clone(unitRingY)
+  |> scale(
+       x = 660,
+       y = 90,
+       z = 660,
+       global = true,
+     )
+  |> translate(
+       x = -500mm,
+       y = 640mm,
+       z = 35mm,
+       global = true,
+     )
+  |> appearance(color = "#c2b39f", metalness = 86, roughness = 29)
+
+fuelPumpCore = clone(unitCylinderX)
+  |> scale(
+       x = 600,
+       y = 980,
+       z = 980,
+       global = true,
+     )
+  |> translate(x = 0mm, global = true)
+  |> appearance(color = "#8d7359", metalness = 79, roughness = 37)
+fuelPumpVolute = clone(unitRingX)
+  |> scale(
+       x = 300,
+       y = 1250,
+       z = 1250,
+       global = true,
+     )
+  |> translate(x = 20mm, global = true)
+  |> appearance(color = "#a17c59", metalness = 77, roughness = 40)
+fuelPumpInnerRing = clone(unitRingX)
+  |> scale(
+       x = 95,
+       y = 1050,
+       z = 1050,
+       global = true,
+     )
+  |> translate(x = -300mm, global = true)
+  |> appearance(color = "#b29b7d", metalness = 82, roughness = 34)
+fuelPumpOuterRing = clone(unitRingX)
+  |> scale(
+       x = 100,
+       y = 1080,
+       z = 1080,
+       global = true,
+     )
+  |> translate(x = 330mm, global = true)
+  |> appearance(color = "#8a9093", metalness = 86, roughness = 29)
+fuelPumpCover = clone(unitCylinderX)
+  |> scale(
+       x = 90,
+       y = 820,
+       z = 820,
+       global = true,
+     )
+  |> translate(x = 395mm, global = true)
+  |> appearance(color = "#777f83", metalness = 87, roughness = 30)
+
+fuelFeedBoss = clone(unitCylinderY)
+  |> scale(
+       x = 410,
+       y = 520,
+       z = 410,
+       global = true,
+     )
+  |> translate(
+       x = -40mm,
+       y = -530mm,
+       z = 120mm,
+       global = true,
+     )
+  |> appearance(color = "#7f878a", metalness = 86, roughness = 31)
+fuelFeedFlange = clone(unitRingY)
+  |> scale(
+       x = 530,
+       y = 82,
+       z = 530,
+       global = true,
+     )
+  |> translate(
+       x = -40mm,
+       y = -815mm,
+       z = 120mm,
+       global = true,
+     )
+  |> appearance(color = "#b7bec0", metalness = 90, roughness = 24)
+fuelDischargeBoss = clone(unitCylinderZ)
+  |> scale(
+       x = 390,
+       y = 390,
+       z = 470,
+       global = true,
+     )
+  |> translate(
+       x = 300mm,
+       y = 250mm,
+       z = -520mm,
+       global = true,
+     )
+  |> appearance(color = "#a57f59", metalness = 79, roughness = 38)
+fuelDischargeFlange = clone(unitRingZ)
+  |> scale(
+       x = 510,
+       y = 510,
+       z = 85,
+       global = true,
+     )
+  |> translate(
+       x = 300mm,
+       y = 250mm,
+       z = -790mm,
+       global = true,
+     )
+  |> appearance(color = "#c1ab8c", metalness = 84, roughness = 31)
+
+turbineFrontSketch = sketch(on = offsetPlane(YZ, offset = 330mm)) {
+  shell = circle(start = [var 455mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 910mm
+}
+turbineMidSketch = sketch(on = offsetPlane(YZ, offset = 610mm)) {
+  shell = circle(start = [var 385mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 770mm
+}
+turbineRearSketch = sketch(on = offsetPlane(YZ, offset = 890mm)) {
+  shell = circle(start = [var 325mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 650mm
+}
+turbineFrontRegion = region(segments = [turbineFrontSketch.shell])
+turbineMidRegion = region(segments = [turbineMidSketch.shell])
+turbineRearRegion = region(segments = [turbineRearSketch.shell])
+turbineHousing = loft(
+  [
+    turbineFrontRegion,
+    turbineMidRegion,
+    turbineRearRegion
+  ],
+  vDegree = 2,
+)
+  |> appearance(color = "#3f4447", metalness = 85, roughness = 34)
+turbineFrontRing = clone(unitRingX)
+  |> scale(
+       x = 110,
+       y = 980,
+       z = 980,
+       global = true,
+     )
+  |> translate(x = 345mm, global = true)
+  |> appearance(color = "#777d80", metalness = 88, roughness = 28)
+turbineRearRing = clone(unitRingX)
+  |> scale(
+       x = 90,
+       y = 740,
+       z = 740,
+       global = true,
+     )
+  |> translate(x = 900mm, global = true)
+  |> appearance(color = "#6d7478", metalness = 88, roughness = 29)
+turbineEndCover = clone(unitCylinderX)
+  |> scale(
+       x = 90,
+       y = 560,
+       z = 560,
+       global = true,
+     )
+  |> translate(x = 970mm, global = true)
+  |> appearance(color = "#62696d", metalness = 86, roughness = 31)
+
+hotGasInletBoss = clone(unitCylinderZ)
+  |> scale(
+       x = 340,
+       y = 340,
+       z = 360,
+       global = true,
+     )
+  |> translate(
+       x = 690mm,
+       y = -350mm,
+       z = 355mm,
+       global = true,
+     )
+  |> appearance(color = "#5f5144", metalness = 74, roughness = 44)
+hotGasInletFlange = clone(unitRingZ)
+  |> scale(
+       x = 450,
+       y = 450,
+       z = 75,
+       global = true,
+     )
+  |> translate(
+       x = 690mm,
+       y = -350mm,
+       z = 560mm,
+       global = true,
+     )
+  |> appearance(color = "#9b8269", metalness = 80, roughness = 37)
+turbineExhaustBoss = clone(unitCylinderY)
+  |> scale(
+       x = 430,
+       y = 470,
+       z = 430,
+       global = true,
+     )
+  |> translate(
+       x = 650mm,
+       y = 390mm,
+       z = -40mm,
+       global = true,
+     )
+  |> appearance(color = "#574a3f", metalness = 73, roughness = 46)
+turbineExhaustFlange = clone(unitRingY)
+  |> scale(
+       x = 560,
+       y = 90,
+       z = 560,
+       global = true,
+     )
+  |> translate(
+       x = 650mm,
+       y = 650mm,
+       z = -40mm,
+       global = true,
+     )
+  |> appearance(color = "#9a8169", metalness = 79, roughness = 39)
+
+accessoryGearHousing = clone(unitCylinderZ)
+  |> scale(
+       x = 420,
+       y = 420,
+       z = 300,
+       global = true,
+     )
+  |> translate(
+       x = 90mm,
+       y = -120mm,
+       z = 650mm,
+       global = true,
+     )
+  |> appearance(color = "#565d61", metalness = 83, roughness = 35)
+accessoryGearCover = clone(unitCylinderZ)
+  |> scale(
+       x = 500,
+       y = 500,
+       z = 70,
+       global = true,
+     )
+  |> translate(
+       x = 90mm,
+       y = -120mm,
+       z = 830mm,
+       global = true,
+     )
+  |> appearance(color = "#8b9295", metalness = 88, roughness = 28)
+lubeReservoir = clone(unitCylinderZ)
+  |> scale(
+       x = 260,
+       y = 260,
+       z = 360,
+       global = true,
+     )
+  |> translate(
+       x = 420mm,
+       y = -350mm,
+       z = 610mm,
+       global = true,
+     )
+  |> appearance(color = "#2f3437", metalness = 70, roughness = 50)
+lubeReservoirCap = clone(unitCylinderZ)
+  |> scale(
+       x = 310,
+       y = 310,
+       z = 55,
+       global = true,
+     )
+  |> translate(
+       x = 420mm,
+       y = -350mm,
+       z = 820mm,
+       global = true,
+     )
+  |> appearance(color = "#777e82", metalness = 85, roughness = 31)
+
+frontInspectionCover = clone(unitCylinderY)
+  |> scale(
+       x = 290,
+       y = 55,
+       z = 290,
+       global = true,
+     )
+  |> translate(
+       x = 55mm,
+       y = -635mm,
+       z = -130mm,
+       global = true,
+     )
+  |> appearance(color = "#949b9e", metalness = 89, roughness = 27)
+frontInspectionRing = clone(unitRingY)
+  |> scale(
+       x = 350,
+       y = 40,
+       z = 350,
+       global = true,
+     )
+  |> translate(
+       x = 55mm,
+       y = -670mm,
+       z = -130mm,
+       global = true,
+     )
+  |> appearance(color = "#555d61", metalness = 82, roughness = 36)
+valveControlBox = clone(unitBlock)
+  |> scale(
+       x = 340,
+       y = 250,
+       z = 260,
+       global = true,
+     )
+  |> translate(
+       x = -280mm,
+       y = -570mm,
+       z = -350mm,
+       global = true,
+     )
+  |> appearance(color = "#30363a", metalness = 71, roughness = 51)
+valveControlCover = clone(unitBlock)
+  |> scale(
+       x = 260,
+       y = 35,
+       z = 190,
+       global = true,
+     )
+  |> translate(
+       x = -280mm,
+       y = -713mm,
+       z = -350mm,
+       global = true,
+     )
+  |> appearance(color = "#7a8286", metalness = 85, roughness = 32)
+
+leftCradleFoot = clone(unitBlock)
+  |> scale(
+       x = 330,
+       y = 720,
+       z = 150,
+       global = true,
+     )
+  |> translate(x = -430mm, z = -690mm, global = true)
+  |> appearance(color = "#41484c", metalness = 80, roughness = 39)
+rightCradleFoot = clone(leftCradleFoot)
+  |> translate(x = 860mm, global = true)
+leftCradleWeb = clone(unitBlock)
+  |> scale(
+       x = 180,
+       y = 520,
+       z = 430,
+       global = true,
+     )
+  |> translate(x = -430mm, z = -455mm, global = true)
+  |> appearance(color = "#4d5559", metalness = 81, roughness = 37)
+rightCradleWeb = clone(leftCradleWeb)
+  |> translate(x = 860mm, global = true)
+leftMountPin = clone(unitCylinderY)
+  |> scale(
+       x = 170,
+       y = 820,
+       z = 170,
+       global = true,
+     )
+  |> translate(x = -430mm, z = -650mm, global = true)
+  |> appearance(color = "#b0b6b8", metalness = 91, roughness = 22)
+rightMountPin = clone(leftMountPin)
+  |> translate(x = 860mm, global = true)
+
+loxCoverBoltSeed = clone(unitCylinderX)
+  |> scale(
+       x = 70,
+       y = 46,
+       z = 46,
+       global = true,
+     )
+  |> translate(x = -995mm, z = 330mm, global = true)
+  |> appearance(color = "#c7cbcc", metalness = 93, roughness = 19)
+loxCoverBolts = patternCircular3d(
+  loxCoverBoltSeed,
+  instances = 12,
+  axis = X,
+  center = [-995mm, 0mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+fuelCoverBoltSeed = clone(unitCylinderX)
+  |> scale(
+       x = 65,
+       y = 44,
+       z = 44,
+       global = true,
+     )
+  |> translate(x = 445mm, z = 390mm, global = true)
+  |> appearance(color = "#c3c7c8", metalness = 92, roughness = 20)
+fuelCoverBolts = patternCircular3d(
+  fuelCoverBoltSeed,
+  instances = 14,
+  axis = X,
+  center = [445mm, 0mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+turbineBoltSeed = clone(unitCylinderX)
+  |> scale(
+       x = 58,
+       y = 40,
+       z = 40,
+       global = true,
+     )
+  |> translate(x = 1010mm, z = 260mm, global = true)
+  |> appearance(color = "#bfc4c6", metalness = 91, roughness = 22)
+turbineCoverBolts = patternCircular3d(
+  turbineBoltSeed,
+  instances = 10,
+  axis = X,
+  center = [1010mm, 0mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+loxBellowsSeed = clone(unitRingZ)
+  |> scale(
+       x = 620,
+       y = 620,
+       z = 35,
+       global = true,
+     )
+  |> translate(
+       x = -585mm,
+       y = -170mm,
+       z = 890mm,
+       global = true,
+     )
+  |> appearance(color = "#9da5a8", metalness = 88, roughness = 30)
+loxFeedBellows = patternLinear3d(
+  loxBellowsSeed,
+  instances = 6,
+  distance = 42mm,
+  axis = Z,
+)
+fuelBellowsSeed = clone(unitRingY)
+  |> scale(
+       x = 490,
+       y = 30,
+       z = 490,
+       global = true,
+     )
+  |> translate(
+       x = -40mm,
+       y = -890mm,
+       z = 120mm,
+       global = true,
+     )
+  |> appearance(color = "#a3aaad", metalness = 89, roughness = 28)
+fuelFeedBellows = patternLinear3d(
+  fuelBellowsSeed,
+  instances = 5,
+  distance = 38mm,
+  axis = Y,
+)
+
+turbineFrontSketchHidden = hide(turbineFrontSketch)
+turbineMidSketchHidden = hide(turbineMidSketch)
+turbineRearSketchHidden = hide(turbineRearSketch)
+
+export turbopumpAssembly = flatten([
+  mainDriveShaft,
+  innerShaftCollar,
+  outerShaftCollar,
+  loxPumpCore,
+  loxPumpVolute,
+  loxPumpInnerRing,
+  loxPumpOuterRing,
+  loxPumpEndCover,
+  loxPumpEndCap,
+  loxFeedBoss,
+  loxFeedFlange,
+  loxDischargeBoss,
+  loxDischargeFlange,
+  fuelPumpCore,
+  fuelPumpVolute,
+  fuelPumpInnerRing,
+  fuelPumpOuterRing,
+  fuelPumpCover,
+  fuelFeedBoss,
+  fuelFeedFlange,
+  fuelDischargeBoss,
+  fuelDischargeFlange,
+  turbineHousing,
+  turbineFrontRing,
+  turbineRearRing,
+  turbineEndCover,
+  hotGasInletBoss,
+  hotGasInletFlange,
+  turbineExhaustBoss,
+  turbineExhaustFlange,
+  accessoryGearHousing,
+  accessoryGearCover,
+  lubeReservoir,
+  lubeReservoirCap,
+  frontInspectionCover,
+  frontInspectionRing,
+  valveControlBox,
+  valveControlCover,
+  leftCradleFoot,
+  rightCradleFoot,
+  leftCradleWeb,
+  rightCradleWeb,
+  leftMountPin,
+  rightMountPin,
+  loxCoverBolts,
+  fuelCoverBolts,
+  turbineCoverBolts,
+  loxFeedBellows,
+  fuelFeedBellows
+])
