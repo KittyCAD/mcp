@@ -1,0 +1,367 @@
+// F-1 nozzle assembly
+// Two-piece lofted bell with cooling ribs, attachment rings, and exhaust collector.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+import unitCylinderY, unitCylinderZ, unitRingY from "primitives.kcl"
+
+lowerOuterExitSketch = sketch(on = offsetPlane(XY, offset = -1600mm)) {
+  wall = circle(start = [var 1830mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 3660mm
+}
+lowerOuterMidLowSketch = sketch(on = offsetPlane(XY, offset = -1150mm)) {
+  wall = circle(start = [var 1690mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 3380mm
+}
+lowerOuterMidHighSketch = sketch(on = offsetPlane(XY, offset = -550mm)) {
+  wall = circle(start = [var 1460mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 2920mm
+}
+lowerOuterTopSketch = sketch(on = XY) {
+  wall = circle(start = [var 1280mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 2560mm
+}
+lowerOuterExitRegion = region(segments = [lowerOuterExitSketch.wall])
+lowerOuterMidLowRegion = region(segments = [lowerOuterMidLowSketch.wall])
+lowerOuterMidHighRegion = region(segments = [lowerOuterMidHighSketch.wall])
+lowerOuterTopRegion = region(segments = [lowerOuterTopSketch.wall])
+lowerOuterLoft = loft(
+  [
+    lowerOuterExitRegion,
+    lowerOuterMidLowRegion,
+    lowerOuterMidHighRegion,
+    lowerOuterTopRegion
+  ],
+  vDegree = 3,
+)
+
+lowerInnerExitSketch = sketch(on = offsetPlane(XY, offset = -1660mm)) {
+  void = circle(start = [var 1710mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 3420mm
+}
+lowerInnerMidLowSketch = sketch(on = offsetPlane(XY, offset = -1150mm)) {
+  void = circle(start = [var 1580mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 3160mm
+}
+lowerInnerMidHighSketch = sketch(on = offsetPlane(XY, offset = -550mm)) {
+  void = circle(start = [var 1350mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 2700mm
+}
+lowerInnerTopSketch = sketch(on = offsetPlane(XY, offset = 60mm)) {
+  void = circle(start = [var 1140mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 2280mm
+}
+lowerInnerExitRegion = region(segments = [lowerInnerExitSketch.void])
+lowerInnerMidLowRegion = region(segments = [lowerInnerMidLowSketch.void])
+lowerInnerMidHighRegion = region(segments = [lowerInnerMidHighSketch.void])
+lowerInnerTopRegion = region(segments = [lowerInnerTopSketch.void])
+lowerInnerLoft = loft(
+  [
+    lowerInnerExitRegion,
+    lowerInnerMidLowRegion,
+    lowerInnerMidHighRegion,
+    lowerInnerTopRegion
+  ],
+  vDegree = 3,
+)
+lowerNozzleExtension = subtract(lowerOuterLoft, tools = [lowerInnerLoft])
+  |> appearance(color = "#34363a", metalness = 76, roughness = 47)
+
+upperOuterBottomSketch = sketch(on = offsetPlane(XY, offset = -20mm)) {
+  wall = circle(start = [var 1300mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 2600mm
+}
+upperOuterLowSketch = sketch(on = offsetPlane(XY, offset = 350mm)) {
+  wall = circle(start = [var 1080mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 2160mm
+}
+upperOuterMidSketch = sketch(on = offsetPlane(XY, offset = 750mm)) {
+  wall = circle(start = [var 760mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 1520mm
+}
+upperOuterThroatSketch = sketch(on = offsetPlane(XY, offset = 1100mm)) {
+  wall = circle(start = [var 540mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 1080mm
+}
+upperOuterTopSketch = sketch(on = offsetPlane(XY, offset = 1280mm)) {
+  wall = circle(start = [var 510mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([wall.center, ORIGIN])
+  horizontal([wall.center, wall.start])
+  diameter(wall) == 1020mm
+}
+upperOuterBottomRegion = region(segments = [upperOuterBottomSketch.wall])
+upperOuterLowRegion = region(segments = [upperOuterLowSketch.wall])
+upperOuterMidRegion = region(segments = [upperOuterMidSketch.wall])
+upperOuterThroatRegion = region(segments = [upperOuterThroatSketch.wall])
+upperOuterTopRegion = region(segments = [upperOuterTopSketch.wall])
+upperOuterLoft = loft(
+  [
+    upperOuterBottomRegion,
+    upperOuterLowRegion,
+    upperOuterMidRegion,
+    upperOuterThroatRegion,
+    upperOuterTopRegion
+  ],
+  vDegree = 3,
+)
+
+upperInnerBottomSketch = sketch(on = offsetPlane(XY, offset = -80mm)) {
+  void = circle(start = [var 1140mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 2280mm
+}
+upperInnerLowSketch = sketch(on = offsetPlane(XY, offset = 350mm)) {
+  void = circle(start = [var 930mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 1860mm
+}
+upperInnerMidSketch = sketch(on = offsetPlane(XY, offset = 750mm)) {
+  void = circle(start = [var 620mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 1240mm
+}
+upperInnerThroatSketch = sketch(on = offsetPlane(XY, offset = 1100mm)) {
+  void = circle(start = [var 390mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 780mm
+}
+upperInnerTopSketch = sketch(on = offsetPlane(XY, offset = 1340mm)) {
+  void = circle(start = [var 380mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([void.center, ORIGIN])
+  horizontal([void.center, void.start])
+  diameter(void) == 760mm
+}
+upperInnerBottomRegion = region(segments = [upperInnerBottomSketch.void])
+upperInnerLowRegion = region(segments = [upperInnerLowSketch.void])
+upperInnerMidRegion = region(segments = [upperInnerMidSketch.void])
+upperInnerThroatRegion = region(segments = [upperInnerThroatSketch.void])
+upperInnerTopRegion = region(segments = [upperInnerTopSketch.void])
+upperInnerLoft = loft(
+  [
+    upperInnerBottomRegion,
+    upperInnerLowRegion,
+    upperInnerMidRegion,
+    upperInnerThroatRegion,
+    upperInnerTopRegion
+  ],
+  vDegree = 3,
+)
+upperRegenNozzle = subtract(upperOuterLoft, tools = [upperInnerLoft])
+  |> appearance(color = "#26282c", metalness = 82, roughness = 39)
+
+exitLipSketch = sketch(on = offsetPlane(XY, offset = -1600mm)) {
+  outer = circle(start = [var 1900mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 1660mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 3800mm
+  diameter(inner) == 3320mm
+}
+exitLipRegion = region(point = [1780mm, 0mm], sketch = exitLipSketch)
+exitLip = extrude(exitLipRegion, length = 110mm, symmetric = true)
+  |> appearance(color = "#6d7174", metalness = 88, roughness = 31)
+
+seamRingSketch = sketch(on = XY) {
+  outer = circle(start = [var 1360mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 1120mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 2720mm
+  diameter(inner) == 2240mm
+}
+seamRingRegion = region(point = [1240mm, 0mm], sketch = seamRingSketch)
+nozzleAttachmentRing = extrude(seamRingRegion, length = 130mm, symmetric = true)
+  |> appearance(color = "#8d8170", metalness = 82, roughness = 34)
+
+throatRingSketch = sketch(on = offsetPlane(XY, offset = 1260mm)) {
+  outer = circle(start = [var 680mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 375mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1360mm
+  diameter(inner) == 750mm
+}
+throatRingRegion = region(point = [520mm, 0mm], sketch = throatRingSketch)
+throatAttachmentRing = extrude(throatRingRegion, length = 105mm, symmetric = true)
+  |> appearance(color = "#777b7e", metalness = 88, roughness = 30)
+
+lowHoopSketch = sketch(on = offsetPlane(XY, offset = 270mm)) {
+  outer = circle(start = [var 1160mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 1045mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 2320mm
+  diameter(inner) == 2090mm
+}
+lowHoopRegion = region(point = [1100mm, 0mm], sketch = lowHoopSketch)
+lowCoolingHoop = extrude(lowHoopRegion, length = 55mm, symmetric = true)
+  |> appearance(color = "#5b5f62", metalness = 84, roughness = 36)
+
+highHoopSketch = sketch(on = offsetPlane(XY, offset = 720mm)) {
+  outer = circle(start = [var 830mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 735mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 1660mm
+  diameter(inner) == 1470mm
+}
+highHoopRegion = region(point = [780mm, 0mm], sketch = highHoopSketch)
+highCoolingHoop = extrude(highHoopRegion, length = 48mm, symmetric = true)
+  |> appearance(color = "#5b5f62", metalness = 84, roughness = 36)
+
+upperRibSeed = clone(unitCylinderZ)
+  |> scale(
+       x = 38,
+       y = 38,
+       z = 875,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = -31deg, global = true)
+  |> translate(x = 875mm, z = 625mm, global = true)
+  |> appearance(color = "#4c5053", metalness = 78, roughness = 42)
+upperCoolingRibs = patternCircular3d(
+  upperRibSeed,
+  instances = 24,
+  axis = Z,
+  center = [0mm, 0mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+lowerRibSeed = clone(unitCylinderZ)
+  |> scale(
+       x = 26,
+       y = 26,
+       z = 1080,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = -15deg, global = true)
+  |> translate(x = 1500mm, z = -850mm, global = true)
+  |> appearance(color = "#45484b", metalness = 74, roughness = 48)
+lowerExtensionSeams = patternCircular3d(
+  lowerRibSeed,
+  instances = 12,
+  axis = Z,
+  center = [0mm, 0mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+exhaustCollectorSketch = sketch(on = offsetPlane(XY, offset = 120mm)) {
+  outer = circle(start = [var 1380mm, var 0mm], center = [var 0mm, var 0mm])
+  inner = circle(start = [var 1110mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outer.center, ORIGIN])
+  coincident([inner.center, outer.center])
+  horizontal([outer.center, outer.start])
+  horizontal([inner.center, inner.start])
+  diameter(outer) == 2760mm
+  diameter(inner) == 2220mm
+}
+exhaustCollectorRegion = region(point = [1240mm, 0mm], sketch = exhaustCollectorSketch)
+exhaustCollector = extrude(exhaustCollectorRegion, length = 170mm, symmetric = true)
+  |> appearance(color = "#8c6f55", metalness = 78, roughness = 41)
+exhaustInletBoss = clone(unitCylinderY)
+  |> scale(
+       x = 360,
+       y = 720,
+       z = 360,
+       global = true,
+     )
+  |> translate(
+       x = 1150mm,
+       y = 350mm,
+       z = 120mm,
+       global = true,
+     )
+  |> appearance(color = "#8c6f55", metalness = 78, roughness = 41)
+exhaustInletFlange = clone(unitRingY)
+  |> scale(
+       x = 470,
+       y = 80,
+       z = 470,
+       global = true,
+     )
+  |> translate(
+       x = 1150mm,
+       y = 710mm,
+       z = 120mm,
+       global = true,
+     )
+  |> appearance(color = "#a78c71", metalness = 82, roughness = 34)
+
+lowerOuterExitSketchHidden = hide(lowerOuterExitSketch)
+lowerOuterMidLowSketchHidden = hide(lowerOuterMidLowSketch)
+lowerOuterMidHighSketchHidden = hide(lowerOuterMidHighSketch)
+lowerOuterTopSketchHidden = hide(lowerOuterTopSketch)
+lowerInnerExitSketchHidden = hide(lowerInnerExitSketch)
+lowerInnerMidLowSketchHidden = hide(lowerInnerMidLowSketch)
+lowerInnerMidHighSketchHidden = hide(lowerInnerMidHighSketch)
+lowerInnerTopSketchHidden = hide(lowerInnerTopSketch)
+upperOuterBottomSketchHidden = hide(upperOuterBottomSketch)
+upperOuterLowSketchHidden = hide(upperOuterLowSketch)
+upperOuterMidSketchHidden = hide(upperOuterMidSketch)
+upperOuterThroatSketchHidden = hide(upperOuterThroatSketch)
+upperOuterTopSketchHidden = hide(upperOuterTopSketch)
+upperInnerBottomSketchHidden = hide(upperInnerBottomSketch)
+upperInnerLowSketchHidden = hide(upperInnerLowSketch)
+upperInnerMidSketchHidden = hide(upperInnerMidSketch)
+upperInnerThroatSketchHidden = hide(upperInnerThroatSketch)
+upperInnerTopSketchHidden = hide(upperInnerTopSketch)
+exitLipSketchHidden = hide(exitLipSketch)
+seamRingSketchHidden = hide(seamRingSketch)
+throatRingSketchHidden = hide(throatRingSketch)
+lowHoopSketchHidden = hide(lowHoopSketch)
+highHoopSketchHidden = hide(highHoopSketch)
+exhaustCollectorSketchHidden = hide(exhaustCollectorSketch)
+
+export nozzleAssembly = flatten([
+  lowerNozzleExtension,
+  upperRegenNozzle,
+  exitLip,
+  nozzleAttachmentRing,
+  throatAttachmentRing,
+  lowCoolingHoop,
+  highCoolingHoop,
+  upperCoolingRibs,
+  lowerExtensionSeams,
+  exhaustCollector,
+  exhaustInletBoss,
+  exhaustInletFlange
+])

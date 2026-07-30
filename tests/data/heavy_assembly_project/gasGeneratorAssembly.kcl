@@ -1,0 +1,483 @@
+// F-1 gas generator assembly
+// Compact gas generator with dual propellant valves, turbine feed, mounts, and service hardware.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+import unitBlock, unitCylinderX, unitCylinderY, unitCylinderZ, unitRingX, unitRingY, unitRingZ from "primitives.kcl"
+
+generatorRearSketch = sketch(on = offsetPlane(XZ, offset = -360mm)) {
+  shell = circle(start = [var 210mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 420mm
+}
+generatorLowSketch = sketch(on = offsetPlane(XZ, offset = -210mm)) {
+  shell = circle(start = [var 270mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 540mm
+}
+generatorMidSketch = sketch(on = offsetPlane(XZ, offset = 80mm)) {
+  shell = circle(start = [var 300mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 600mm
+}
+generatorFrontSketch = sketch(on = offsetPlane(XZ, offset = 260mm)) {
+  shell = circle(start = [var 205mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([shell.center, ORIGIN])
+  horizontal([shell.center, shell.start])
+  diameter(shell) == 410mm
+}
+generatorRearRegion = region(segments = [generatorRearSketch.shell])
+generatorLowRegion = region(segments = [generatorLowSketch.shell])
+generatorMidRegion = region(segments = [generatorMidSketch.shell])
+generatorFrontRegion = region(segments = [generatorFrontSketch.shell])
+generatorChamber = loft(
+  [
+    generatorRearRegion,
+    generatorLowRegion,
+    generatorMidRegion,
+    generatorFrontRegion
+  ],
+  vDegree = 3,
+)
+  |> appearance(color = "#625342", metalness = 78, roughness = 42)
+
+generatorRearBand = clone(unitRingY)
+  |> scale(
+       x = 610,
+       y = 70,
+       z = 610,
+       global = true,
+     )
+  |> translate(y = -225mm, global = true)
+  |> appearance(color = "#9d8468", metalness = 82, roughness = 35)
+generatorMidBand = clone(unitRingY)
+  |> scale(
+       x = 650,
+       y = 62,
+       z = 650,
+       global = true,
+     )
+  |> translate(y = 55mm, global = true)
+  |> appearance(color = "#8a735d", metalness = 81, roughness = 37)
+generatorFrontBand = clone(unitRingY)
+  |> scale(
+       x = 520,
+       y = 75,
+       z = 520,
+       global = true,
+     )
+  |> translate(y = 245mm, global = true)
+  |> appearance(color = "#a18a70", metalness = 83, roughness = 34)
+
+injectorHousing = clone(unitCylinderY)
+  |> scale(
+       x = 500,
+       y = 170,
+       z = 500,
+       global = true,
+     )
+  |> translate(y = -440mm, global = true)
+  |> appearance(color = "#777f82", metalness = 86, roughness = 31)
+injectorFlange = clone(unitRingY)
+  |> scale(
+       x = 640,
+       y = 82,
+       z = 640,
+       global = true,
+     )
+  |> translate(y = -535mm, global = true)
+  |> appearance(color = "#b4b9ba", metalness = 90, roughness = 25)
+injectorCover = clone(unitCylinderY)
+  |> scale(
+       x = 410,
+       y = 62,
+       z = 410,
+       global = true,
+     )
+  |> translate(y = -600mm, global = true)
+  |> appearance(color = "#555d61", metalness = 83, roughness = 36)
+
+loxValveHousing = clone(unitCylinderZ)
+  |> scale(
+       x = 270,
+       y = 270,
+       z = 230,
+       global = true,
+     )
+  |> translate(
+       x = -185mm,
+       y = -300mm,
+       z = 295mm,
+       global = true,
+     )
+  |> appearance(color = "#8b9497", metalness = 87, roughness = 29)
+fuelValveHousing = clone(loxValveHousing)
+  |> translate(x = 370mm, global = true)
+  |> appearance(color = "#9b7655", metalness = 79, roughness = 39)
+loxValveCap = clone(unitCylinderZ)
+  |> scale(
+       x = 330,
+       y = 330,
+       z = 72,
+       global = true,
+     )
+  |> translate(
+       x = -185mm,
+       y = -300mm,
+       z = 442mm,
+       global = true,
+     )
+  |> appearance(color = "#b3b9bb", metalness = 90, roughness = 25)
+fuelValveCap = clone(loxValveCap)
+  |> translate(x = 370mm, global = true)
+  |> appearance(color = "#b29a7d", metalness = 84, roughness = 32)
+valveBridge = clone(unitCylinderX)
+  |> scale(
+       x = 430,
+       y = 135,
+       z = 135,
+       global = true,
+     )
+  |> translate(y = -300mm, z = 330mm, global = true)
+  |> appearance(color = "#697176", metalness = 85, roughness = 33)
+loxValveDrop = clone(unitCylinderZ)
+  |> scale(
+       x = 115,
+       y = 115,
+       z = 270,
+       global = true,
+     )
+  |> translate(
+       x = -185mm,
+       y = -255mm,
+       z = 155mm,
+       global = true,
+     )
+  |> appearance(color = "#8c9598", metalness = 87, roughness = 30)
+fuelValveDrop = clone(loxValveDrop)
+  |> translate(x = 370mm, global = true)
+  |> appearance(color = "#9d7958", metalness = 79, roughness = 39)
+
+loxServiceBoss = clone(unitCylinderX)
+  |> scale(
+       x = 310,
+       y = 180,
+       z = 180,
+       global = true,
+     )
+  |> translate(
+       x = -425mm,
+       y = -300mm,
+       z = 305mm,
+       global = true,
+     )
+  |> appearance(color = "#90999c", metalness = 87, roughness = 30)
+loxServiceFlange = clone(unitRingX)
+  |> scale(
+       x = 78,
+       y = 265,
+       z = 265,
+       global = true,
+     )
+  |> translate(
+       x = -590mm,
+       y = -300mm,
+       z = 305mm,
+       global = true,
+     )
+  |> appearance(color = "#c0c5c6", metalness = 92, roughness = 22)
+fuelServiceBoss = clone(unitCylinderX)
+  |> scale(
+       x = 310,
+       y = 170,
+       z = 170,
+       global = true,
+     )
+  |> translate(
+       x = 425mm,
+       y = -300mm,
+       z = 305mm,
+       global = true,
+     )
+  |> appearance(color = "#a27d5b", metalness = 79, roughness = 38)
+fuelServiceFlange = clone(unitRingX)
+  |> scale(
+       x = 78,
+       y = 250,
+       z = 250,
+       global = true,
+     )
+  |> translate(
+       x = 590mm,
+       y = -300mm,
+       z = 305mm,
+       global = true,
+     )
+  |> appearance(color = "#c1ae92", metalness = 85, roughness = 30)
+
+igniterBossUpper = clone(unitCylinderX)
+  |> scale(
+       x = 230,
+       y = 105,
+       z = 105,
+       global = true,
+     )
+  |> translate(
+       x = 285mm,
+       y = 35mm,
+       z = 145mm,
+       global = true,
+     )
+  |> appearance(color = "#666e72", metalness = 84, roughness = 34)
+igniterBossLower = clone(igniterBossUpper)
+  |> translate(z = -290mm, global = true)
+igniterCapUpper = clone(unitCylinderX)
+  |> scale(
+       x = 58,
+       y = 155,
+       z = 155,
+       global = true,
+     )
+  |> translate(
+       x = 410mm,
+       y = 35mm,
+       z = 145mm,
+       global = true,
+     )
+  |> appearance(color = "#adb3b5", metalness = 90, roughness = 25)
+igniterCapLower = clone(igniterCapUpper)
+  |> translate(z = -290mm, global = true)
+
+generatorOutletBoss = clone(unitCylinderZ)
+  |> scale(
+       x = 300,
+       y = 300,
+       z = 240,
+       global = true,
+     )
+  |> translate(y = -150mm, z = -300mm, global = true)
+  |> appearance(color = "#57483c", metalness = 74, roughness = 46)
+generatorOutletFlange = clone(unitRingZ)
+  |> scale(
+       x = 430,
+       y = 430,
+       z = 78,
+       global = true,
+     )
+  |> translate(y = -150mm, z = -405mm, global = true)
+  |> appearance(color = "#9d8269", metalness = 80, roughness = 37)
+
+hotGasProfileSketch = sketch(on = XY) {
+  tube = circle(start = [var 145mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([tube.center, ORIGIN])
+  horizontal([tube.center, tube.start])
+  diameter(tube) == 290mm
+}
+hotGasProfile = region(segments = [hotGasProfileSketch.tube])
+hotGasPathSketch = sketch(on = YZ) {
+  turbineDrop = line(start = [var -150mm, var -405mm], end = [var -150mm, var -580mm])
+  vertical(turbineDrop)
+  horizontalDistance([ORIGIN, turbineDrop.start]) == -150mm
+  verticalDistance([ORIGIN, turbineDrop.start]) == -405mm
+  distance([turbineDrop.start, turbineDrop.end]) == 175mm
+}
+hotGasTransferDuct = sweep(
+  hotGasProfile,
+  path = [hotGasPathSketch.turbineDrop],
+  translateProfileToPath = true,
+  orientProfilePerpendicular = true,
+  version = 2,
+)
+  |> appearance(color = "#685548", metalness = 75, roughness = 43)
+turbineFeedFlange = clone(unitRingZ)
+  |> scale(
+       x = 450,
+       y = 450,
+       z = 80,
+       global = true,
+     )
+  |> translate(y = -150mm, z = -580mm, global = true)
+  |> appearance(color = "#a88d71", metalness = 81, roughness = 36)
+hotGasBellowsSeed = clone(unitRingZ)
+  |> scale(
+       x = 355,
+       y = 355,
+       z = 28,
+       global = true,
+     )
+  |> translate(y = -150mm, z = -455mm, global = true)
+  |> appearance(color = "#7d7167", metalness = 78, roughness = 40)
+hotGasBellows = patternLinear3d(
+  hotGasBellowsSeed,
+  instances = 4,
+  distance = -34mm,
+  axis = Z,
+)
+
+leftMountFoot = clone(unitBlock)
+  |> scale(
+       x = 180,
+       y = 470,
+       z = 115,
+       global = true,
+     )
+  |> translate(
+       x = -225mm,
+       y = -45mm,
+       z = -355mm,
+       global = true,
+     )
+  |> appearance(color = "#3f464a", metalness = 79, roughness = 41)
+rightMountFoot = clone(leftMountFoot)
+  |> translate(x = 450mm, global = true)
+leftMountWeb = clone(unitBlock)
+  |> scale(
+       x = 105,
+       y = 300,
+       z = 270,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = -18deg, global = true)
+  |> translate(
+       x = -205mm,
+       y = -45mm,
+       z = -245mm,
+       global = true,
+     )
+  |> appearance(color = "#4a5256", metalness = 80, roughness = 39)
+rightMountWeb = clone(leftMountWeb)
+  |> rotate(axis = Z, angle = 180deg, global = true)
+
+controlJunctionBox = clone(unitBlock)
+  |> scale(
+       x = 150,
+       y = 235,
+       z = 205,
+       global = true,
+     )
+  |> translate(
+       x = -340mm,
+       y = -25mm,
+       z = 55mm,
+       global = true,
+     )
+  |> appearance(color = "#30363a", metalness = 70, roughness = 51)
+controlJunctionCover = clone(unitBlock)
+  |> scale(
+       x = 38,
+       y = 175,
+       z = 155,
+       global = true,
+     )
+  |> translate(
+       x = -434mm,
+       y = -25mm,
+       z = 55mm,
+       global = true,
+     )
+  |> appearance(color = "#747c80", metalness = 85, roughness = 32)
+controlConnectorUpper = clone(unitCylinderX)
+  |> scale(
+       x = 90,
+       y = 52,
+       z = 52,
+       global = true,
+     )
+  |> translate(
+       x = -455mm,
+       y = -70mm,
+       z = 105mm,
+       global = true,
+     )
+  |> appearance(color = "#9ba2a5", metalness = 87, roughness = 29)
+controlConnectorLower = clone(controlConnectorUpper)
+  |> translate(y = 95mm, z = -95mm, global = true)
+
+rearBoltSeed = clone(unitCylinderY)
+  |> scale(
+       x = 46,
+       y = 72,
+       z = 46,
+       global = true,
+     )
+  |> translate(x = 270mm, y = -575mm, global = true)
+  |> appearance(color = "#c5c9ca", metalness = 93, roughness = 19)
+rearFlangeBolts = patternCircular3d(
+  rearBoltSeed,
+  instances = 12,
+  axis = Y,
+  center = [0mm, -575mm, 0mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+outletBoltSeed = clone(unitCylinderZ)
+  |> scale(
+       x = 38,
+       y = 38,
+       z = 68,
+       global = true,
+     )
+  |> translate(
+       x = 182mm,
+       y = -150mm,
+       z = -405mm,
+       global = true,
+     )
+  |> appearance(color = "#c3c7c8", metalness = 92, roughness = 20)
+outletFlangeBolts = patternCircular3d(
+  outletBoltSeed,
+  instances = 10,
+  axis = Z,
+  center = [0mm, -150mm, -405mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+generatorRearSketchHidden = hide(generatorRearSketch)
+generatorLowSketchHidden = hide(generatorLowSketch)
+generatorMidSketchHidden = hide(generatorMidSketch)
+generatorFrontSketchHidden = hide(generatorFrontSketch)
+hotGasProfileSketchHidden = hide(hotGasProfileSketch)
+hotGasPathSketchHidden = hide(hotGasPathSketch)
+
+export gasGeneratorAssembly = flatten([
+  generatorChamber,
+  generatorRearBand,
+  generatorMidBand,
+  generatorFrontBand,
+  injectorHousing,
+  injectorFlange,
+  injectorCover,
+  loxValveHousing,
+  fuelValveHousing,
+  loxValveCap,
+  fuelValveCap,
+  valveBridge,
+  loxValveDrop,
+  fuelValveDrop,
+  loxServiceBoss,
+  loxServiceFlange,
+  fuelServiceBoss,
+  fuelServiceFlange,
+  igniterBossUpper,
+  igniterBossLower,
+  igniterCapUpper,
+  igniterCapLower,
+  generatorOutletBoss,
+  generatorOutletFlange,
+  hotGasTransferDuct,
+  turbineFeedFlange,
+  hotGasBellows,
+  leftMountFoot,
+  rightMountFoot,
+  leftMountWeb,
+  rightMountWeb,
+  controlJunctionBox,
+  controlJunctionCover,
+  controlConnectorUpper,
+  controlConnectorLower,
+  rearFlangeBolts,
+  outletFlangeBolts
+])

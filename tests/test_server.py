@@ -586,8 +586,38 @@ async def test_execute_with_retries_succeeds_first_try():
     assert calls == 1
 
 
+class _FakeKclError(Exception):
+    """Mirrors ``kcl.KclError``: args are ``(message, retryable)``.
+
+    That shape matters -- ``str(error)`` renders the PyO3 tuple, so callers have
+    to read ``args[0]`` to get the engine's message on its own.
+    """
+
+    def __init__(self, message: str, retryable: bool = False) -> None:
+        super().__init__(message, retryable)
+        self._retryable = retryable
+
+    def is_retryable(self) -> bool:
+        return self._retryable
+
+
+@pytest.fixture
+def retry_delays(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record retry sleeps instead of serving them, and return the record."""
+    delays: list[float] = []
+
+    async def _sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    # Swap the module reference rather than ``asyncio.sleep`` itself, which would
+    # patch the stdlib process-wide. ``sleep`` is the only asyncio use in
+    # ``_execute_with_retries``, so the shim is complete.
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "asyncio", SimpleNamespace(sleep=_sleep))
+    return delays
+
+
 @pytest.mark.asyncio
-async def test_execute_with_retries_retries_then_succeeds():
+async def test_execute_with_retries_retries_then_succeeds(retry_delays: list[float]):
     calls = 0
 
     async def fn() -> str:
@@ -603,7 +633,7 @@ async def test_execute_with_retries_retries_then_succeeds():
 
 
 @pytest.mark.asyncio
-async def test_execute_with_retries_exhausts_attempts():
+async def test_execute_with_retries_exhausts_attempts(retry_delays: list[float]):
     calls = 0
 
     async def fn() -> str:
@@ -611,9 +641,127 @@ async def test_execute_with_retries_exhausts_attempts():
         calls += 1
         raise _RetryableError("hangup", retryable=True)
 
-    with pytest.raises(_RetryableError):
+    with pytest.raises(zoo_mcp.ZooKclEngineError) as excinfo:
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
     assert calls == zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS
+    assert isinstance(excinfo.value.__cause__, _RetryableError)
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_backs_off_with_jitter(retry_delays: list[float]):
+    async def fn() -> str:
+        raise _RetryableError("hangup", retryable=True)
+
+    with pytest.raises(zoo_mcp.ZooKclEngineError):
+        await zoo_mcp.zoo_tools._execute_with_retries(fn)
+
+    assert len(retry_delays) == zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS - 1
+    base = zoo_mcp.zoo_tools.RETRY_INITIAL_DELAY_SECONDS
+    jitter = zoo_mcp.zoo_tools.RETRY_JITTER_SECONDS
+    for index, delay in enumerate(retry_delays):
+        expected = min(base * 2**index, zoo_mcp.zoo_tools.RETRY_MAX_DELAY_SECONDS)
+        assert expected <= delay <= expected + jitter
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_stops_once_time_budget_is_spent(
+    retry_delays: list[float], monkeypatch: pytest.MonkeyPatch
+):
+    """One slow attempt must not license two more of them.
+
+    A zero budget stands in for the reproduced case where a single attempt spent
+    ten minutes before the engine reported a timed-out modeling command.
+    """
+    calls = 0
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "RETRY_TIME_BUDGET_SECONDS", 0.0)
+
+    async def fn() -> str:
+        nonlocal calls
+        calls += 1
+        raise _RetryableError("hangup", retryable=True)
+
+    with pytest.raises(zoo_mcp.ZooKclEngineError):
+        await zoo_mcp.zoo_tools._execute_with_retries(fn)
+    assert calls == 1
+    assert retry_delays == []
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_reports_a_structured_engine_error():
+    async def execute_and_measure() -> str:
+        raise _FakeKclError('engine: ... message: "internal error: unknown" }')
+
+    with pytest.raises(zoo_mcp.ZooKclEngineError) as excinfo:
+        await zoo_mcp.zoo_tools._execute_with_retries(execute_and_measure)
+
+    error = excinfo.value
+    # The message is the engine's own, not the PyO3 tuple repr around it.
+    assert error.message == 'engine: ... message: "internal error: unknown" }'
+    # The failing kcl entry point is named for the caller, not passed in by it.
+    assert error.operation == "execute_and_measure"
+    assert error.retryable is False
+    assert error.is_retryable() is False
+    assert error.attempts == 1
+    assert error.modeling_command_id is None
+    assert error.api_call_id is None
+    # Nothing to report, so nothing is appended.
+    assert str(error) == error.message
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_reports_engine_identifiers(
+    retry_delays: list[float],
+):
+    """Every retried operation must surface the IDs, fields or string alike."""
+    message = (
+        "engine: KclErrorDetails { source_ranges: [SourceRange([0, 0, 0])], "
+        'message: "Modeling command timed out '
+        "`07e5d8fe-a080-4f40-89d0-b8cd4bc15227` "
+        '(API call ID: 4908aaca-78b9-4acf-818e-1fcb07b0926f)" }'
+    )
+
+    async def execute_code_and_export() -> str:
+        raise _FakeKclError(message, retryable=True)
+
+    with pytest.raises(zoo_mcp.ZooKclEngineError) as excinfo:
+        await zoo_mcp.zoo_tools._execute_with_retries(execute_code_and_export)
+
+    error = excinfo.value
+    assert error.operation == "execute_code_and_export"
+    assert error.retryable is True
+    assert error.attempts == zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS
+    assert error.modeling_command_id == "07e5d8fe-a080-4f40-89d0-b8cd4bc15227"
+    assert error.api_call_id == "4908aaca-78b9-4acf-818e-1fcb07b0926f"
+    # Callers that can only pass a string along report them too.
+    assert str(error).endswith(
+        "[modeling_command_id=07e5d8fe-a080-4f40-89d0-b8cd4bc15227 "
+        "api_call_id=4908aaca-78b9-4acf-818e-1fcb07b0926f]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_kcl_failure_message_reports_engine_identifiers(
+    monkeypatch: pytest.MonkeyPatch, cube_kcl: str
+):
+    """A tool that reports failures in-band still names the API call."""
+    message = (
+        'engine: KclErrorDetails { message: "Modeling command timed out '
+        "`07e5d8fe-a080-4f40-89d0-b8cd4bc15227` "
+        '(API call ID: 4908aaca-78b9-4acf-818e-1fcb07b0926f)" }'
+    )
+
+    async def execute(path: str) -> object:
+        raise _FakeKclError(message)
+
+    monkeypatch.setattr(zoo_mcp.zoo_tools.kcl, "execute", execute)
+
+    ok, result = await zoo_mcp.zoo_tools.zoo_execute_kcl(
+        kcl_code=None, kcl_path=cube_kcl
+    )
+    assert ok is False
+    assert "api_call_id=4908aaca-78b9-4acf-818e-1fcb07b0926f" in result
+    # The PyO3 tuple repr no longer leaks into the message either.
+    assert "', False)" not in result
 
 
 @pytest.mark.asyncio
@@ -625,13 +773,19 @@ async def test_execute_with_retries_does_not_retry_non_retryable():
         calls += 1
         raise _RetryableError("bad code", retryable=False)
 
-    with pytest.raises(_RetryableError):
+    with pytest.raises(zoo_mcp.ZooKclEngineError) as excinfo:
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
     assert calls == 1
+    assert isinstance(excinfo.value.__cause__, _RetryableError)
 
 
 @pytest.mark.asyncio
 async def test_execute_with_retries_does_not_retry_plain_exception():
+    """A failure that is not the engine's keeps its own type.
+
+    Relabelling it ``ZooKclEngineError`` would blame the engine for a local bug,
+    and callers that key off that type to attribute failures would believe it.
+    """
     calls = 0
 
     async def fn() -> str:
@@ -639,9 +793,27 @@ async def test_execute_with_retries_does_not_retry_plain_exception():
         calls += 1
         raise ValueError("no is_retryable method")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="no is_retryable method"):
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_kcl_plain_exception_is_not_reported_as_an_engine_error(
+    monkeypatch: pytest.MonkeyPatch, cube_kcl: str
+):
+    """The in-band message reports a local failure as itself, not as the engine."""
+
+    async def execute(path: str) -> object:
+        raise FileNotFoundError("the project moved")
+
+    monkeypatch.setattr(zoo_mcp.zoo_tools.kcl, "execute", execute)
+
+    ok, result = await zoo_mcp.zoo_tools.zoo_execute_kcl(
+        kcl_code=None, kcl_path=cube_kcl
+    )
+    assert ok is False
+    assert "the project moved" in result
 
 
 @pytest.mark.asyncio

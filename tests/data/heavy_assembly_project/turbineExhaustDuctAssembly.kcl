@@ -1,0 +1,251 @@
+// F-1 turbine exhaust duct
+// Large supported exhaust route from the turbine outlet to the nozzle-extension collector.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+import unitBlock, unitCylinderX, unitCylinderY, unitCylinderZ, unitRingY, unitRingZ from "primitives.kcl"
+
+exhaustProfileSketch = sketch(on = XY) {
+  tube = circle(start = [var 195mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([tube.center, ORIGIN])
+  horizontal([tube.center, tube.start])
+  diameter(tube) == 390mm
+}
+exhaustProfile = region(segments = [exhaustProfileSketch.tube])
+
+exhaustPathSketch = sketch(on = YZ) {
+  turbineRun = line(start = [var -980mm, var 1320mm], end = [var -700mm, var 1320mm])
+  upperElbow = arc(start = [var -700mm, var 1320mm], end = [var -350mm, var 970mm], center = [var -700mm, var 970mm])
+  verticalDrop = line(start = [var -350mm, var 970mm], end = [var -350mm, var -970mm])
+  lowerElbow = arc(start = [var -350mm, var -970mm], end = [var 0mm, var -1320mm], center = [var 0mm, var -970mm])
+  collectorRun = line(start = [var 0mm, var -1320mm], end = [var 980mm, var -1320mm])
+  coincident([turbineRun.end, upperElbow.start])
+  coincident([upperElbow.end, verticalDrop.start])
+  coincident([verticalDrop.end, lowerElbow.start])
+  coincident([lowerElbow.end, collectorRun.start])
+  tangent([turbineRun, upperElbow])
+  tangent([upperElbow, verticalDrop])
+  tangent([verticalDrop, lowerElbow])
+  tangent([lowerElbow, collectorRun])
+  horizontal(turbineRun)
+  vertical(verticalDrop)
+  horizontal(collectorRun)
+  horizontalDistance([ORIGIN, turbineRun.start]) == -980mm
+  verticalDistance([ORIGIN, turbineRun.start]) == 1320mm
+  distance([turbineRun.start, turbineRun.end]) == 280mm
+  horizontalDistance([ORIGIN, upperElbow.center]) == -700mm
+  verticalDistance([ORIGIN, upperElbow.center]) == 970mm
+  horizontalDistance([ORIGIN, upperElbow.end]) == -350mm
+  verticalDistance([ORIGIN, upperElbow.end]) == 970mm
+  distance([verticalDrop.start, verticalDrop.end]) == 1940mm
+  horizontalDistance([ORIGIN, lowerElbow.center]) == 0mm
+  verticalDistance([ORIGIN, lowerElbow.center]) == -970mm
+  horizontalDistance([ORIGIN, lowerElbow.end]) == 0mm
+  verticalDistance([ORIGIN, lowerElbow.end]) == -1320mm
+  distance([collectorRun.start, collectorRun.end]) == 980mm
+}
+turbineExhaustDuct = sweep(
+  exhaustProfile,
+  path = [
+    exhaustPathSketch.turbineRun,
+    exhaustPathSketch.upperElbow,
+    exhaustPathSketch.verticalDrop,
+    exhaustPathSketch.lowerElbow,
+    exhaustPathSketch.collectorRun
+  ],
+  translateProfileToPath = true,
+  orientProfilePerpendicular = true,
+  version = 2,
+)
+  |> appearance(color = "#6e5847", metalness = 76, roughness = 43)
+
+turbineOutletFlange = clone(unitRingY)
+  |> scale(
+       x = 570,
+       y = 100,
+       z = 570,
+       global = true,
+     )
+  |> translate(y = -980mm, z = 1320mm, global = true)
+  |> appearance(color = "#a1876d", metalness = 81, roughness = 36)
+collectorInletFlange = clone(unitRingY)
+  |> scale(
+       x = 590,
+       y = 105,
+       z = 590,
+       global = true,
+     )
+  |> translate(y = 980mm, z = -1320mm, global = true)
+  |> appearance(color = "#ad9274", metalness = 82, roughness = 34)
+
+upperBellowsSeed = clone(unitRingY)
+  |> scale(
+       x = 455,
+       y = 30,
+       z = 455,
+       global = true,
+     )
+  |> translate(y = -900mm, z = 1320mm, global = true)
+  |> appearance(color = "#8d9699", metalness = 87, roughness = 31)
+upperFlexBellows = patternLinear3d(
+  upperBellowsSeed,
+  instances = 5,
+  distance = 42mm,
+  axis = Y,
+)
+lowerBellowsSeed = clone(unitRingY)
+  |> scale(
+       x = 465,
+       y = 30,
+       z = 465,
+       global = true,
+     )
+  |> translate(y = 760mm, z = -1320mm, global = true)
+  |> appearance(color = "#8d9699", metalness = 87, roughness = 31)
+lowerFlexBellows = patternLinear3d(
+  lowerBellowsSeed,
+  instances = 5,
+  distance = 42mm,
+  axis = Y,
+)
+
+upperVerticalClamp = clone(unitRingZ)
+  |> scale(
+       x = 485,
+       y = 485,
+       z = 58,
+       global = true,
+     )
+  |> translate(y = -350mm, z = 455mm, global = true)
+  |> appearance(color = "#5c6468", metalness = 83, roughness = 36)
+lowerVerticalClamp = clone(upperVerticalClamp)
+  |> translate(z = -810mm, global = true)
+
+upperSupportArm = clone(unitBlock)
+  |> scale(
+       x = 560,
+       y = 155,
+       z = 125,
+       global = true,
+     )
+  |> translate(
+       x = -280mm,
+       y = -350mm,
+       z = 455mm,
+       global = true,
+     )
+  |> appearance(color = "#41494d", metalness = 79, roughness = 40)
+lowerSupportArm = clone(upperSupportArm)
+  |> translate(z = -810mm, global = true)
+upperSupportWeb = clone(unitBlock)
+  |> scale(
+       x = 115,
+       y = 155,
+       z = 330,
+       global = true,
+     )
+  |> rotate(axis = Y, angle = -32deg, global = true)
+  |> translate(
+       x = -500mm,
+       y = -350mm,
+       z = 355mm,
+       global = true,
+     )
+  |> appearance(color = "#4a5357", metalness = 80, roughness = 38)
+lowerSupportWeb = clone(upperSupportWeb)
+  |> rotate(axis = Y, angle = 64deg, global = true)
+  |> translate(z = -610mm, global = true)
+
+inspectionBoss = clone(unitCylinderX)
+  |> scale(
+       x = 210,
+       y = 135,
+       z = 135,
+       global = true,
+     )
+  |> translate(
+       x = 140mm,
+       y = -350mm,
+       z = 110mm,
+       global = true,
+     )
+  |> appearance(color = "#6d7478", metalness = 84, roughness = 34)
+inspectionCover = clone(unitCylinderX)
+  |> scale(
+       x = 55,
+       y = 190,
+       z = 190,
+       global = true,
+     )
+  |> translate(
+       x = 270mm,
+       y = -350mm,
+       z = 110mm,
+       global = true,
+     )
+  |> appearance(color = "#a7adaf", metalness = 89, roughness = 26)
+
+turbineBoltSeed = clone(unitCylinderY)
+  |> scale(
+       x = 42,
+       y = 78,
+       z = 42,
+       global = true,
+     )
+  |> translate(
+       x = 245mm,
+       y = -1035mm,
+       z = 1320mm,
+       global = true,
+     )
+  |> appearance(color = "#c5c9ca", metalness = 93, roughness = 19)
+turbineFlangeBolts = patternCircular3d(
+  turbineBoltSeed,
+  instances = 12,
+  axis = Y,
+  center = [0mm, -1035mm, 1320mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+collectorBoltSeed = clone(unitCylinderY)
+  |> scale(
+       x = 42,
+       y = 82,
+       z = 42,
+       global = true,
+     )
+  |> translate(
+       x = 255mm,
+       y = 1038mm,
+       z = -1320mm,
+       global = true,
+     )
+  |> appearance(color = "#c8cccd", metalness = 93, roughness = 18)
+collectorFlangeBolts = patternCircular3d(
+  collectorBoltSeed,
+  instances = 12,
+  axis = Y,
+  center = [0mm, 1038mm, -1320mm],
+  arcDegrees = 360deg,
+  rotateDuplicates = true,
+)
+
+exhaustProfileSketchHidden = hide(exhaustProfileSketch)
+exhaustPathSketchHidden = hide(exhaustPathSketch)
+
+export turbineExhaustDuctAssembly = flatten([
+  turbineExhaustDuct,
+  turbineOutletFlange,
+  collectorInletFlange,
+  upperFlexBellows,
+  lowerFlexBellows,
+  upperVerticalClamp,
+  lowerVerticalClamp,
+  upperSupportArm,
+  lowerSupportArm,
+  upperSupportWeb,
+  lowerSupportWeb,
+  inspectionBoss,
+  inspectionCover,
+  turbineFlangeBolts,
+  collectorFlangeBolts
+])

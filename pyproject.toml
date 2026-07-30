@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "zoo_mcp"
-version = "0.18.2"
+version = "0.18.3"
 requires-python = ">=3.11, <3.14"
 dependencies = [
     "aiofiles<26.0",
@@ -48,9 +48,14 @@ Repository = "https://github.com/KittyCAD/mcp"
 zoo-mcp = "zoo_mcp.server:main"
 
 [tool.pytest.ini_options]
-addopts = "--strict-markers"
+# `--dist loadgroup` behaves exactly like the default `load` except that tests
+# sharing an `xdist_group` marker go to the same worker, so a module-scoped
+# fixture they share is set up once instead of once per worker. xdist ignores
+# `--dist` when no `-n` is given, so a plain `pytest` run is unaffected.
+addopts = "--strict-markers --dist loadgroup"
 markers = [
     "live: hits live external services (zoo.dev). Runs by default; deselect locally with `-m 'not live'`.",
+    "slow: takes minutes rather than seconds. Runs by default; deselect locally with `-m 'not slow'`.",
 ]
 
 [tool.ruff.lint]
