@@ -38,10 +38,7 @@ def kcl_project():
 # whole-assembly attempt has been seen to cost ~10 minutes.
 @pytest.fixture(scope="module")
 def heavy_assembly_project():
-    """A multi-module assembly the engine currently cannot measure as a whole.
-
-    See ``tests/data/heavy_assembly_project/README.md``.
-    """
+    """A multi-module assembly the engine currently cannot measure as a whole."""
     project_path = Path(__file__).parent / "data" / "heavy_assembly_project"
     yield f"{project_path.resolve()}"
 

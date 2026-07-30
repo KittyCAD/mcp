@@ -2,8 +2,7 @@
 
 The fixture project is the one from KittyCAD/text-to-cad#3928: the engine
 executes it but cannot measure it as a whole, while its individual sub-assemblies
-measure fine. See ``tests/data/heavy_assembly_project/README.md`` for the
-measured evidence and the API call ID from the reproduction.
+measure fine.
 
 These tests exist to keep that defect visible and to pin the shape of the failure
 we report for it. ``test_heavy_assembly_measures`` is the desired behavior and is
@@ -121,11 +120,7 @@ async def test_heavy_assembly_sub_module_measures(heavy_assembly_sub_module: str
 @pytest.mark.xfail(
     reason=(
         "the engine cannot measure this assembly as a whole: it returns "
-        '"internal error: unknown" with no source location, or times out the '
-        "modeling command after ~10min (API call ID "
-        "4908aaca-78b9-4acf-818e-1fcb07b0926f). See "
-        "tests/data/heavy_assembly_project/README.md and "
-        "KittyCAD/text-to-cad#3928"
+        '"internal error: unknown"'
     ),
     strict=False,
 )
