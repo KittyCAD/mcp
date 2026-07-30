@@ -208,3 +208,6 @@ __marimo__/
 
 CLAUDE.local.md
 .mcp.json
+
+# macOS
+.DS_Store
