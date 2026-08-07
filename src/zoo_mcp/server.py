@@ -535,12 +535,16 @@ async def get_face_info(
     """Get the position, gradient, normal, and center of a face in a KCL model.
 
     Args:
-        face_id (str): The UUID of the face to query.
+        face_id (str): Intended to be a face id selected and sent by the user.
         kcl_code (str | None): The KCL code defining the model.
         kcl_path (str | None): A .kcl file or project directory containing main.kcl.
 
     Returns:
         dict | str: The face position, gradient, normal, and center, or an error message.
+                    The position is the starting point of the face's outside perimeter in KittyCAD engine space. Pretty confusing.
+                    The gradient is the direction of greatest change of a scalar function.
+                    The normal is a typical face normal.
+                    The center is the geometric center of the face. *Prefer this over the position.*
     """
     logger.info("get_face_info tool called for face_id=%s", face_id)
 
