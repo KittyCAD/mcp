@@ -874,6 +874,54 @@ async def test_get_sketch_constraint_status_error():
 
 
 @pytest.mark.asyncio
+async def test_get_face_info(monkeypatch):
+    face_info = SimpleNamespace(
+        face_get_position=MagicMock(
+            model_dump=MagicMock(return_value={"pos": {"x": 1.0, "y": 2.0, "z": 3.0}})
+        ),
+        face_get_gradient=MagicMock(
+            model_dump=MagicMock(
+                return_value={
+                    "df_du": {"x": 1.0, "y": 0.0, "z": 0.0},
+                    "df_dv": {"x": 0.0, "y": 1.0, "z": 0.0},
+                    "normal": {"x": 0.0, "y": 0.0, "z": 1.0},
+                }
+            )
+        ),
+        face_get_center=MagicMock(
+            model_dump=MagicMock(return_value={"pos": {"x": 0.5, "y": 0.5, "z": 0.0}})
+        ),
+    )
+    mock = MagicMock(return_value=face_info)
+    monkeypatch.setattr("zoo_mcp.server.zoo_face_info", mock)
+
+    response = await mcp.call_tool(
+        "get_face_info",
+        arguments={
+            "face_id": "face-id",
+            "kcl_code": "cube = startSketchOn(XY)",
+            "kcl_path": None,
+        },
+    )
+
+    result = _meta_result(response)
+    assert result == {
+        "face_get_position": {"pos": {"x": 1.0, "y": 2.0, "z": 3.0}},
+        "face_get_gradient": {
+            "df_du": {"x": 1.0, "y": 0.0, "z": 0.0},
+            "df_dv": {"x": 0.0, "y": 1.0, "z": 0.0},
+            "normal": {"x": 0.0, "y": 0.0, "z": 1.0},
+        },
+        "face_get_center": {"pos": {"x": 0.5, "y": 0.5, "z": 0.0}},
+    }
+    mock.assert_called_once_with(
+        kcl_code="cube = startSketchOn(XY)",
+        kcl_path=None,
+        face_id="face-id",
+    )
+
+
+@pytest.mark.asyncio
 async def test_mock_execute_kcl(cube_kcl: str):
     response = await mcp.call_tool(
         "mock_execute_kcl",
