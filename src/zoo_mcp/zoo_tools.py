@@ -10,6 +10,7 @@ from uuid import uuid4
 import aiofiles
 import kcl
 import trimesh
+from kittycad import WebSocketModelingCommandsWs
 
 if TYPE_CHECKING:
 
@@ -2080,11 +2081,90 @@ def zoo_snapshot_of_cad(
 
         return resize_image(jpeg_contents, max_image_dimension)
 
+
 @dataclass
 class FaceInfo:
     face_get_position: FaceGetPosition
     face_get_gradient: FaceGetGradient
     face_get_center: FaceGetCenter
+
+
+def _prepare_kcl_project(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+) -> tuple[str, list[dict[str, str | list[int]]]]:
+    _check_kcl_code_or_path(kcl_code, kcl_path)
+
+    if kcl_code:
+        return "main.kcl", [
+            {
+                "path": "main.kcl",
+                "contents": list(kcl_code.encode()),
+            }
+        ]
+
+    assert kcl_path is not None
+    return load_kcl_project(kcl_path)
+
+
+def _exec_kcl_project(
+    ws: WebSocketModelingCommandsWs,
+    entrypoint: str,
+    files: list[dict[str, str | list[int]]],
+) -> dict:
+    """Execute a KCL project through the server-side websocket protocol."""
+    request_id = ModelingCmdId(uuid4())
+    request = {
+        "type": "exec_kcl_project",
+        "request_id": request_id,
+        "project": {
+            "entrypoint": entrypoint,
+            "files": files,
+        },
+    }
+    ws.ws.send(json.dumps(request))
+
+    # This response is not represented in the generated SDK yet.
+    while True:
+        raw_response = ws.ws.recv()
+        try:
+            response = json.loads(raw_response)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if response.get("request_id") != request_id:
+            continue
+        if not response.get("success", False):
+            raise ZooMCPException("Failed to execute KCL project")
+        payload = response.get("resp", {})
+        if payload.get("type") != "exec_kcl_project":
+            continue
+
+        result = payload.get("data", {}).get("result")
+        if not isinstance(result, dict):
+            raise ZooMCPException("KCL project execution returned no result")
+        lowered_result = {str(key).lower(): value for key, value in result.items()}
+        if "err" in lowered_result or "error" in lowered_result:
+            error = lowered_result.get("err", lowered_result.get("error"))
+            raise ZooMCPException(f"Failed to execute KCL project: {error}")
+
+        success = lowered_result.get("ok")
+        if not isinstance(success, dict):
+            raise ZooMCPException("KCL project execution returned no success result")
+        artifact_graph = success.get("artifact_graph")
+        if not isinstance(artifact_graph, dict):
+            raise ZooMCPException("KCL project execution returned no artifact graph")
+        return artifact_graph
+
+
+def zoo_exec_kcl_project(
+    kcl_code: str | None = None,
+    kcl_path: Path | str | None = None,
+) -> dict:
+    """Run a KCL project on the server side and return its artifact graph."""
+    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+
+    with kittycad_client.modeling.modeling_commands_ws(webrtc=False) as ws:
+        return _exec_kcl_project(ws, entrypoint, files)
 
 
 def zoo_face_info(
@@ -2093,19 +2173,7 @@ def zoo_face_info(
     face_id: Uuid,
 ) -> FaceInfo:
     """Get the position, gradient, and center of a face in a KCL project."""
-    _check_kcl_code_or_path(kcl_code, kcl_path)
-
-    if kcl_code:
-        entrypoint = "main.kcl"
-        files: list[dict[str, str | list[int]]] = [
-            {
-                "path": entrypoint,
-                "contents": list(kcl_code.encode()),
-            }
-        ]
-    else:
-        assert kcl_path is not None
-        entrypoint, files = load_kcl_project(kcl_path)
+    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
 
     with kittycad_client.modeling.modeling_commands_ws(
         fps=30,
@@ -2116,39 +2184,7 @@ def zoo_face_info(
         video_res_width=1024,
         webrtc=False,
     ) as ws:
-        # This protocol message is not represented in the generated SDK yet.
-        cmd_id_exec_kcl_project = ModelingCmdId(uuid4())
-        request = {
-            "type": "exec_kcl_project",
-            "request_id": cmd_id_exec_kcl_project,
-            "project": {
-                "entrypoint": entrypoint,
-                "files": files,
-            },
-        }
-        ws.ws.send(json.dumps(request))
-
-        # Its response is also absent from the SDK, so consume it as raw JSON.
-        while True:
-            raw_response = ws.ws.recv()
-            try:
-                response = json.loads(raw_response)
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if response.get("request_id") != cmd_id_exec_kcl_project:
-                continue
-            if not response.get("success", False):
-                raise ZooMCPException("Failed to execute KCL project")
-            payload = response.get("resp", {})
-            if payload.get("type") != "exec_kcl_project":
-                continue
-            result = payload.get("data", {}).get("result")
-            if isinstance(result, dict):
-                lowered_result = {str(key).lower(): value for key, value in result.items()}
-                if "err" in lowered_result or "error" in lowered_result:
-                    error = lowered_result.get("err", lowered_result.get("error"))
-                    raise ZooMCPException(f"Failed to execute KCL project: {error}")
-            break
+        _exec_kcl_project(ws, entrypoint, files)
 
         cmd_id_face_get_position = ModelingCmdId(uuid4())
         ws.send(
@@ -2216,11 +2252,15 @@ def zoo_face_info(
 
             if message.request_id == cmd_id_face_get_position:
                 if not isinstance(modeling_response, ResponseFaceGetPosition):
-                    raise ZooMCPException("Received an unexpected face position response")
+                    raise ZooMCPException(
+                        "Received an unexpected face position response"
+                    )
                 face_get_position = modeling_response.data
             elif message.request_id == cmd_id_face_get_gradient:
                 if not isinstance(modeling_response, ResponseFaceGetGradient):
-                    raise ZooMCPException("Received an unexpected face gradient response")
+                    raise ZooMCPException(
+                        "Received an unexpected face gradient response"
+                    )
                 face_get_gradient = modeling_response.data
             elif message.request_id == cmd_id_face_get_center:
                 if not isinstance(modeling_response, ResponseFaceGetCenter):

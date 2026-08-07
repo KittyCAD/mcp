@@ -38,6 +38,7 @@ from zoo_mcp.zoo_tools import (
     zoo_calculate_surface_area,
     zoo_calculate_volume,
     zoo_convert_cad_file,
+    zoo_exec_kcl_project,
     zoo_execute_kcl,
     zoo_export_kcl,
     zoo_face_info,
@@ -411,6 +412,28 @@ async def execute_kcl(
         return await zoo_execute_kcl(kcl_code=kcl_code, kcl_path=kcl_path)
     except Exception as e:
         return False, f"Failed to execute KCL code: {e}"
+
+
+@mcp.tool()
+async def exec_kcl_project(
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Run a KCL project on the server side and return its artifact graph.
+
+    Args:
+        kcl_code (str | None): KCL code to run as a single-file project.
+        kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+
+    Returns:
+        dict | str: The artifact graph produced by execution, or an error message.
+    """
+    logger.info("exec_kcl_project tool called")
+
+    try:
+        return zoo_exec_kcl_project(kcl_code=kcl_code, kcl_path=kcl_path)
+    except Exception as e:
+        return f"Failed to execute KCL project: {e}"
 
 
 @mcp.tool()

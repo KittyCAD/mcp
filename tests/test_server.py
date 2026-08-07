@@ -438,6 +438,67 @@ async def test_execute_kcl_error():
     assert "Failed to execute KCL code" in result[1]
 
 
+def test_exec_kcl_project_extracts_artifact_graph():
+    raw_socket = MagicMock()
+
+    def recv():
+        request = json.loads(raw_socket.send.call_args.args[0])
+        return json.dumps(
+            {
+                "success": True,
+                "request_id": request["request_id"],
+                "resp": {
+                    "type": "exec_kcl_project",
+                    "data": {
+                        "result": {
+                            "ok": {
+                                "artifact_graph": {
+                                    "map": {"artifact-id": {"type": "solid2d"}},
+                                    "item_count": 1,
+                                }
+                            }
+                        }
+                    },
+                },
+            }
+        )
+
+    raw_socket.recv.side_effect = recv
+    websocket = SimpleNamespace(ws=raw_socket)
+
+    result = zoo_mcp.zoo_tools._exec_kcl_project(
+        cast(Any, websocket),
+        "main.kcl",
+        [{"path": "main.kcl", "contents": list(b"sketch = startSketchOn(XY)")}],
+    )
+
+    assert result == {
+        "map": {"artifact-id": {"type": "solid2d"}},
+        "item_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_exec_kcl_project_tool(monkeypatch):
+    artifact_graph = {
+        "map": {"artifact-id": {"type": "solid2d"}},
+        "item_count": 1,
+    }
+    mock = MagicMock(return_value=artifact_graph)
+    monkeypatch.setattr("zoo_mcp.server.zoo_exec_kcl_project", mock)
+
+    response = await mcp.call_tool(
+        "exec_kcl_project",
+        arguments={"kcl_code": "sketch = startSketchOn(XY)", "kcl_path": None},
+    )
+
+    assert _meta_result(response) == artifact_graph
+    mock.assert_called_once_with(
+        kcl_code="sketch = startSketchOn(XY)",
+        kcl_path=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_execute_kcl_surfaces_warning_issue(warning_kcl: str):
     """A non-fatal warning (disjoint union) succeeds but is reported."""
