@@ -62,7 +62,10 @@ from zoo_mcp.server import mcp
 mcp.run()
 ```
 
-Individual tools can be used in your own python code as well
+Individual tools can be used in your own python code as well. At Zoo we use
+zoo-mcp like this with ZooKeeper to save on resources. Instead of spinning up
+one MCP server per agent, each agent in a sense "embeds" the server in their own
+runtime. It has the additional benefit of preventing shared state.
 
 ```python
 from mcp.server.fastmcp import FastMCP
@@ -107,6 +110,20 @@ You can also use the helper script included in this repo:
 ./codex-zoo.sh
 ```
 The script prompts for a request, runs Codex with the Zoo MCP server, and saves a JSONL transcript (including token usage) to `codex-run-<timestamp>.jsonl`.
+
+## Architecture
+
+Tools are defined in `src/zoo_mcp/*.py`, where they are then imported into
+`src/zoo_mcp/server.py` and tied to actual `@mcp.tool()` decorated functions.
+
+`src/zoo_mcp/zoo_tools.py` acts as a large toolset to interact with Zoo's KCL and
+engine facilities. This source file houses other utilities like `parse_unit` or
+`normalize_ext` (normalizing file extensions).
+
+For example, running KCL and taking a snapshot is defined in that source file.
+
+Right now the MCP is structured such that one engine connection is used per
+tool call. MCP's stateless nature is what more or less influenced this.
 
 ## Contributing
 

@@ -1,13 +1,16 @@
 import io
+import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import aiofiles
 import kcl
 import trimesh
+from kittycad import WebSocketModelingCommandsWs
 
 if TYPE_CHECKING:
 
@@ -25,6 +28,9 @@ from kittycad.models import (
     Axis,
     AxisDirectionPair,
     Direction,
+    FaceGetCenter,
+    FaceGetGradient,
+    FaceGetPosition,
     FileCenterOfMass,
     FileConversion,
     FileExportFormat,
@@ -37,6 +43,7 @@ from kittycad.models import (
     InputFormat3d,
     ModelingCmd,
     ModelingCmdId,
+    Point2d,
     Point3d,
     PostEffectType,
     System,
@@ -59,11 +66,25 @@ from kittycad.models.input_format3d import (
 from kittycad.models.modeling_cmd import (
     OptionDefaultCameraLookAt,
     OptionDefaultCameraSetOrthographic,
+    OptionFaceGetCenter,
+    OptionFaceGetGradient,
+    OptionFaceGetPosition,
     OptionImportFiles,
     OptionTakeSnapshot,
     OptionViewIsometric,
     OptionZoomToFit,
 )
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionFaceGetCenter as ResponseFaceGetCenter,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionFaceGetGradient as ResponseFaceGetGradient,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionFaceGetPosition as ResponseFaceGetPosition,
+)
+from kittycad.models.ok_web_socket_response_data import OptionModeling
+from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
 
@@ -76,6 +97,25 @@ SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 _EXT_ALIASES = {
     "stp": "step",
 }
+
+
+def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[int]]]]:
+    """Load a KCL project into the shape expected by exec_kcl_project."""
+    path = Path(path).resolve()
+    root = path if path.is_dir() else path.parent
+    entrypoint = "main.kcl" if path.is_dir() else path.name
+
+    files: list[dict[str, str | list[int]]] = [
+        {
+            "path": file.relative_to(root).as_posix(),
+            "contents": list(file.read_bytes()),
+        }
+        for file in sorted(root.rglob("*"))
+        if file.is_file()
+    ]
+
+    return entrypoint, files
+
 
 # Mappings from user-facing short strings to kcl PyO3 enum members.
 # The kcl unit enums cannot be constructed from strings directly.
@@ -2040,6 +2080,198 @@ def zoo_snapshot_of_cad(
         jpeg_contents = message["resp"]["data"]["modeling_response"]["data"]["contents"]
 
         return resize_image(jpeg_contents, max_image_dimension)
+
+
+@dataclass
+class FaceInfo:
+    face_get_position: FaceGetPosition
+    face_get_gradient: FaceGetGradient
+    face_get_center: FaceGetCenter
+
+
+def _prepare_kcl_project(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+) -> tuple[str, list[dict[str, str | list[int]]]]:
+    _check_kcl_code_or_path(kcl_code, kcl_path)
+
+    if kcl_code:
+        return "main.kcl", [
+            {
+                "path": "main.kcl",
+                "contents": list(kcl_code.encode()),
+            }
+        ]
+
+    assert kcl_path is not None
+    return load_kcl_project(kcl_path)
+
+
+def _exec_kcl_project(
+    ws: WebSocketModelingCommandsWs,
+    entrypoint: str,
+    files: list[dict[str, str | list[int]]],
+) -> dict:
+    """Execute a KCL project through the server-side websocket protocol."""
+    request_id = ModelingCmdId(uuid4())
+    request = {
+        "type": "exec_kcl_project",
+        "request_id": request_id,
+        "project": {
+            "entrypoint": entrypoint,
+            "files": files,
+        },
+    }
+    ws.ws.send(json.dumps(request))
+
+    # This response is not represented in the generated SDK yet.
+    while True:
+        raw_response = ws.ws.recv()
+        try:
+            response = json.loads(raw_response)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if response.get("request_id") != request_id:
+            continue
+        if not response.get("success", False):
+            raise ZooMCPException("Failed to execute KCL project")
+        payload = response.get("resp", {})
+        if payload.get("type") != "exec_kcl_project":
+            continue
+
+        result = payload.get("data", {}).get("result")
+        if not isinstance(result, dict):
+            raise ZooMCPException("KCL project execution returned no result")
+        lowered_result = {str(key).lower(): value for key, value in result.items()}
+        if "err" in lowered_result or "error" in lowered_result:
+            error = lowered_result.get("err", lowered_result.get("error"))
+            raise ZooMCPException(f"Failed to execute KCL project: {error}")
+
+        success = lowered_result.get("ok")
+        if not isinstance(success, dict):
+            raise ZooMCPException("KCL project execution returned no success result")
+        artifact_graph = success.get("artifact_graph")
+        if not isinstance(artifact_graph, dict):
+            raise ZooMCPException("KCL project execution returned no artifact graph")
+        return artifact_graph
+
+
+def zoo_exec_kcl_project(
+    kcl_code: str | None = None,
+    kcl_path: Path | str | None = None,
+) -> dict:
+    """Run a KCL project on the server side and return its artifact graph."""
+    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+
+    with kittycad_client.modeling.modeling_commands_ws(webrtc=False) as ws:
+        return _exec_kcl_project(ws, entrypoint, files)
+
+
+def zoo_face_info(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    face_id: Uuid,
+) -> FaceInfo:
+    """Get the position, gradient, and center of a face in a KCL project."""
+    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+
+    with kittycad_client.modeling.modeling_commands_ws(
+        fps=30,
+        post_effect=PostEffectType.SSAO,
+        show_grid=False,
+        unlocked_framerate=False,
+        video_res_height=1024,
+        video_res_width=1024,
+        webrtc=False,
+    ) as ws:
+        _exec_kcl_project(ws, entrypoint, files)
+
+        cmd_id_face_get_position = ModelingCmdId(uuid4())
+        ws.send(
+            WebSocketRequest(
+                OptionModelingCmdReq(
+                    cmd=ModelingCmd(
+                        OptionFaceGetPosition(
+                            object_id=face_id,
+                            uv=Point2d(x=0.5, y=0.5),
+                        )
+                    ),
+                    cmd_id=cmd_id_face_get_position,
+                )
+            )
+        )
+
+        cmd_id_face_get_gradient = ModelingCmdId(uuid4())
+        ws.send(
+            WebSocketRequest(
+                OptionModelingCmdReq(
+                    cmd=ModelingCmd(
+                        OptionFaceGetGradient(
+                            object_id=face_id,
+                            uv=Point2d(x=0.5, y=0.5),
+                        )
+                    ),
+                    cmd_id=cmd_id_face_get_gradient,
+                )
+            )
+        )
+
+        cmd_id_face_get_center = ModelingCmdId(uuid4())
+        ws.send(
+            WebSocketRequest(
+                OptionModelingCmdReq(
+                    cmd=ModelingCmd(OptionFaceGetCenter(object_id=face_id)),
+                    cmd_id=cmd_id_face_get_center,
+                )
+            )
+        )
+
+        face_get_position: FaceGetPosition | Literal[False] = False
+        face_get_gradient: FaceGetGradient | Literal[False] = False
+        face_get_center: FaceGetCenter | Literal[False] = False
+
+        while (
+            face_get_position is False
+            or face_get_gradient is False
+            or face_get_center is False
+        ):
+            message = ws.recv().root
+            if not isinstance(message, SuccessWebSocketResponse):
+                raise ZooMCPException(message)
+            if message.request_id not in {
+                cmd_id_face_get_position,
+                cmd_id_face_get_gradient,
+                cmd_id_face_get_center,
+            }:
+                continue
+
+            response = message.resp.root
+            if not isinstance(response, OptionModeling):
+                raise ZooMCPException("Received an unexpected websocket response")
+            modeling_response = response.data.modeling_response.root
+
+            if message.request_id == cmd_id_face_get_position:
+                if not isinstance(modeling_response, ResponseFaceGetPosition):
+                    raise ZooMCPException(
+                        "Received an unexpected face position response"
+                    )
+                face_get_position = modeling_response.data
+            elif message.request_id == cmd_id_face_get_gradient:
+                if not isinstance(modeling_response, ResponseFaceGetGradient):
+                    raise ZooMCPException(
+                        "Received an unexpected face gradient response"
+                    )
+                face_get_gradient = modeling_response.data
+            elif message.request_id == cmd_id_face_get_center:
+                if not isinstance(modeling_response, ResponseFaceGetCenter):
+                    raise ZooMCPException("Received an unexpected face center response")
+                face_get_center = modeling_response.data
+
+        return FaceInfo(
+            face_get_position=face_get_position,
+            face_get_gradient=face_get_gradient,
+            face_get_center=face_get_center,
+        )
 
 
 async def zoo_snapshot_of_kcl(

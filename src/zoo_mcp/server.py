@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 import kcl
 from kittycad.models.modeling_cmd import OptionDefaultCameraLookAt, Point3d
+from kittycad.models.uuid import Uuid
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent
 
@@ -37,8 +38,10 @@ from zoo_mcp.zoo_tools import (
     zoo_calculate_surface_area,
     zoo_calculate_volume,
     zoo_convert_cad_file,
+    zoo_exec_kcl_project,
     zoo_execute_kcl,
     zoo_export_kcl,
+    zoo_face_info,
     zoo_format_kcl,
     zoo_get_sketch_constraint_status,
     zoo_lint_and_fix_kcl,
@@ -412,6 +415,29 @@ async def execute_kcl(
 
 
 @mcp.tool()
+async def exec_kcl_project(
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Run a KCL project on the server side and return its artifact graph.
+
+    Args:
+        kcl_code (str | None): KCL code to run as a single-file project.
+        kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+
+    Returns:
+        dict | str: The artifact graph produced by execution, or an error message.
+                    Contains UUID mappings to source code and somewhat structured understanding of the model.
+    """
+    logger.info("exec_kcl_project tool called")
+
+    try:
+        return zoo_exec_kcl_project(kcl_code=kcl_code, kcl_path=kcl_path)
+    except Exception as e:
+        return f"Failed to execute KCL project: {e}"
+
+
+@mcp.tool()
 async def export_kcl(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
@@ -499,6 +525,43 @@ async def get_sketch_constraint_status(
         )
     except Exception as e:
         return f"Failed to get sketch constraint status: {e}"
+
+
+@mcp.tool()
+async def get_face_info(
+    face_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Get the position, gradient, normal, and center of a face in a KCL model.
+
+    Args:
+        face_id (str): Intended to be a face id selected and sent by the user.
+        kcl_code (str | None): The KCL code defining the model.
+        kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+
+    Returns:
+        dict | str: The face position, gradient, normal, and center, or an error message.
+                    The position is the starting point of the face's outside perimeter in KittyCAD engine space. Pretty confusing.
+                    The gradient is the direction of greatest change of a scalar function.
+                    The normal is a typical face normal.
+                    The center is the geometric center of the face. *Prefer this over the position.*
+    """
+    logger.info("get_face_info tool called for face_id=%s", face_id)
+
+    try:
+        face_info = zoo_face_info(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            face_id=Uuid(face_id),
+        )
+        return {
+            "face_get_position": face_info.face_get_position.model_dump(),
+            "face_get_gradient": face_info.face_get_gradient.model_dump(),
+            "face_get_center": face_info.face_get_center.model_dump(),
+        }
+    except Exception as e:
+        return f"Failed to get face information: {e}"
 
 
 @mcp.tool()
