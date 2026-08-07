@@ -427,6 +427,7 @@ async def exec_kcl_project(
 
     Returns:
         dict | str: The artifact graph produced by execution, or an error message.
+                    Contains UUID mappings to source code and somewhat structured understanding of the model.
     """
     logger.info("exec_kcl_project tool called")
 
