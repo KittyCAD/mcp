@@ -2841,6 +2841,52 @@ async def zoo_snapshot_of_kcl(
     return resize_image(jpeg_contents_list[0], max_image_dimension)
 
 
+def _list_org_datasets_raw() -> list[dict[str, str | None]]:
+    """List datasets without validating fields unrelated to this tool's output."""
+    client = kittycad_client.get_http_client()
+    url = f"{kittycad_client.base_url}/org/datasets"
+    page_token: str | None = None
+    datasets: list[dict[str, str | None]] = []
+
+    while True:
+        params = {"page_token": page_token} if page_token is not None else None
+        response = client.get(
+            url=url,
+            headers=kittycad_client.get_headers(),
+            params=params,
+        )
+        if not response.is_success:
+            from kittycad.response_helpers import raise_for_status
+
+            raise_for_status(response)
+
+        payload = response.json()
+        items = payload.get("items", [])
+        if not isinstance(items, list):
+            raise ZooMCPException("Failed to list org datasets: invalid response")
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            dataset_id = item.get("id")
+            name = item.get("name")
+            description = item.get("description")
+            if isinstance(dataset_id, str) and isinstance(name, str):
+                datasets.append(
+                    {
+                        "id": dataset_id,
+                        "name": name,
+                        "description": description
+                        if isinstance(description, str)
+                        else None,
+                    }
+                )
+
+        page_token = payload.get("next_page")
+        if not isinstance(page_token, str) or not page_token:
+            return datasets
+
+
 def zoo_list_org_datasets() -> list[dict[str, str | None]]:
     """List all datasets visible to the org tied to the current ZOO_API_TOKEN.
 
@@ -2853,6 +2899,12 @@ def zoo_list_org_datasets() -> list[dict[str, str | None]]:
         datasets = list(
             kittycad_client.orgs.list_org_datasets(limit=None, page_token=None)
         )
+    except ValueError as exc:
+        logger.warning(
+            "SDK could not validate org datasets; falling back to raw JSON: %s",
+            exc,
+        )
+        return _list_org_datasets_raw()
     except KittyCADClientError as exc:
         if exc.status_code == 404:
             return []

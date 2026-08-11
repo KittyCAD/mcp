@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from kittycad import KittyCAD
 from kittycad.exceptions import KittyCADClientError
+from kittycad.models import OrgDataset
 from mcp.types import ImageContent, TextContent
 
 import zoo_mcp
@@ -1963,6 +1964,53 @@ async def test_list_org_datasets_success(monkeypatch: pytest.MonkeyPatch):
     assert result == [
         {"id": "uuid-1", "name": "alpha", "description": "first dataset"},
         {"id": "uuid-2", "name": "beta", "description": None},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_org_datasets_falls_back_for_unknown_status(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with pytest.raises(ValueError) as exc_info:
+        OrgDataset.model_validate({"status": "paused"})
+
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kittycad_client.orgs,
+        "list_org_datasets",
+        MagicMock(side_effect=exc_info.value),
+    )
+    raw_response = SimpleNamespace(
+        is_success=True,
+        json=MagicMock(
+            return_value={
+                "items": [
+                    {
+                        "id": "uuid-paused",
+                        "name": "paused dataset",
+                        "description": "temporarily paused",
+                        "status": "paused",
+                    }
+                ],
+                "next_page": None,
+            }
+        ),
+    )
+    http_client = MagicMock()
+    http_client.get.return_value = raw_response
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kittycad_client,
+        "get_http_client",
+        MagicMock(return_value=http_client),
+    )
+
+    response = await mcp.call_tool("list_org_datasets", arguments={})
+
+    assert _meta_result(response) == [
+        {
+            "id": "uuid-paused",
+            "name": "paused dataset",
+            "description": "temporarily paused",
+        }
     ]
 
 
