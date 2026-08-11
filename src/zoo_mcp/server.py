@@ -611,7 +611,8 @@ async def get_face_info(
         session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: The face position, gradient, normal, and center, or an error message.
+        dict | str: JSON serialization of FaceInfo on success, or an error message.
+                    Contains the face position, gradient, normal, and center.
                     The position is the starting point of the face's outside perimeter in KittyCAD engine space. Pretty confusing.
                     The gradient is the direction of greatest change of a scalar function.
                     The normal is a typical face normal.
@@ -653,6 +654,9 @@ async def entity_distance(
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
         session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        dict | str: JSON serialization of EntityGetDistance on success, or an error message.
     """
     logger.info("entity_distance tool called")
     try:
@@ -692,6 +696,9 @@ async def select_with_point(
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
         session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        dict | str: JSON serialization of SelectWithPoint on success, or an error message.
     """
     logger.info("select_with_point tool called")
     try:
@@ -721,6 +728,9 @@ async def set_selection_filter(
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
         session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        dict | str: JSON serialization of SetSelectionFilter on success, or an error message.
     """
     logger.info("set_selection_filter tool called")
     try:
@@ -749,6 +759,9 @@ async def select_entity(
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
         session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        dict | str: JSON serialization of SelectEntity on success, or an error message.
     """
     logger.info("select_entity tool called")
     try:
@@ -777,6 +790,9 @@ async def curve_get_end_points(
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
         session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        dict | str: JSON serialization of CurveGetEndPoints on success, or an error message.
     """
     logger.info("curve_get_end_points tool called")
     try:
@@ -843,6 +859,9 @@ async def engine_util_evaluate_path(
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
         session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        dict | str: JSON serialization of EngineUtilEvaluatePath on success, or an error message.
     """
     logger.info("engine_util_evaluate_path tool called")
     try:
@@ -865,7 +884,11 @@ async def curve_get_type(
     kcl_path: str | None = None,
     session_id: str | None = None,
 ) -> dict | str:
-    """Get whether a curve is a line, arc, or NURBS curve."""
+    """Get whether a curve is a line, arc, or NURBS curve.
+
+    Returns:
+        dict | str: JSON serialization of CurveGetType on success, or an error message.
+    """
     logger.info("curve_get_type tool called")
     try:
         result = zoo_curve_get_type(
@@ -886,7 +909,11 @@ async def edge_get_length(
     kcl_path: str | None = None,
     session_id: str | None = None,
 ) -> dict | str:
-    """Get the length of an edge entity in the current scene units."""
+    """Get the length of an edge entity in the current scene units.
+
+    Returns:
+        dict | str: JSON serialization of EdgeGetLength on success, or an error message.
+    """
     logger.info("edge_get_length tool called")
     try:
         result = zoo_edge_get_length(
@@ -907,7 +934,11 @@ async def entity_get_all_child_uuids(
     kcl_path: str | None = None,
     session_id: str | None = None,
 ) -> dict | str:
-    """Get all child UUIDs belonging to an entity."""
+    """Get all child UUIDs belonging to an entity.
+
+    Returns:
+        dict | str: JSON serialization of EntityGetAllChildUuids on success, or an error message.
+    """
     logger.info("entity_get_all_child_uuids tool called")
     try:
         result = zoo_entity_get_all_child_uuids(
@@ -928,7 +959,11 @@ async def entity_get_index(
     kcl_path: str | None = None,
     session_id: str | None = None,
 ) -> dict | str:
-    """Get an entity's index within its parent."""
+    """Get an entity's index within its parent.
+
+    Returns:
+        dict | str: JSON serialization of EntityGetIndex on success, or an error message.
+    """
     logger.info("entity_get_index tool called")
     try:
         result = zoo_entity_get_index(
@@ -949,7 +984,11 @@ async def entity_get_parent_id(
     kcl_path: str | None = None,
     session_id: str | None = None,
 ) -> dict | str:
-    """Get the UUID of an entity's parent."""
+    """Get the UUID of an entity's parent.
+
+    Returns:
+        dict | str: JSON serialization of EntityGetParentId on success, or an error message.
+    """
     logger.info("entity_get_parent_id tool called")
     try:
         result = zoo_entity_get_parent_id(
@@ -970,7 +1009,11 @@ async def entity_get_sketch_paths(
     kcl_path: str | None = None,
     session_id: str | None = None,
 ) -> dict | str:
-    """Get the sketch path UUIDs belonging to an entity."""
+    """Get the sketch path UUIDs belonging to an entity.
+
+    Returns:
+        dict | str: JSON serialization of EntityGetSketchPaths on success, or an error message.
+    """
     logger.info("entity_get_sketch_paths tool called")
     try:
         result = zoo_entity_get_sketch_paths(
@@ -998,6 +1041,9 @@ async def highlight_set_entities(
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
         session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        dict | str: JSON serialization of HighlightSetEntities on success, or an error message.
     """
     logger.info("highlight_set_entities tool called")
     try:
