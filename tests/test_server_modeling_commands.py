@@ -26,6 +26,7 @@ from kittycad.models import (
 )
 from kittycad.models.entity_reference import OptionFace
 from kittycad.models.uuid import Uuid
+from mcp.server.fastmcp.exceptions import ToolError
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
@@ -36,6 +37,13 @@ def _result(response: Sequence[Any] | dict[str, Any]) -> Any:
     meta = response[1]
     assert isinstance(meta, dict)
     return cast(dict[str, Any], meta)["result"]
+
+
+def _structured_result(response: Sequence[Any] | dict[str, Any]) -> dict[str, Any]:
+    assert isinstance(response, Sequence)
+    result = response[1]
+    assert isinstance(result, dict)
+    return cast(dict[str, Any], result)
 
 
 @pytest.mark.asyncio
@@ -220,7 +228,7 @@ async def test_modeling_tools_are_registered():
         ),
     ],
 )
-async def test_modeling_tool_maps_arguments_and_serializes_response(
+async def test_modeling_tool_maps_arguments_and_returns_structured_response(
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
     zoo_tool: str,
@@ -233,7 +241,7 @@ async def test_modeling_tool_maps_arguments_and_serializes_response(
 
     response = await mcp.call_tool(tool_name, arguments=arguments)
 
-    assert _result(response) == cast(Any, response_data).model_dump()
+    assert _structured_result(response) == cast(Any, response_data).model_dump()
     mock.assert_called_once_with(**expected_kwargs, session_id=None)
 
 
@@ -245,12 +253,11 @@ async def test_modeling_tool_returns_error(monkeypatch: pytest.MonkeyPatch):
         MagicMock(side_effect=RuntimeError("boom")),
     )
 
-    response = await mcp.call_tool(
-        "entity_get_index",
-        arguments={"entity_id": "entity-id", "kcl_code": "code"},
-    )
-
-    assert _result(response) == "Failed to get entity index: boom"
+    with pytest.raises(ToolError, match="Error executing tool entity_get_index: boom"):
+        await mcp.call_tool(
+            "entity_get_index",
+            arguments={"entity_id": "entity-id", "kcl_code": "code"},
+        )
 
 
 @pytest.mark.asyncio
@@ -271,8 +278,8 @@ async def test_start_and_stop_modeling_session_tools(
         arguments={"session_id": "session-id"},
     )
 
-    assert _result(start_response) == {"session_id": "session-id"}
-    assert _result(stop_response) == {"stopped_session_id": "session-id"}
+    assert _result(start_response) == "session-id"
+    assert _result(stop_response) is None
     start.assert_called_once_with()
     stop.assert_called_once_with("session-id")
 
@@ -287,7 +294,7 @@ async def test_modeling_tool_forwards_session_id(monkeypatch: pytest.MonkeyPatch
         arguments={"entity_id": "entity-id", "session_id": "session-id"},
     )
 
-    assert _result(response) == {"entity_index": 3}
+    assert _structured_result(response) == {"entity_index": 3}
     mock.assert_called_once_with(
         kcl_code=None,
         kcl_path=None,
@@ -315,7 +322,7 @@ async def test_kcl_execution_tools_forward_session_id(
     )
 
     assert _result(execute_response) == [True, "KCL code executed successfully"]
-    assert _result(project_response) == {"item_count": 1}
+    assert _structured_result(project_response) == {"item_count": 1}
     execute.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,

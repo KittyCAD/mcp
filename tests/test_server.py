@@ -10,7 +10,13 @@ import pytest
 import pytest_asyncio
 from kittycad import KittyCAD
 from kittycad.exceptions import KittyCADClientError
-from kittycad.models import OrgDataset
+from kittycad.models import (
+    FaceGetCenter,
+    FaceGetGradient,
+    FaceGetPosition,
+    OrgDataset,
+    Point3d,
+)
 from mcp.types import ImageContent, TextContent
 
 import zoo_mcp
@@ -26,6 +32,14 @@ def _meta_result(response: Sequence[Any] | dict[str, Any]) -> Any:
     meta = response[1]
     assert isinstance(meta, dict)
     return cast(dict[str, Any], meta)["result"]
+
+
+def _structured_result(response: Sequence[Any] | dict[str, Any]) -> dict[str, Any]:
+    """Extract structured content with proper typing for ty."""
+    assert isinstance(response, Sequence)
+    result = response[1]
+    assert isinstance(result, dict)
+    return cast(dict[str, Any], result)
 
 
 def _content_list(response: Sequence[Any] | dict[str, Any]) -> list[Any]:
@@ -493,7 +507,7 @@ async def test_exec_kcl_project_tool(monkeypatch):
         arguments={"kcl_code": "sketch = startSketchOn(XY)", "kcl_path": None},
     )
 
-    assert _meta_result(response) == artifact_graph
+    assert _structured_result(response) == artifact_graph
     mock.assert_called_once_with(
         kcl_code="sketch = startSketchOn(XY)",
         kcl_path=None,
@@ -938,22 +952,14 @@ async def test_get_sketch_constraint_status_error():
 
 @pytest.mark.asyncio
 async def test_get_face_info(monkeypatch):
-    face_info = SimpleNamespace(
-        face_get_position=MagicMock(
-            model_dump=MagicMock(return_value={"pos": {"x": 1.0, "y": 2.0, "z": 3.0}})
+    face_info = zoo_mcp.zoo_tools.FaceInfo(
+        face_get_position=FaceGetPosition(pos=Point3d(x=1.0, y=2.0, z=3.0)),
+        face_get_gradient=FaceGetGradient(
+            df_du=Point3d(x=1.0, y=0.0, z=0.0),
+            df_dv=Point3d(x=0.0, y=1.0, z=0.0),
+            normal=Point3d(x=0.0, y=0.0, z=1.0),
         ),
-        face_get_gradient=MagicMock(
-            model_dump=MagicMock(
-                return_value={
-                    "df_du": {"x": 1.0, "y": 0.0, "z": 0.0},
-                    "df_dv": {"x": 0.0, "y": 1.0, "z": 0.0},
-                    "normal": {"x": 0.0, "y": 0.0, "z": 1.0},
-                }
-            )
-        ),
-        face_get_center=MagicMock(
-            model_dump=MagicMock(return_value={"pos": {"x": 0.5, "y": 0.5, "z": 0.0}})
-        ),
+        face_get_center=FaceGetCenter(pos=Point3d(x=0.5, y=0.5, z=0.0)),
     )
     mock = MagicMock(return_value=face_info)
     monkeypatch.setattr("zoo_mcp.server.zoo_face_info", mock)
@@ -967,7 +973,7 @@ async def test_get_face_info(monkeypatch):
         },
     )
 
-    result = _meta_result(response)
+    result = _structured_result(response)
     assert result == {
         "face_get_position": {"pos": {"x": 1.0, "y": 2.0, "z": 3.0}},
         "face_get_gradient": {

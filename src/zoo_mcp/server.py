@@ -4,11 +4,24 @@ from contextlib import asynccontextmanager
 
 import kcl
 from kittycad.models import (
+    CurveGetEndPoints,
+    CurveGetType,
+    EdgeGetLength,
+    EngineUtilEvaluatePath,
+    EntityGetAllChildUuids,
+    EntityGetDistance,
+    EntityGetIndex,
+    EntityGetParentId,
+    EntityGetSketchPaths,
     EntityReference,
     EntityType,
     GlobalAxis,
+    HighlightSetEntities,
     Point2d,
     SceneSelectionType,
+    SelectEntity,
+    SelectWithPoint,
+    SetSelectionFilter,
 )
 from kittycad.models.modeling_cmd import OptionDefaultCameraLookAt, Point3d
 from kittycad.models.uuid import Uuid
@@ -36,6 +49,7 @@ from zoo_mcp.utils.image_utils import (
 )
 from zoo_mcp.zoo_tools import (
     CameraView,
+    FaceInfo,
     zoo_calculate_bounding_box_cad,
     zoo_calculate_bounding_box_kcl,
     zoo_calculate_cad_physical_properties,
@@ -451,7 +465,7 @@ async def exec_kcl_project(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> dict[str, object]:
     """Run a KCL project on the server side and return its artifact graph.
 
     Args:
@@ -460,49 +474,46 @@ async def exec_kcl_project(
         session_id: An open modeling session in which to execute the project.
 
     Returns:
-        dict | str: The artifact graph produced by execution, or an error message.
-                    Contains UUID mappings to source code and somewhat structured understanding of the model.
+        dict[str, object]: The artifact graph produced by execution. Contains UUID
+                           mappings to source code and a somewhat structured
+                           understanding of the model.
     """
     logger.info("exec_kcl_project tool called")
 
-    try:
-        return zoo_exec_kcl_project(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            session_id=session_id,
-        )
-    except Exception as e:
-        return f"Failed to execute KCL project: {e}"
+    return zoo_exec_kcl_project(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
-async def start_modeling_session() -> dict | str:
+async def start_modeling_session() -> str:
     """Open an empty modeling websocket for subsequent tools.
 
     Pass the returned session_id to execute_kcl or exec_kcl_project to populate
     the scene, then reuse it with modeling query, selection, and highlight tools.
     Stop the session explicitly with stop_modeling_session when finished.
+
+    Returns:
+        str: The session ID to pass to session-aware modeling tools.
     """
     logger.info("start_modeling_session tool called")
-    try:
-        return {"session_id": zoo_start_modeling_session()}
-    except Exception as e:
-        return f"Failed to start modeling session: {e}"
+    return zoo_start_modeling_session()
 
 
 @mcp.tool()
-async def stop_modeling_session(session_id: str) -> dict | str:
+async def stop_modeling_session(session_id: str) -> None:
     """Close a persistent modeling websocket session.
 
     Args:
         session_id: The ID returned by start_modeling_session.
+
+    Returns:
+        None
     """
     logger.info("stop_modeling_session tool called")
-    try:
-        zoo_stop_modeling_session(session_id)
-        return {"stopped_session_id": session_id}
-    except Exception as e:
-        return f"Failed to stop modeling session: {e}"
+    zoo_stop_modeling_session(session_id)
 
 
 @mcp.tool()
@@ -601,7 +612,7 @@ async def get_face_info(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> FaceInfo:
     """Get the position, gradient, normal, and center of a face in a KCL model.
 
     Args:
@@ -611,29 +622,19 @@ async def get_face_info(
         session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: JSON serialization of FaceInfo on success, or an error message.
-                    Contains the face position, gradient, normal, and center.
-                    The position is the starting point of the face's outside perimeter in KittyCAD engine space. Pretty confusing.
-                    The gradient is the direction of greatest change of a scalar function.
-                    The normal is a typical face normal.
-                    The center is the geometric center of the face. *Prefer this over the position.*
+        FaceInfo: The face position, gradient, normal, and center. The position is
+                  the starting point of the face's outside perimeter in KittyCAD
+                  engine space. The center is the geometric center of the face and
+                  should generally be preferred over the position.
     """
     logger.info("get_face_info tool called for face_id=%s", face_id)
 
-    try:
-        face_info = zoo_face_info(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            face_id=Uuid(face_id),
-            session_id=session_id,
-        )
-        return {
-            "face_get_position": face_info.face_get_position.model_dump(),
-            "face_get_gradient": face_info.face_get_gradient.model_dump(),
-            "face_get_center": face_info.face_get_center.model_dump(),
-        }
-    except Exception as e:
-        return f"Failed to get face information: {e}"
+    return zoo_face_info(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        face_id=Uuid(face_id),
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -644,7 +645,7 @@ async def entity_distance(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> EntityGetDistance:
     """Get the minimum and maximum distance between two model entities.
 
     Args:
@@ -656,21 +657,17 @@ async def entity_distance(
         session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: JSON serialization of EntityGetDistance on success, or an error message.
+        EntityGetDistance: The minimum and maximum distance between the entities.
     """
     logger.info("entity_distance tool called")
-    try:
-        result = zoo_entity_distance(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            entity_id1=Uuid(entity_id1),
-            entity_id2=Uuid(entity_id2),
-            on_axis=on_axis,
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to get entity distance: {e}"
+    return zoo_entity_distance(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        entity_id1=Uuid(entity_id1),
+        entity_id2=Uuid(entity_id2),
+        on_axis=on_axis,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -681,7 +678,7 @@ async def select_with_point(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> SelectWithPoint:
     """Select a model entity at window coordinates.
 
       Not a raycast, but "GPU picking", which uses the association of the pixel
@@ -698,20 +695,16 @@ async def select_with_point(
         session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: JSON serialization of SelectWithPoint on success, or an error message.
+        SelectWithPoint: The selected entity.
     """
     logger.info("select_with_point tool called")
-    try:
-        result = zoo_select_with_point(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            selected_at_window=Point2d(x=x, y=y),
-            selection_type=selection_type,
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to select with point: {e}"
+    return zoo_select_with_point(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        selected_at_window=Point2d(x=x, y=y),
+        selection_type=selection_type,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -720,7 +713,7 @@ async def set_selection_filter(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> SetSelectionFilter:
     """Set which model entity types can be added to the "selection set".
 
     Args:
@@ -730,19 +723,15 @@ async def set_selection_filter(
         session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: JSON serialization of SetSelectionFilter on success, or an error message.
+        SetSelectionFilter: Confirmation that the filter was set.
     """
     logger.info("set_selection_filter tool called")
-    try:
-        result = zoo_set_selection_filter(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            entity_types=entity_types,
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to set selection filter: {e}"
+    return zoo_set_selection_filter(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        entity_types=entity_types,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -751,7 +740,7 @@ async def select_entity(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> SelectEntity:
     """Replace the current "selection set" with explicit entity references.
 
     Args:
@@ -761,19 +750,15 @@ async def select_entity(
         session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: JSON serialization of SelectEntity on success, or an error message.
+        SelectEntity: Confirmation that the selection was replaced.
     """
     logger.info("select_entity tool called")
-    try:
-        result = zoo_select_entity(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            entities=entities,
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to select entities: {e}"
+    return zoo_select_entity(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        entities=entities,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -782,7 +767,7 @@ async def curve_get_end_points(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> CurveGetEndPoints:
     """Get the start and end points of a curve entity.
 
     Args:
@@ -792,19 +777,15 @@ async def curve_get_end_points(
         session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: JSON serialization of CurveGetEndPoints on success, or an error message.
+        CurveGetEndPoints: The curve's start and end points.
     """
     logger.info("curve_get_end_points tool called")
-    try:
-        result = zoo_curve_get_end_points(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            curve_id=Uuid(curve_id),
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to get curve endpoints: {e}"
+    return zoo_curve_get_end_points(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        curve_id=Uuid(curve_id),
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -814,7 +795,7 @@ async def engine_util_evaluate_path(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> EngineUtilEvaluatePath:
     """Evaluate a serialized KCL path at parameter t.
 
     Examples of `path_json`:
@@ -861,20 +842,16 @@ async def engine_util_evaluate_path(
         session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: JSON serialization of EngineUtilEvaluatePath on success, or an error message.
+        EngineUtilEvaluatePath: The position on the path at parameter t.
     """
     logger.info("engine_util_evaluate_path tool called")
-    try:
-        result = zoo_engine_util_evaluate_path(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            path_json=path_json,
-            t=t,
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to evaluate path: {e}"
+    return zoo_engine_util_evaluate_path(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        path_json=path_json,
+        t=t,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -883,23 +860,19 @@ async def curve_get_type(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> CurveGetType:
     """Get whether a curve is a line, arc, or NURBS curve.
 
     Returns:
-        dict | str: JSON serialization of CurveGetType on success, or an error message.
+        CurveGetType: The curve's geometric type.
     """
     logger.info("curve_get_type tool called")
-    try:
-        result = zoo_curve_get_type(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            curve_id=Uuid(curve_id),
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to get curve type: {e}"
+    return zoo_curve_get_type(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        curve_id=Uuid(curve_id),
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -908,23 +881,19 @@ async def edge_get_length(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> EdgeGetLength:
     """Get the length of an edge entity in the current scene units.
 
     Returns:
-        dict | str: JSON serialization of EdgeGetLength on success, or an error message.
+        EdgeGetLength: The edge length in the current scene units.
     """
     logger.info("edge_get_length tool called")
-    try:
-        result = zoo_edge_get_length(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            edge_id=Uuid(edge_id),
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to get edge length: {e}"
+    return zoo_edge_get_length(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        edge_id=Uuid(edge_id),
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -933,23 +902,19 @@ async def entity_get_all_child_uuids(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> EntityGetAllChildUuids:
     """Get all child UUIDs belonging to an entity.
 
     Returns:
-        dict | str: JSON serialization of EntityGetAllChildUuids on success, or an error message.
+        EntityGetAllChildUuids: All child entity UUIDs.
     """
     logger.info("entity_get_all_child_uuids tool called")
-    try:
-        result = zoo_entity_get_all_child_uuids(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            entity_id=Uuid(entity_id),
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to get entity child UUIDs: {e}"
+    return zoo_entity_get_all_child_uuids(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        entity_id=Uuid(entity_id),
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -958,23 +923,19 @@ async def entity_get_index(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> EntityGetIndex:
     """Get an entity's index within its parent.
 
     Returns:
-        dict | str: JSON serialization of EntityGetIndex on success, or an error message.
+        EntityGetIndex: The entity's index within its parent.
     """
     logger.info("entity_get_index tool called")
-    try:
-        result = zoo_entity_get_index(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            entity_id=Uuid(entity_id),
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to get entity index: {e}"
+    return zoo_entity_get_index(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        entity_id=Uuid(entity_id),
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -983,23 +944,19 @@ async def entity_get_parent_id(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> EntityGetParentId:
     """Get the UUID of an entity's parent.
 
     Returns:
-        dict | str: JSON serialization of EntityGetParentId on success, or an error message.
+        EntityGetParentId: The parent entity's UUID.
     """
     logger.info("entity_get_parent_id tool called")
-    try:
-        result = zoo_entity_get_parent_id(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            entity_id=Uuid(entity_id),
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to get entity parent ID: {e}"
+    return zoo_entity_get_parent_id(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        entity_id=Uuid(entity_id),
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -1008,23 +965,19 @@ async def entity_get_sketch_paths(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> EntityGetSketchPaths:
     """Get the sketch path UUIDs belonging to an entity.
 
     Returns:
-        dict | str: JSON serialization of EntityGetSketchPaths on success, or an error message.
+        EntityGetSketchPaths: The sketch path UUIDs belonging to the entity.
     """
     logger.info("entity_get_sketch_paths tool called")
-    try:
-        result = zoo_entity_get_sketch_paths(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            entity_id=Uuid(entity_id),
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to get entity sketch paths: {e}"
+    return zoo_entity_get_sketch_paths(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        entity_id=Uuid(entity_id),
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -1033,7 +986,7 @@ async def highlight_set_entities(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> dict | str:
+) -> HighlightSetEntities:
     """Replace the currently highlighted entities. Does NOT modify the "selection set".
 
     Args:
@@ -1043,19 +996,15 @@ async def highlight_set_entities(
         session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: JSON serialization of HighlightSetEntities on success, or an error message.
+        HighlightSetEntities: Confirmation that the highlights were replaced.
     """
     logger.info("highlight_set_entities tool called")
-    try:
-        result = zoo_highlight_set_entities(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            entity_ids=entity_ids,
-            session_id=session_id,
-        )
-        return result.model_dump()
-    except Exception as e:
-        return f"Failed to highlight entities: {e}"
+    return zoo_highlight_set_entities(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        entity_ids=entity_ids,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
