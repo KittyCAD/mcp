@@ -3,6 +3,13 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import kcl
+from kittycad.models import (
+    EntityReference,
+    EntityType,
+    GlobalAxis,
+    Point2d,
+    SceneSelectionType,
+)
 from kittycad.models.modeling_cmd import OptionDefaultCameraLookAt, Point3d
 from kittycad.models.uuid import Uuid
 from mcp.server.fastmcp import FastMCP
@@ -38,12 +45,22 @@ from zoo_mcp.zoo_tools import (
     zoo_calculate_surface_area,
     zoo_calculate_volume,
     zoo_convert_cad_file,
+    zoo_curve_get_end_points,
+    zoo_curve_get_type,
+    zoo_edge_get_length,
+    zoo_engine_util_evaluate_path,
+    zoo_entity_distance,
+    zoo_entity_get_all_child_uuids,
+    zoo_entity_get_index,
+    zoo_entity_get_parent_id,
+    zoo_entity_get_sketch_paths,
     zoo_exec_kcl_project,
     zoo_execute_kcl,
     zoo_export_kcl,
     zoo_face_info,
     zoo_format_kcl,
     zoo_get_sketch_constraint_status,
+    zoo_highlight_set_entities,
     zoo_lint_and_fix_kcl,
     zoo_list_org_datasets,
     zoo_list_org_skills,
@@ -53,6 +70,9 @@ from zoo_mcp.zoo_tools import (
     zoo_multiview_snapshot_of_cad,
     zoo_multiview_snapshot_of_kcl,
     zoo_search_org_dataset_semantic,
+    zoo_select_entity,
+    zoo_select_with_point,
+    zoo_set_selection_filter,
     zoo_snapshot_of_cad,
     zoo_snapshot_of_kcl,
 )
@@ -536,7 +556,7 @@ async def get_face_info(
     """Get the position, gradient, normal, and center of a face in a KCL model.
 
     Args:
-        face_id (str): Intended to be a face id selected and sent by the user.
+        face_id (str): Usually a user or LLM-selected face id.
         kcl_code (str | None): The KCL code defining the model.
         kcl_path (str | None): A .kcl file or project directory containing main.kcl.
 
@@ -562,6 +582,350 @@ async def get_face_info(
         }
     except Exception as e:
         return f"Failed to get face information: {e}"
+
+
+@mcp.tool()
+async def entity_distance(
+    entity_id1: str,
+    entity_id2: str,
+    on_axis: GlobalAxis | None = None,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Get the minimum and maximum distance between two model entities.
+
+    Args:
+        entity_id1: The first entity UUID, typically obtained from an artifact graph.
+        entity_id2: The second entity UUID.
+        on_axis: Optional global axis for projected distance; omit for Euclidean distance.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+    """
+    logger.info("entity_distance tool called")
+    try:
+        result = zoo_entity_distance(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            entity_id1=Uuid(entity_id1),
+            entity_id2=Uuid(entity_id2),
+            on_axis=on_axis,
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to get entity distance: {e}"
+
+
+@mcp.tool()
+async def select_with_point(
+    x: float,
+    y: float,
+    selection_type: SceneSelectionType,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Select a model entity at window coordinates.
+
+      Not a raycast, but "GPU picking", which uses the association of the pixel
+      to the texture to the mesh to select something.
+
+      Each selection operation modifies a "selection set".
+
+    Args:
+        x: Horizontal window coordinate.
+        y: Vertical window coordinate.
+        selection_type: Whether to replace, add to, or remove from the selection.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+    """
+    logger.info("select_with_point tool called")
+    try:
+        result = zoo_select_with_point(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            selected_at_window=Point2d(x=x, y=y),
+            selection_type=selection_type,
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to select with point: {e}"
+
+
+@mcp.tool()
+async def set_selection_filter(
+    entity_types: list[EntityType],
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Set which model entity types can be added to the "selection set".
+
+    Args:
+        entity_types: Entity types permitted by the selection filter.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+    """
+    logger.info("set_selection_filter tool called")
+    try:
+        result = zoo_set_selection_filter(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            entity_types=entity_types,
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to set selection filter: {e}"
+
+
+@mcp.tool()
+async def select_entity(
+    entities: list[EntityReference],
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Replace the current "selection set" with explicit entity references.
+
+    Args:
+        entities: Typed face, edge, solid, segment, or other entity references.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+    """
+    logger.info("select_entity tool called")
+    try:
+        result = zoo_select_entity(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            entities=entities,
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to select entities: {e}"
+
+
+@mcp.tool()
+async def curve_get_end_points(
+    curve_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Get the start and end points of a curve entity.
+
+    Args:
+        curve_id: Curve UUID, typically obtained from an artifact graph.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+    """
+    logger.info("curve_get_end_points tool called")
+    try:
+        result = zoo_curve_get_end_points(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            curve_id=Uuid(curve_id),
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to get curve endpoints: {e}"
+
+
+@mcp.tool()
+async def engine_util_evaluate_path(
+    path_json: str,
+    t: float,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Evaluate a serialized KCL path at parameter t.
+
+    Examples of `path_json`:
+
+    ```json
+    {
+      "start": {
+        "from": [10, 0]
+      },
+      "value": [
+        {
+          "type": "Arc",
+          "center": [0, 0],
+          "radius": 10,
+          "angle_range": [0, 90]
+        }
+      ]
+    }
+    ```
+
+    ```json
+    {
+      "start": {
+        "from": [0, 0]
+      },
+      "value": [
+        {
+          "type": "ToPoint",
+          "to": [10, 0]
+        },
+        {
+          "type": "ToPoint",
+          "to": [10, 10]
+        }
+      ]
+    }
+    ```
+
+    Args:
+        path_json: The serialized JSON representation of the KCL sketch or path.
+        t: Normalized path parameter, conventionally between 0 and 1.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+    """
+    logger.info("engine_util_evaluate_path tool called")
+    try:
+        result = zoo_engine_util_evaluate_path(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            path_json=path_json,
+            t=t,
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to evaluate path: {e}"
+
+
+@mcp.tool()
+async def curve_get_type(
+    curve_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Get whether a curve is a line, arc, or NURBS curve."""
+    logger.info("curve_get_type tool called")
+    try:
+        result = zoo_curve_get_type(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            curve_id=Uuid(curve_id),
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to get curve type: {e}"
+
+
+@mcp.tool()
+async def edge_get_length(
+    edge_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Get the length of an edge entity in the current scene units."""
+    logger.info("edge_get_length tool called")
+    try:
+        result = zoo_edge_get_length(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            edge_id=Uuid(edge_id),
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to get edge length: {e}"
+
+
+@mcp.tool()
+async def entity_get_all_child_uuids(
+    entity_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Get all child UUIDs belonging to an entity."""
+    logger.info("entity_get_all_child_uuids tool called")
+    try:
+        result = zoo_entity_get_all_child_uuids(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            entity_id=Uuid(entity_id),
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to get entity child UUIDs: {e}"
+
+
+@mcp.tool()
+async def entity_get_index(
+    entity_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Get an entity's index within its parent."""
+    logger.info("entity_get_index tool called")
+    try:
+        result = zoo_entity_get_index(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            entity_id=Uuid(entity_id),
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to get entity index: {e}"
+
+
+@mcp.tool()
+async def entity_get_parent_id(
+    entity_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Get the UUID of an entity's parent."""
+    logger.info("entity_get_parent_id tool called")
+    try:
+        result = zoo_entity_get_parent_id(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            entity_id=Uuid(entity_id),
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to get entity parent ID: {e}"
+
+
+@mcp.tool()
+async def entity_get_sketch_paths(
+    entity_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Get the sketch path UUIDs belonging to an entity."""
+    logger.info("entity_get_sketch_paths tool called")
+    try:
+        result = zoo_entity_get_sketch_paths(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            entity_id=Uuid(entity_id),
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to get entity sketch paths: {e}"
+
+
+@mcp.tool()
+async def highlight_set_entities(
+    entity_ids: list[str],
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+) -> dict | str:
+    """Replace the currently highlighted entities. Does NOT modify the "selection set".
+
+    Args:
+        entity_ids: Entity UUIDs to highlight; pass an empty list to clear highlights.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+    """
+    logger.info("highlight_set_entities tool called")
+    try:
+        result = zoo_highlight_set_entities(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            entity_ids=entity_ids,
+        )
+        return result.model_dump()
+    except Exception as e:
+        return f"Failed to highlight entities: {e}"
 
 
 @mcp.tool()

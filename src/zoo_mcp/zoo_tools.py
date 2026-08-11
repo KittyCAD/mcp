@@ -27,7 +27,19 @@ from kittycad.exceptions import KittyCADClientError
 from kittycad.models import (
     Axis,
     AxisDirectionPair,
+    CurveGetEndPoints,
+    CurveGetType,
     Direction,
+    DistanceType,
+    EdgeGetLength,
+    EngineUtilEvaluatePath,
+    EntityGetAllChildUuids,
+    EntityGetDistance,
+    EntityGetIndex,
+    EntityGetParentId,
+    EntityGetSketchPaths,
+    EntityReference,
+    EntityType,
     FaceGetCenter,
     FaceGetGradient,
     FaceGetPosition,
@@ -38,6 +50,8 @@ from kittycad.models import (
     FileMass,
     FileSurfaceArea,
     FileVolume,
+    GlobalAxis,
+    HighlightSetEntities,
     ImageFormat,
     ImportFile,
     InputFormat3d,
@@ -46,6 +60,10 @@ from kittycad.models import (
     Point2d,
     Point3d,
     PostEffectType,
+    SceneSelectionType,
+    SelectEntity,
+    SelectWithPoint,
+    SetSelectionFilter,
     System,
     UnitArea,
     UnitDensity,
@@ -54,6 +72,7 @@ from kittycad.models import (
     UnitVolume,
     WebSocketRequest,
 )
+from kittycad.models.distance_type import OptionEuclidean, OptionOnAxis
 from kittycad.models.input_format3d import (
     OptionFbx,
     OptionGltf,
@@ -64,15 +83,55 @@ from kittycad.models.input_format3d import (
     OptionStl,
 )
 from kittycad.models.modeling_cmd import (
+    OptionCurveGetEndPoints,
+    OptionCurveGetType,
     OptionDefaultCameraLookAt,
     OptionDefaultCameraSetOrthographic,
+    OptionEdgeGetLength,
+    OptionEngineUtilEvaluatePath,
+    OptionEntityGetAllChildUuids,
+    OptionEntityGetDistance,
+    OptionEntityGetIndex,
+    OptionEntityGetParentId,
+    OptionEntityGetSketchPaths,
     OptionFaceGetCenter,
     OptionFaceGetGradient,
     OptionFaceGetPosition,
+    OptionHighlightSetEntities,
     OptionImportFiles,
+    OptionSelectEntity,
+    OptionSelectWithPoint,
+    OptionSetSelectionFilter,
     OptionTakeSnapshot,
     OptionViewIsometric,
     OptionZoomToFit,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionCurveGetEndPoints as ResponseCurveGetEndPoints,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionCurveGetType as ResponseCurveGetType,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEdgeGetLength as ResponseEdgeGetLength,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEngineUtilEvaluatePath as ResponseEngineUtilEvaluatePath,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetAllChildUuids as ResponseEntityGetAllChildUuids,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetDistance as ResponseEntityGetDistance,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetIndex as ResponseEntityGetIndex,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetParentId as ResponseEntityGetParentId,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetSketchPaths as ResponseEntityGetSketchPaths,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionFaceGetCenter as ResponseFaceGetCenter,
@@ -82,6 +141,18 @@ from kittycad.models.ok_modeling_cmd_response import (
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionFaceGetPosition as ResponseFaceGetPosition,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionHighlightSetEntities as ResponseHighlightSetEntities,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionSelectEntity as ResponseSelectEntity,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionSelectWithPoint as ResponseSelectWithPoint,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionSetSelectionFilter as ResponseSetSelectionFilter,
 )
 from kittycad.models.ok_web_socket_response_data import OptionModeling
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
@@ -2272,6 +2343,313 @@ def zoo_face_info(
             face_get_gradient=face_get_gradient,
             face_get_center=face_get_center,
         )
+
+
+_ModelingResponseT = TypeVar("_ModelingResponseT")
+
+
+def _send_modeling_command(
+    ws: WebSocketModelingCommandsWs,
+    command: ModelingCmd,
+    expected_response: type[_ModelingResponseT],
+    response_description: str,
+) -> _ModelingResponseT:
+    """Send one modeling command and return its matching typed response."""
+    command_id = ModelingCmdId(uuid4())
+    ws.send(
+        WebSocketRequest(
+            OptionModelingCmdReq(
+                cmd=command,
+                cmd_id=command_id,
+            )
+        )
+    )
+
+    while True:
+        message = ws.recv().root
+        if not isinstance(message, SuccessWebSocketResponse):
+            raise ZooMCPException(message)
+        if message.request_id != command_id:
+            continue
+
+        response = message.resp.root
+        if not isinstance(response, OptionModeling):
+            raise ZooMCPException("Received an unexpected websocket response")
+        modeling_response = response.data.modeling_response.root
+
+        if not isinstance(modeling_response, expected_response):
+            raise ZooMCPException(
+                f"Received an unexpected {response_description} response"
+            )
+        return modeling_response
+
+
+def _execute_project_modeling_command(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    command: ModelingCmd,
+    expected_response: type[_ModelingResponseT],
+    response_description: str,
+) -> _ModelingResponseT:
+    """Execute a KCL project, then run one modeling command in its session."""
+    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+
+    with kittycad_client.modeling.modeling_commands_ws(
+        fps=30,
+        post_effect=PostEffectType.SSAO,
+        show_grid=False,
+        unlocked_framerate=False,
+        video_res_height=1024,
+        video_res_width=1024,
+        webrtc=False,
+    ) as ws:
+        _exec_kcl_project(ws, entrypoint, files)
+        return _send_modeling_command(
+            ws,
+            command,
+            expected_response,
+            response_description,
+        )
+
+
+def zoo_entity_distance(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    entity_id1: Uuid,
+    entity_id2: Uuid,
+    on_axis: GlobalAxis | None = None,
+) -> EntityGetDistance:
+    """Get the distance between two entities in a KCL project.
+
+    When ``on_axis`` is provided, the distance is measured along that global
+    axis. Otherwise, the Euclidean distance is measured.
+    """
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(
+            OptionEntityGetDistance(
+                entity_id1=entity_id1,
+                entity_id2=entity_id2,
+                distance_type=DistanceType(
+                    OptionOnAxis(axis=on_axis)
+                    if on_axis is not None
+                    else OptionEuclidean()
+                ),
+            )
+        ),
+        ResponseEntityGetDistance,
+        "entity distance",
+    )
+    return response.data
+
+
+# Selection tools.
+
+
+def zoo_select_with_point(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    selected_at_window: Point2d,
+    selection_type: SceneSelectionType,
+) -> SelectWithPoint:
+    """Select an entity at the given window coordinates."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(
+            OptionSelectWithPoint(
+                selected_at_window=selected_at_window,
+                selection_type=selection_type,
+            )
+        ),
+        ResponseSelectWithPoint,
+        "select with point",
+    )
+    return response.data
+
+
+def zoo_set_selection_filter(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    entity_types: list[EntityType],
+) -> SetSelectionFilter:
+    """Set which entity types can be selected in a KCL project."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionSetSelectionFilter(filter=entity_types)),
+        ResponseSetSelectionFilter,
+        "selection filter",
+    )
+    return response.data
+
+
+def zoo_select_entity(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    entities: list[EntityReference],
+) -> SelectEntity:
+    """Replace the current selection with the given entities."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionSelectEntity(entities=entities)),
+        ResponseSelectEntity,
+        "select entity",
+    )
+    return response.data
+
+
+# Get information around curves and segments.
+
+
+def zoo_curve_get_end_points(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    curve_id: Uuid,
+) -> CurveGetEndPoints:
+    """Get the start and end points of a curve."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionCurveGetEndPoints(curve_id=curve_id)),
+        ResponseCurveGetEndPoints,
+        "curve endpoints",
+    )
+    return response.data
+
+
+def zoo_engine_util_evaluate_path(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    path_json: str,
+    t: float,
+) -> EngineUtilEvaluatePath:
+    """Evaluate a serialized KCL path at parameter ``t``."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEngineUtilEvaluatePath(path_json=path_json, t=t)),
+        ResponseEngineUtilEvaluatePath,
+        "path evaluation",
+    )
+    return response.data
+
+
+def zoo_curve_get_type(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    curve_id: Uuid,
+) -> CurveGetType:
+    """Get the geometric type of a curve."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionCurveGetType(curve_id=curve_id)),
+        ResponseCurveGetType,
+        "curve type",
+    )
+    return response.data
+
+
+def zoo_edge_get_length(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    edge_id: Uuid,
+) -> EdgeGetLength:
+    """Get the length of an edge."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEdgeGetLength(edge_id=edge_id)),
+        ResponseEdgeGetLength,
+        "edge length",
+    )
+    return response.data
+
+
+# Entity relationship tools.
+
+
+def zoo_entity_get_all_child_uuids(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    entity_id: Uuid,
+) -> EntityGetAllChildUuids:
+    """Get all child entity IDs for an entity."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEntityGetAllChildUuids(entity_id=entity_id)),
+        ResponseEntityGetAllChildUuids,
+        "entity child IDs",
+    )
+    return response.data
+
+
+def zoo_entity_get_index(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    entity_id: Uuid,
+) -> EntityGetIndex:
+    """Get an entity's index within its parent."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEntityGetIndex(entity_id=entity_id)),
+        ResponseEntityGetIndex,
+        "entity index",
+    )
+    return response.data
+
+
+def zoo_entity_get_parent_id(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    entity_id: Uuid,
+) -> EntityGetParentId:
+    """Get an entity's parent ID."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEntityGetParentId(entity_id=entity_id)),
+        ResponseEntityGetParentId,
+        "entity parent ID",
+    )
+    return response.data
+
+
+def zoo_entity_get_sketch_paths(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    entity_id: Uuid,
+) -> EntityGetSketchPaths:
+    """Get the sketch path IDs belonging to an entity."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEntityGetSketchPaths(entity_id=entity_id)),
+        ResponseEntityGetSketchPaths,
+        "entity sketch paths",
+    )
+    return response.data
+
+
+def zoo_highlight_set_entities(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    entity_ids: list[str],
+) -> HighlightSetEntities:
+    """Replace the currently highlighted entities."""
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionHighlightSetEntities(entities=entity_ids)),
+        ResponseHighlightSetEntities,
+        "highlight entities",
+    )
+    return response.data
 
 
 async def zoo_snapshot_of_kcl(

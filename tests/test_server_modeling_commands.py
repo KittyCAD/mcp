@@ -1,0 +1,251 @@
+from collections.abc import Sequence
+from typing import Any, cast
+from unittest.mock import MagicMock
+
+import pytest
+from kittycad.models import (
+    CurveGetEndPoints,
+    CurveGetType,
+    EdgeGetLength,
+    EngineUtilEvaluatePath,
+    EntityGetAllChildUuids,
+    EntityGetDistance,
+    EntityGetIndex,
+    EntityGetParentId,
+    EntityGetSketchPaths,
+    EntityReference,
+    EntityType,
+    GlobalAxis,
+    HighlightSetEntities,
+    Point2d,
+    Point3d,
+    SceneSelectionType,
+    SelectEntity,
+    SelectWithPoint,
+    SetSelectionFilter,
+)
+from kittycad.models.entity_reference import OptionFace
+from kittycad.models.uuid import Uuid
+
+from zoo_mcp import server
+from zoo_mcp.server import mcp
+
+
+def _result(response: Sequence[Any] | dict[str, Any]) -> Any:
+    assert isinstance(response, Sequence)
+    meta = response[1]
+    assert isinstance(meta, dict)
+    return cast(dict[str, Any], meta)["result"]
+
+
+@pytest.mark.asyncio
+async def test_modeling_tools_are_registered():
+    names = {tool.name for tool in await mcp.list_tools()}
+    assert {
+        "entity_distance",
+        "select_with_point",
+        "set_selection_filter",
+        "select_entity",
+        "curve_get_end_points",
+        "engine_util_evaluate_path",
+        "curve_get_type",
+        "edge_get_length",
+        "entity_get_all_child_uuids",
+        "entity_get_index",
+        "entity_get_parent_id",
+        "entity_get_sketch_paths",
+        "highlight_set_entities",
+    } <= names
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "zoo_tool", "arguments", "expected_kwargs", "response_data"),
+    [
+        (
+            "entity_distance",
+            "zoo_entity_distance",
+            {
+                "entity_id1": "entity-1",
+                "entity_id2": "entity-2",
+                "on_axis": "x",
+            },
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "entity_id1": Uuid("entity-1"),
+                "entity_id2": Uuid("entity-2"),
+                "on_axis": GlobalAxis.X,
+            },
+            EntityGetDistance(min_distance=1, max_distance=2),
+        ),
+        (
+            "select_with_point",
+            "zoo_select_with_point",
+            {"x": 10, "y": 20, "selection_type": "add"},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "selected_at_window": Point2d(x=10, y=20),
+                "selection_type": SceneSelectionType.ADD,
+            },
+            SelectWithPoint(entity_id="selected-id"),
+        ),
+        (
+            "set_selection_filter",
+            "zoo_set_selection_filter",
+            {"entity_types": ["face", "edge"]},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "entity_types": [EntityType.FACE, EntityType.EDGE],
+            },
+            SetSelectionFilter(),
+        ),
+        (
+            "select_entity",
+            "zoo_select_entity",
+            {"entities": [{"type": "face", "face_id": "face-id"}]},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "entities": [EntityReference(OptionFace(face_id="face-id"))],
+            },
+            SelectEntity(),
+        ),
+        (
+            "curve_get_end_points",
+            "zoo_curve_get_end_points",
+            {"curve_id": "curve-id"},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "curve_id": Uuid("curve-id"),
+            },
+            CurveGetEndPoints(
+                start=Point3d(x=0, y=0, z=0),
+                end=Point3d(x=1, y=2, z=3),
+            ),
+        ),
+        (
+            "engine_util_evaluate_path",
+            "zoo_engine_util_evaluate_path",
+            {"path_json": '{"type":"line"}', "t": 0.5},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "path_json": '{"type":"line"}',
+                "t": 0.5,
+            },
+            EngineUtilEvaluatePath(pos=Point3d(x=1, y=2, z=3)),
+        ),
+        (
+            "curve_get_type",
+            "zoo_curve_get_type",
+            {"curve_id": "curve-id"},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "curve_id": Uuid("curve-id"),
+            },
+            CurveGetType(curve_type="arc"),
+        ),
+        (
+            "edge_get_length",
+            "zoo_edge_get_length",
+            {"edge_id": "edge-id"},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "edge_id": Uuid("edge-id"),
+            },
+            EdgeGetLength(length=12.5),
+        ),
+        (
+            "entity_get_all_child_uuids",
+            "zoo_entity_get_all_child_uuids",
+            {"entity_id": "entity-id"},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "entity_id": Uuid("entity-id"),
+            },
+            EntityGetAllChildUuids(entity_ids=["child-id"]),
+        ),
+        (
+            "entity_get_index",
+            "zoo_entity_get_index",
+            {"entity_id": "entity-id"},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "entity_id": Uuid("entity-id"),
+            },
+            EntityGetIndex(entity_index=3),
+        ),
+        (
+            "entity_get_parent_id",
+            "zoo_entity_get_parent_id",
+            {"entity_id": "entity-id"},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "entity_id": Uuid("entity-id"),
+            },
+            EntityGetParentId(entity_id="parent-id"),
+        ),
+        (
+            "entity_get_sketch_paths",
+            "zoo_entity_get_sketch_paths",
+            {"entity_id": "entity-id"},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "entity_id": Uuid("entity-id"),
+            },
+            EntityGetSketchPaths(entity_ids=["path-id"]),
+        ),
+        (
+            "highlight_set_entities",
+            "zoo_highlight_set_entities",
+            {"entity_ids": ["entity-1", "entity-2"]},
+            {
+                "kcl_code": None,
+                "kcl_path": None,
+                "entity_ids": ["entity-1", "entity-2"],
+            },
+            HighlightSetEntities(),
+        ),
+    ],
+)
+async def test_modeling_tool_maps_arguments_and_serializes_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    zoo_tool: str,
+    arguments: dict[str, object],
+    expected_kwargs: dict[str, object],
+    response_data: object,
+):
+    mock = MagicMock(return_value=response_data)
+    monkeypatch.setattr(server, zoo_tool, mock)
+
+    response = await mcp.call_tool(tool_name, arguments=arguments)
+
+    assert _result(response) == cast(Any, response_data).model_dump()
+    mock.assert_called_once_with(**expected_kwargs)
+
+
+@pytest.mark.asyncio
+async def test_modeling_tool_returns_error(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        server,
+        "zoo_entity_get_index",
+        MagicMock(side_effect=RuntimeError("boom")),
+    )
+
+    response = await mcp.call_tool(
+        "entity_get_index",
+        arguments={"entity_id": "entity-id", "kcl_code": "code"},
+    )
+
+    assert _result(response) == "Failed to get entity index: boom"
