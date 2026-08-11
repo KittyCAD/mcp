@@ -53,7 +53,7 @@ from kittycad.models.ok_web_socket_response_data import (
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 
-from zoo_mcp import zoo_tools
+from zoo_mcp import ZooMCPException, zoo_tools
 
 
 def test_send_modeling_command_returns_matching_typed_response():
@@ -90,6 +90,86 @@ def test_send_modeling_command_returns_matching_typed_response():
         "entity_id": "entity-id",
         "type": "entity_get_index",
     }
+
+
+def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    zoo_tools.zoo_stop_all_modeling_sessions()
+    context = MagicMock()
+    websocket = MagicMock()
+    context.__enter__.return_value = websocket
+    execute_project = MagicMock(return_value={})
+    expected_response = ResponseEntityGetIndex(data=EntityGetIndex(entity_index=4))
+    send_command = MagicMock(return_value=expected_response)
+    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+    monkeypatch.setattr(zoo_tools, "_exec_kcl_project", execute_project)
+    monkeypatch.setattr(zoo_tools, "_send_modeling_command", send_command)
+
+    session_id = zoo_tools.zoo_start_modeling_session()
+    execute_project.assert_not_called()
+
+    artifact_graph = zoo_tools.zoo_exec_kcl_project(
+        kcl_code="code",
+        session_id=session_id,
+    )
+    result = zoo_tools.zoo_entity_get_index(
+        kcl_code=None,
+        kcl_path=None,
+        entity_id=Uuid("entity-id"),
+        session_id=session_id,
+    )
+
+    assert result == expected_response.data
+    assert artifact_graph == {}
+    execute_project.assert_called_once()
+    assert execute_project.call_args.args[0] is websocket
+    assert send_command.call_args.args[0] is websocket
+
+    zoo_tools.zoo_stop_modeling_session(session_id)
+    context.__exit__.assert_called_once_with(None, None, None)
+    with pytest.raises(ZooMCPException, match="Unknown modeling session"):
+        zoo_tools.zoo_entity_get_index(
+            kcl_code=None,
+            kcl_path=None,
+            entity_id=Uuid("entity-id"),
+            session_id=session_id,
+        )
+
+
+def test_modeling_session_start_does_not_execute_kcl(monkeypatch: pytest.MonkeyPatch):
+    zoo_tools.zoo_stop_all_modeling_sessions()
+    context = MagicMock()
+    context.__enter__.return_value = MagicMock()
+    execute_project = MagicMock()
+    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+    monkeypatch.setattr(zoo_tools, "_exec_kcl_project", execute_project)
+
+    session_id = zoo_tools.zoo_start_modeling_session()
+
+    execute_project.assert_not_called()
+    zoo_tools.zoo_stop_modeling_session(session_id)
+    context.__exit__.assert_called_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_execute_kcl_executes_in_modeling_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    execute_project = MagicMock(return_value={})
+    monkeypatch.setattr(zoo_tools, "zoo_exec_kcl_project", execute_project)
+
+    result = await zoo_tools.zoo_execute_kcl(
+        kcl_code="code",
+        session_id="session-id",
+    )
+
+    assert result == (True, "KCL code executed successfully")
+    execute_project.assert_called_once_with(
+        kcl_code="code",
+        kcl_path=None,
+        session_id="session-id",
+    )
 
 
 @pytest.mark.parametrize(
@@ -230,6 +310,7 @@ def test_modeling_tool_constructs_expected_command(
         command: ModelingCmd,
         expected_response: type,
         response_description: str,
+        session_id: str | None,
     ) -> SimpleNamespace:
         captured.update(
             kcl_code=kcl_code,
@@ -237,6 +318,7 @@ def test_modeling_tool_constructs_expected_command(
             command=command,
             expected_response=expected_response,
             response_description=response_description,
+            session_id=session_id,
         )
         return SimpleNamespace(data=response_data)
 
@@ -245,6 +327,7 @@ def test_modeling_tool_constructs_expected_command(
     assert call() is response_data
     assert captured["kcl_code"] == "code"
     assert captured["kcl_path"] is None
+    assert captured["session_id"] is None
     command = cast(ModelingCmd, captured["command"])
     assert isinstance(command.root, request_type)
     assert command.root.model_dump(exclude={"type"}) == request_fields

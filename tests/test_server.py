@@ -496,6 +496,7 @@ async def test_exec_kcl_project_tool(monkeypatch):
     mock.assert_called_once_with(
         kcl_code="sketch = startSketchOn(XY)",
         kcl_path=None,
+        session_id=None,
     )
 
 
@@ -979,6 +980,7 @@ async def test_get_face_info(monkeypatch):
         kcl_code="cube = startSketchOn(XY)",
         kcl_path=None,
         face_id="face-id",
+        session_id=None,
     )
 
 

@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from kittycad.models import (
@@ -55,6 +55,8 @@ async def test_modeling_tools_are_registered():
         "entity_get_parent_id",
         "entity_get_sketch_paths",
         "highlight_set_entities",
+        "start_modeling_session",
+        "stop_modeling_session",
     } <= names
 
 
@@ -232,7 +234,7 @@ async def test_modeling_tool_maps_arguments_and_serializes_response(
     response = await mcp.call_tool(tool_name, arguments=arguments)
 
     assert _result(response) == cast(Any, response_data).model_dump()
-    mock.assert_called_once_with(**expected_kwargs)
+    mock.assert_called_once_with(**expected_kwargs, session_id=None)
 
 
 @pytest.mark.asyncio
@@ -249,3 +251,78 @@ async def test_modeling_tool_returns_error(monkeypatch: pytest.MonkeyPatch):
     )
 
     assert _result(response) == "Failed to get entity index: boom"
+
+
+@pytest.mark.asyncio
+async def test_start_and_stop_modeling_session_tools(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    start = MagicMock(return_value="session-id")
+    stop = MagicMock()
+    monkeypatch.setattr(server, "zoo_start_modeling_session", start)
+    monkeypatch.setattr(server, "zoo_stop_modeling_session", stop)
+
+    start_response = await mcp.call_tool(
+        "start_modeling_session",
+        arguments={},
+    )
+    stop_response = await mcp.call_tool(
+        "stop_modeling_session",
+        arguments={"session_id": "session-id"},
+    )
+
+    assert _result(start_response) == {"session_id": "session-id"}
+    assert _result(stop_response) == {"stopped_session_id": "session-id"}
+    start.assert_called_once_with()
+    stop.assert_called_once_with("session-id")
+
+
+@pytest.mark.asyncio
+async def test_modeling_tool_forwards_session_id(monkeypatch: pytest.MonkeyPatch):
+    mock = MagicMock(return_value=EntityGetIndex(entity_index=3))
+    monkeypatch.setattr(server, "zoo_entity_get_index", mock)
+
+    response = await mcp.call_tool(
+        "entity_get_index",
+        arguments={"entity_id": "entity-id", "session_id": "session-id"},
+    )
+
+    assert _result(response) == {"entity_index": 3}
+    mock.assert_called_once_with(
+        kcl_code=None,
+        kcl_path=None,
+        entity_id=Uuid("entity-id"),
+        session_id="session-id",
+    )
+
+
+@pytest.mark.asyncio
+async def test_kcl_execution_tools_forward_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    execute = AsyncMock(return_value=(True, "KCL code executed successfully"))
+    exec_project = MagicMock(return_value={"item_count": 1})
+    monkeypatch.setattr(server, "zoo_execute_kcl", execute)
+    monkeypatch.setattr(server, "zoo_exec_kcl_project", exec_project)
+
+    execute_response = await mcp.call_tool(
+        "execute_kcl",
+        arguments={"kcl_code": "code", "session_id": "session-id"},
+    )
+    project_response = await mcp.call_tool(
+        "exec_kcl_project",
+        arguments={"kcl_code": "code", "session_id": "session-id"},
+    )
+
+    assert _result(execute_response) == [True, "KCL code executed successfully"]
+    assert _result(project_response) == {"item_count": 1}
+    execute.assert_awaited_once_with(
+        kcl_code="code",
+        kcl_path=None,
+        session_id="session-id",
+    )
+    exec_project.assert_called_once_with(
+        kcl_code="code",
+        kcl_path=None,
+        session_id="session-id",
+    )

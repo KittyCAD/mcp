@@ -75,6 +75,9 @@ from zoo_mcp.zoo_tools import (
     zoo_set_selection_filter,
     zoo_snapshot_of_cad,
     zoo_snapshot_of_kcl,
+    zoo_start_modeling_session,
+    zoo_stop_all_modeling_sessions,
+    zoo_stop_modeling_session,
 )
 
 
@@ -125,6 +128,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        zoo_stop_all_modeling_sessions()
         if _kcl_index_task is not None and not _kcl_index_task.done():
             _kcl_index_task.cancel()
         _kcl_index_task = None
@@ -415,12 +419,16 @@ async def convert_cad_file(
 async def execute_kcl(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> tuple[bool, str]:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
+
+      Does NOT return an artifact graph and can have large network overhead depending on the model.
 
     Args:
         kcl_code (str | None): The KCL code to execute.
         kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file.
+        session_id: An open modeling session in which to execute the KCL.
 
     Returns:
         tuple(bool, str): Returns True if the KCL code executed successfully and a success message, False otherwise and the error message.
@@ -429,7 +437,11 @@ async def execute_kcl(
     logger.info("execute_kcl tool called")
 
     try:
-        return await zoo_execute_kcl(kcl_code=kcl_code, kcl_path=kcl_path)
+        return await zoo_execute_kcl(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            session_id=session_id,
+        )
     except Exception as e:
         return False, f"Failed to execute KCL code: {e}"
 
@@ -438,12 +450,14 @@ async def execute_kcl(
 async def exec_kcl_project(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Run a KCL project on the server side and return its artifact graph.
 
     Args:
         kcl_code (str | None): KCL code to run as a single-file project.
         kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session in which to execute the project.
 
     Returns:
         dict | str: The artifact graph produced by execution, or an error message.
@@ -452,9 +466,43 @@ async def exec_kcl_project(
     logger.info("exec_kcl_project tool called")
 
     try:
-        return zoo_exec_kcl_project(kcl_code=kcl_code, kcl_path=kcl_path)
+        return zoo_exec_kcl_project(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            session_id=session_id,
+        )
     except Exception as e:
         return f"Failed to execute KCL project: {e}"
+
+
+@mcp.tool()
+async def start_modeling_session() -> dict | str:
+    """Open an empty modeling websocket for subsequent tools.
+
+    Pass the returned session_id to execute_kcl or exec_kcl_project to populate
+    the scene, then reuse it with modeling query, selection, and highlight tools.
+    Stop the session explicitly with stop_modeling_session when finished.
+    """
+    logger.info("start_modeling_session tool called")
+    try:
+        return {"session_id": zoo_start_modeling_session()}
+    except Exception as e:
+        return f"Failed to start modeling session: {e}"
+
+
+@mcp.tool()
+async def stop_modeling_session(session_id: str) -> dict | str:
+    """Close a persistent modeling websocket session.
+
+    Args:
+        session_id: The ID returned by start_modeling_session.
+    """
+    logger.info("stop_modeling_session tool called")
+    try:
+        zoo_stop_modeling_session(session_id)
+        return {"stopped_session_id": session_id}
+    except Exception as e:
+        return f"Failed to stop modeling session: {e}"
 
 
 @mcp.tool()
@@ -552,6 +600,7 @@ async def get_face_info(
     face_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Get the position, gradient, normal, and center of a face in a KCL model.
 
@@ -559,6 +608,7 @@ async def get_face_info(
         face_id (str): Usually a user or LLM-selected face id.
         kcl_code (str | None): The KCL code defining the model.
         kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
         dict | str: The face position, gradient, normal, and center, or an error message.
@@ -574,6 +624,7 @@ async def get_face_info(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             face_id=Uuid(face_id),
+            session_id=session_id,
         )
         return {
             "face_get_position": face_info.face_get_position.model_dump(),
@@ -591,6 +642,7 @@ async def entity_distance(
     on_axis: GlobalAxis | None = None,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Get the minimum and maximum distance between two model entities.
 
@@ -600,6 +652,7 @@ async def entity_distance(
         on_axis: Optional global axis for projected distance; omit for Euclidean distance.
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
     """
     logger.info("entity_distance tool called")
     try:
@@ -609,6 +662,7 @@ async def entity_distance(
             entity_id1=Uuid(entity_id1),
             entity_id2=Uuid(entity_id2),
             on_axis=on_axis,
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -622,6 +676,7 @@ async def select_with_point(
     selection_type: SceneSelectionType,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Select a model entity at window coordinates.
 
@@ -636,6 +691,7 @@ async def select_with_point(
         selection_type: Whether to replace, add to, or remove from the selection.
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
     """
     logger.info("select_with_point tool called")
     try:
@@ -644,6 +700,7 @@ async def select_with_point(
             kcl_path=kcl_path,
             selected_at_window=Point2d(x=x, y=y),
             selection_type=selection_type,
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -655,6 +712,7 @@ async def set_selection_filter(
     entity_types: list[EntityType],
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Set which model entity types can be added to the "selection set".
 
@@ -662,6 +720,7 @@ async def set_selection_filter(
         entity_types: Entity types permitted by the selection filter.
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
     """
     logger.info("set_selection_filter tool called")
     try:
@@ -669,6 +728,7 @@ async def set_selection_filter(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             entity_types=entity_types,
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -680,6 +740,7 @@ async def select_entity(
     entities: list[EntityReference],
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Replace the current "selection set" with explicit entity references.
 
@@ -687,6 +748,7 @@ async def select_entity(
         entities: Typed face, edge, solid, segment, or other entity references.
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
     """
     logger.info("select_entity tool called")
     try:
@@ -694,6 +756,7 @@ async def select_entity(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             entities=entities,
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -705,6 +768,7 @@ async def curve_get_end_points(
     curve_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Get the start and end points of a curve entity.
 
@@ -712,6 +776,7 @@ async def curve_get_end_points(
         curve_id: Curve UUID, typically obtained from an artifact graph.
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
     """
     logger.info("curve_get_end_points tool called")
     try:
@@ -719,6 +784,7 @@ async def curve_get_end_points(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             curve_id=Uuid(curve_id),
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -731,6 +797,7 @@ async def engine_util_evaluate_path(
     t: float,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Evaluate a serialized KCL path at parameter t.
 
@@ -775,6 +842,7 @@ async def engine_util_evaluate_path(
         t: Normalized path parameter, conventionally between 0 and 1.
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
     """
     logger.info("engine_util_evaluate_path tool called")
     try:
@@ -783,6 +851,7 @@ async def engine_util_evaluate_path(
             kcl_path=kcl_path,
             path_json=path_json,
             t=t,
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -794,6 +863,7 @@ async def curve_get_type(
     curve_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Get whether a curve is a line, arc, or NURBS curve."""
     logger.info("curve_get_type tool called")
@@ -802,6 +872,7 @@ async def curve_get_type(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             curve_id=Uuid(curve_id),
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -813,6 +884,7 @@ async def edge_get_length(
     edge_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Get the length of an edge entity in the current scene units."""
     logger.info("edge_get_length tool called")
@@ -821,6 +893,7 @@ async def edge_get_length(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             edge_id=Uuid(edge_id),
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -832,6 +905,7 @@ async def entity_get_all_child_uuids(
     entity_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Get all child UUIDs belonging to an entity."""
     logger.info("entity_get_all_child_uuids tool called")
@@ -840,6 +914,7 @@ async def entity_get_all_child_uuids(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             entity_id=Uuid(entity_id),
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -851,6 +926,7 @@ async def entity_get_index(
     entity_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Get an entity's index within its parent."""
     logger.info("entity_get_index tool called")
@@ -859,6 +935,7 @@ async def entity_get_index(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             entity_id=Uuid(entity_id),
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -870,6 +947,7 @@ async def entity_get_parent_id(
     entity_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Get the UUID of an entity's parent."""
     logger.info("entity_get_parent_id tool called")
@@ -878,6 +956,7 @@ async def entity_get_parent_id(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             entity_id=Uuid(entity_id),
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -889,6 +968,7 @@ async def entity_get_sketch_paths(
     entity_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Get the sketch path UUIDs belonging to an entity."""
     logger.info("entity_get_sketch_paths tool called")
@@ -897,6 +977,7 @@ async def entity_get_sketch_paths(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             entity_id=Uuid(entity_id),
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:
@@ -908,6 +989,7 @@ async def highlight_set_entities(
     entity_ids: list[str],
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> dict | str:
     """Replace the currently highlighted entities. Does NOT modify the "selection set".
 
@@ -915,6 +997,7 @@ async def highlight_set_entities(
         entity_ids: Entity UUIDs to highlight; pass an empty list to clear highlights.
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
     """
     logger.info("highlight_set_entities tool called")
     try:
@@ -922,6 +1005,7 @@ async def highlight_set_entities(
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             entity_ids=entity_ids,
+            session_id=session_id,
         )
         return result.model_dump()
     except Exception as e:

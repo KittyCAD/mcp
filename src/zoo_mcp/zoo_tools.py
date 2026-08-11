@@ -1,9 +1,11 @@
 import io
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
@@ -1153,6 +1155,7 @@ async def zoo_convert_cad_file(
 async def zoo_execute_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
+    session_id: str | None = None,
 ) -> tuple[bool, str]:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -1168,6 +1171,15 @@ async def zoo_execute_kcl(
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
+        if session_id is not None:
+            zoo_exec_kcl_project(
+                kcl_code=kcl_code,
+                kcl_path=kcl_path,
+                session_id=session_id,
+            )
+            logger.info("KCL code executed successfully in modeling session")
+            return True, "KCL code executed successfully"
+
         if kcl_code:
             outcome = await _execute_with_retries(kcl.execute_code, kcl_code)
         else:
@@ -2227,26 +2239,21 @@ def _exec_kcl_project(
         return artifact_graph
 
 
-def zoo_exec_kcl_project(
-    kcl_code: str | None = None,
-    kcl_path: Path | str | None = None,
-) -> dict:
-    """Run a KCL project on the server side and return its artifact graph."""
-    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
-
-    with kittycad_client.modeling.modeling_commands_ws(webrtc=False) as ws:
-        return _exec_kcl_project(ws, entrypoint, files)
+@dataclass
+class _ModelingSession:
+    context: AbstractContextManager[WebSocketModelingCommandsWs]
+    websocket: WebSocketModelingCommandsWs
+    lock: Lock
 
 
-def zoo_face_info(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-    face_id: Uuid,
-) -> FaceInfo:
-    """Get the position, gradient, and center of a face in a KCL project."""
-    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+_modeling_sessions: dict[str, _ModelingSession] = {}
+_modeling_sessions_lock = Lock()
 
-    with kittycad_client.modeling.modeling_commands_ws(
+
+def _modeling_websocket_context() -> AbstractContextManager[
+    WebSocketModelingCommandsWs
+]:
+    return kittycad_client.modeling.modeling_commands_ws(
         fps=30,
         post_effect=PostEffectType.SSAO,
         show_grid=False,
@@ -2254,9 +2261,102 @@ def zoo_face_info(
         video_res_height=1024,
         video_res_width=1024,
         webrtc=False,
-    ) as ws:
-        _exec_kcl_project(ws, entrypoint, files)
+    )
 
+
+def zoo_start_modeling_session() -> str:
+    """Open an empty persistent modeling websocket session."""
+    context = _modeling_websocket_context()
+    websocket = context.__enter__()
+
+    session_id = str(uuid4())
+    with _modeling_sessions_lock:
+        _modeling_sessions[session_id] = _ModelingSession(
+            context=context,
+            websocket=websocket,
+            lock=Lock(),
+        )
+    return session_id
+
+
+def zoo_stop_modeling_session(session_id: str) -> None:
+    """Close and remove a persistent modeling websocket session."""
+    with _modeling_sessions_lock:
+        session = _modeling_sessions.pop(session_id, None)
+    if session is None:
+        raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+
+    with session.lock:
+        session.context.__exit__(None, None, None)
+
+
+def zoo_stop_all_modeling_sessions() -> None:
+    """Close all persistent modeling sessions, normally during server shutdown."""
+    with _modeling_sessions_lock:
+        sessions = list(_modeling_sessions.values())
+        _modeling_sessions.clear()
+
+    for session in sessions:
+        try:
+            with session.lock:
+                session.context.__exit__(None, None, None)
+        except Exception as error:
+            logger.warning("Failed to close modeling session: %s", error)
+
+
+# Allows external agents to reuse engine connections so the Zoo infrastructure
+# isn't spinning up and down engines for each command, when many times the same
+# engine scene has the same model.
+
+
+@contextmanager
+def _modeling_websocket(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    session_id: str | None,
+) -> Iterator[WebSocketModelingCommandsWs]:
+    if session_id is not None:
+        with _modeling_sessions_lock:
+            session = _modeling_sessions.get(session_id)
+            if session is None:
+                raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+            session.lock.acquire()
+        try:
+            yield session.websocket
+        finally:
+            session.lock.release()
+        return
+
+    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+    with _modeling_websocket_context() as websocket:
+        _exec_kcl_project(websocket, entrypoint, files)
+        yield websocket
+
+
+def zoo_exec_kcl_project(
+    kcl_code: str | None = None,
+    kcl_path: Path | str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Run a KCL project on the server side and return its artifact graph."""
+    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+
+    if session_id is not None:
+        with _modeling_websocket(None, None, session_id) as ws:
+            return _exec_kcl_project(ws, entrypoint, files)
+
+    with _modeling_websocket_context() as ws:
+        return _exec_kcl_project(ws, entrypoint, files)
+
+
+def zoo_face_info(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    face_id: Uuid,
+    session_id: str | None = None,
+) -> FaceInfo:
+    """Get the position, gradient, and center of a face in a KCL project."""
+    with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
         cmd_id_face_get_position = ModelingCmdId(uuid4())
         ws.send(
             WebSocketRequest(
@@ -2390,20 +2490,10 @@ def _execute_project_modeling_command(
     command: ModelingCmd,
     expected_response: type[_ModelingResponseT],
     response_description: str,
+    session_id: str | None = None,
 ) -> _ModelingResponseT:
     """Execute a KCL project, then run one modeling command in its session."""
-    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
-
-    with kittycad_client.modeling.modeling_commands_ws(
-        fps=30,
-        post_effect=PostEffectType.SSAO,
-        show_grid=False,
-        unlocked_framerate=False,
-        video_res_height=1024,
-        video_res_width=1024,
-        webrtc=False,
-    ) as ws:
-        _exec_kcl_project(ws, entrypoint, files)
+    with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
         return _send_modeling_command(
             ws,
             command,
@@ -2418,6 +2508,7 @@ def zoo_entity_distance(
     entity_id1: Uuid,
     entity_id2: Uuid,
     on_axis: GlobalAxis | None = None,
+    session_id: str | None = None,
 ) -> EntityGetDistance:
     """Get the distance between two entities in a KCL project.
 
@@ -2440,6 +2531,7 @@ def zoo_entity_distance(
         ),
         ResponseEntityGetDistance,
         "entity distance",
+        session_id,
     )
     return response.data
 
@@ -2452,6 +2544,7 @@ def zoo_select_with_point(
     kcl_path: Path | str | None,
     selected_at_window: Point2d,
     selection_type: SceneSelectionType,
+    session_id: str | None = None,
 ) -> SelectWithPoint:
     """Select an entity at the given window coordinates."""
     response = _execute_project_modeling_command(
@@ -2465,6 +2558,7 @@ def zoo_select_with_point(
         ),
         ResponseSelectWithPoint,
         "select with point",
+        session_id,
     )
     return response.data
 
@@ -2473,6 +2567,7 @@ def zoo_set_selection_filter(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     entity_types: list[EntityType],
+    session_id: str | None = None,
 ) -> SetSelectionFilter:
     """Set which entity types can be selected in a KCL project."""
     response = _execute_project_modeling_command(
@@ -2481,6 +2576,7 @@ def zoo_set_selection_filter(
         ModelingCmd(OptionSetSelectionFilter(filter=entity_types)),
         ResponseSetSelectionFilter,
         "selection filter",
+        session_id,
     )
     return response.data
 
@@ -2489,6 +2585,7 @@ def zoo_select_entity(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     entities: list[EntityReference],
+    session_id: str | None = None,
 ) -> SelectEntity:
     """Replace the current selection with the given entities."""
     response = _execute_project_modeling_command(
@@ -2497,6 +2594,7 @@ def zoo_select_entity(
         ModelingCmd(OptionSelectEntity(entities=entities)),
         ResponseSelectEntity,
         "select entity",
+        session_id,
     )
     return response.data
 
@@ -2508,6 +2606,7 @@ def zoo_curve_get_end_points(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     curve_id: Uuid,
+    session_id: str | None = None,
 ) -> CurveGetEndPoints:
     """Get the start and end points of a curve."""
     response = _execute_project_modeling_command(
@@ -2516,6 +2615,7 @@ def zoo_curve_get_end_points(
         ModelingCmd(OptionCurveGetEndPoints(curve_id=curve_id)),
         ResponseCurveGetEndPoints,
         "curve endpoints",
+        session_id,
     )
     return response.data
 
@@ -2525,6 +2625,7 @@ def zoo_engine_util_evaluate_path(
     kcl_path: Path | str | None,
     path_json: str,
     t: float,
+    session_id: str | None = None,
 ) -> EngineUtilEvaluatePath:
     """Evaluate a serialized KCL path at parameter ``t``."""
     response = _execute_project_modeling_command(
@@ -2533,6 +2634,7 @@ def zoo_engine_util_evaluate_path(
         ModelingCmd(OptionEngineUtilEvaluatePath(path_json=path_json, t=t)),
         ResponseEngineUtilEvaluatePath,
         "path evaluation",
+        session_id,
     )
     return response.data
 
@@ -2541,6 +2643,7 @@ def zoo_curve_get_type(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     curve_id: Uuid,
+    session_id: str | None = None,
 ) -> CurveGetType:
     """Get the geometric type of a curve."""
     response = _execute_project_modeling_command(
@@ -2549,6 +2652,7 @@ def zoo_curve_get_type(
         ModelingCmd(OptionCurveGetType(curve_id=curve_id)),
         ResponseCurveGetType,
         "curve type",
+        session_id,
     )
     return response.data
 
@@ -2557,6 +2661,7 @@ def zoo_edge_get_length(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     edge_id: Uuid,
+    session_id: str | None = None,
 ) -> EdgeGetLength:
     """Get the length of an edge."""
     response = _execute_project_modeling_command(
@@ -2565,6 +2670,7 @@ def zoo_edge_get_length(
         ModelingCmd(OptionEdgeGetLength(edge_id=edge_id)),
         ResponseEdgeGetLength,
         "edge length",
+        session_id,
     )
     return response.data
 
@@ -2576,6 +2682,7 @@ def zoo_entity_get_all_child_uuids(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     entity_id: Uuid,
+    session_id: str | None = None,
 ) -> EntityGetAllChildUuids:
     """Get all child entity IDs for an entity."""
     response = _execute_project_modeling_command(
@@ -2584,6 +2691,7 @@ def zoo_entity_get_all_child_uuids(
         ModelingCmd(OptionEntityGetAllChildUuids(entity_id=entity_id)),
         ResponseEntityGetAllChildUuids,
         "entity child IDs",
+        session_id,
     )
     return response.data
 
@@ -2592,6 +2700,7 @@ def zoo_entity_get_index(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     entity_id: Uuid,
+    session_id: str | None = None,
 ) -> EntityGetIndex:
     """Get an entity's index within its parent."""
     response = _execute_project_modeling_command(
@@ -2600,6 +2709,7 @@ def zoo_entity_get_index(
         ModelingCmd(OptionEntityGetIndex(entity_id=entity_id)),
         ResponseEntityGetIndex,
         "entity index",
+        session_id,
     )
     return response.data
 
@@ -2608,6 +2718,7 @@ def zoo_entity_get_parent_id(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     entity_id: Uuid,
+    session_id: str | None = None,
 ) -> EntityGetParentId:
     """Get an entity's parent ID."""
     response = _execute_project_modeling_command(
@@ -2616,6 +2727,7 @@ def zoo_entity_get_parent_id(
         ModelingCmd(OptionEntityGetParentId(entity_id=entity_id)),
         ResponseEntityGetParentId,
         "entity parent ID",
+        session_id,
     )
     return response.data
 
@@ -2624,6 +2736,7 @@ def zoo_entity_get_sketch_paths(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     entity_id: Uuid,
+    session_id: str | None = None,
 ) -> EntityGetSketchPaths:
     """Get the sketch path IDs belonging to an entity."""
     response = _execute_project_modeling_command(
@@ -2632,6 +2745,7 @@ def zoo_entity_get_sketch_paths(
         ModelingCmd(OptionEntityGetSketchPaths(entity_id=entity_id)),
         ResponseEntityGetSketchPaths,
         "entity sketch paths",
+        session_id,
     )
     return response.data
 
@@ -2640,6 +2754,7 @@ def zoo_highlight_set_entities(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     entity_ids: list[str],
+    session_id: str | None = None,
 ) -> HighlightSetEntities:
     """Replace the currently highlighted entities."""
     response = _execute_project_modeling_command(
@@ -2648,6 +2763,7 @@ def zoo_highlight_set_entities(
         ModelingCmd(OptionHighlightSetEntities(entities=entity_ids)),
         ResponseHighlightSetEntities,
         "highlight entities",
+        session_id,
     )
     return response.data
 
