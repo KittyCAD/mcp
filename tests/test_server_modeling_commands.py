@@ -17,16 +17,14 @@ from kittycad.models import (
     EntityType,
     GlobalAxis,
     HighlightSetEntities,
-    Point2d,
     Point3d,
-    SceneSelectionType,
     SelectEntity,
-    SelectWithPoint,
     SetSelectionFilter,
 )
 from kittycad.models.entity_reference import OptionFace
 from kittycad.models.uuid import Uuid
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ImageContent
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
@@ -51,7 +49,6 @@ async def test_modeling_tools_are_registered():
     names = {tool.name for tool in await mcp.list_tools()}
     assert {
         "entity_distance",
-        "select_with_point",
         "set_selection_filter",
         "select_entity",
         "curve_get_end_points",
@@ -63,6 +60,7 @@ async def test_modeling_tools_are_registered():
         "entity_get_parent_id",
         "entity_get_sketch_paths",
         "highlight_set_entities",
+        "snapshot",
         "start_modeling_session",
         "stop_modeling_session",
     } <= names
@@ -88,18 +86,6 @@ async def test_modeling_tools_are_registered():
                 "on_axis": GlobalAxis.X,
             },
             EntityGetDistance(min_distance=1, max_distance=2),
-        ),
-        (
-            "select_with_point",
-            "zoo_select_with_point",
-            {"x": 10, "y": 20, "selection_type": "add"},
-            {
-                "kcl_code": None,
-                "kcl_path": None,
-                "selected_at_window": Point2d(x=10, y=20),
-                "selection_type": SceneSelectionType.ADD,
-            },
-            SelectWithPoint(entity_id="selected-id"),
         ),
         (
             "set_selection_filter",
@@ -300,6 +286,29 @@ async def test_modeling_tool_forwards_session_id(monkeypatch: pytest.MonkeyPatch
         kcl_path=None,
         entity_id=Uuid("entity-id"),
         session_id="session-id",
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tool_forwards_session_id(monkeypatch: pytest.MonkeyPatch):
+    mock = MagicMock(return_value=b"jpeg")
+    monkeypatch.setattr(server, "zoo_snapshot", mock)
+
+    response = await mcp.call_tool(
+        "snapshot",
+        arguments={"session_id": "session-id", "max_image_dimension": 256},
+    )
+
+    assert isinstance(response, Sequence)
+    content = response[0]
+    assert isinstance(content, list)
+    assert len(content) == 1
+    assert isinstance(content[0], ImageContent)
+    mock.assert_called_once_with(
+        kcl_code=None,
+        kcl_path=None,
+        session_id="session-id",
+        max_image_dimension=256,
     )
 
 

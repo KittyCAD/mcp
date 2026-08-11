@@ -17,10 +17,7 @@ from kittycad.models import (
     EntityType,
     GlobalAxis,
     HighlightSetEntities,
-    Point2d,
-    SceneSelectionType,
     SelectEntity,
-    SelectWithPoint,
     SetSelectionFilter,
 )
 from kittycad.models.modeling_cmd import OptionDefaultCameraLookAt, Point3d
@@ -85,8 +82,8 @@ from zoo_mcp.zoo_tools import (
     zoo_multiview_snapshot_of_kcl,
     zoo_search_org_dataset_semantic,
     zoo_select_entity,
-    zoo_select_with_point,
     zoo_set_selection_filter,
+    zoo_snapshot,
     zoo_snapshot_of_cad,
     zoo_snapshot_of_kcl,
     zoo_start_modeling_session,
@@ -671,43 +668,6 @@ async def entity_distance(
 
 
 @mcp.tool()
-async def select_with_point(
-    x: float,
-    y: float,
-    selection_type: SceneSelectionType,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
-) -> SelectWithPoint:
-    """Select a model entity at window coordinates.
-
-      Not a raycast, but "GPU picking", which uses the association of the pixel
-      to the texture to the mesh to select something.
-
-      Each selection operation modifies a "selection set".
-
-    Args:
-        x: Horizontal window coordinate.
-        y: Vertical window coordinate.
-        selection_type: Whether to replace, add to, or remove from the selection.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
-
-    Returns:
-        SelectWithPoint: The selected entity.
-    """
-    logger.info("select_with_point tool called")
-    return zoo_select_with_point(
-        kcl_code=kcl_code,
-        kcl_path=kcl_path,
-        selected_at_window=Point2d(x=x, y=y),
-        selection_type=selection_type,
-        session_id=session_id,
-    )
-
-
-@mcp.tool()
 async def set_selection_filter(
     entity_types: list[EntityType],
     kcl_code: str | None = None,
@@ -989,6 +949,9 @@ async def highlight_set_entities(
 ) -> HighlightSetEntities:
     """Replace the currently highlighted entities. Does NOT modify the "selection set".
 
+    This is a purely visual command, which means a snapshot command show be followed up with
+    to see the result. It highlights edges, surfaces and bodies.
+
     Args:
         entity_ids: Entity UUIDs to highlight; pass an empty list to clear highlights.
         kcl_code: KCL code defining the model.
@@ -1004,6 +967,40 @@ async def highlight_set_entities(
         kcl_path=kcl_path,
         entity_ids=entity_ids,
         session_id=session_id,
+    )
+
+
+@mcp.tool()
+async def snapshot(
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+    max_image_dimension: int = 512,
+) -> ImageContent:
+    """Take a snapshot of a KCL model or the current modeling session.
+
+    Provide kcl_code or kcl_path to execute a model in a temporary scene. To
+    capture an existing scene without re-executing KCL, provide the session_id
+    returned by start_modeling_session. A session snapshot uses the scene's
+    current camera state.
+
+    Args:
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to capture.
+        max_image_dimension: Maximum width or height of the returned JPEG.
+
+    Returns:
+        ImageContent: A JPEG snapshot of the current scene.
+    """
+    logger.info("snapshot tool called")
+    return encode_image(
+        zoo_snapshot(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            session_id=session_id,
+            max_image_dimension=max_image_dimension,
+        )
     )
 
 

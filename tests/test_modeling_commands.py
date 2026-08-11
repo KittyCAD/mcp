@@ -17,12 +17,10 @@ from kittycad.models import (
     EntityType,
     HighlightSetEntities,
     ModelingCmd,
-    Point2d,
     Point3d,
-    SceneSelectionType,
     SelectEntity,
-    SelectWithPoint,
     SetSelectionFilter,
+    TakeSnapshot,
 )
 from kittycad.models.entity_reference import OptionFace
 from kittycad.models.modeling_cmd import (
@@ -36,8 +34,8 @@ from kittycad.models.modeling_cmd import (
     OptionEntityGetSketchPaths,
     OptionHighlightSetEntities,
     OptionSelectEntity,
-    OptionSelectWithPoint,
     OptionSetSelectionFilter,
+    OptionTakeSnapshot,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OkModelingCmdResponse,
@@ -175,21 +173,6 @@ async def test_execute_kcl_executes_in_modeling_session(
 @pytest.mark.parametrize(
     ("call", "request_type", "request_fields", "response_type", "response_data"),
     [
-        (
-            lambda: zoo_tools.zoo_select_with_point(
-                "code",
-                None,
-                Point2d(x=10, y=20),
-                SceneSelectionType.ADD,
-            ),
-            OptionSelectWithPoint,
-            {
-                "selected_at_window": {"x": 10.0, "y": 20.0},
-                "selection_type": "add",
-            },
-            zoo_tools.ResponseSelectWithPoint,
-            SelectWithPoint(entity_id="selected-id"),
-        ),
         (
             lambda: zoo_tools.zoo_set_selection_filter(
                 "code", None, [EntityType.FACE, EntityType.EDGE]
@@ -332,3 +315,26 @@ def test_modeling_tool_constructs_expected_command(
     assert isinstance(command.root, request_type)
     assert command.root.model_dump(exclude={"type"}) == request_fields
     assert captured["expected_response"] is response_type
+
+
+def test_snapshot_constructs_expected_command(monkeypatch: pytest.MonkeyPatch):
+    response_data = TakeSnapshot(contents="anBlZw==")
+    execute = MagicMock(return_value=SimpleNamespace(data=response_data))
+    resize = MagicMock(return_value=b"resized-jpeg")
+    monkeypatch.setattr(zoo_tools, "_execute_project_modeling_command", execute)
+    monkeypatch.setattr(zoo_tools, "resize_image", resize)
+
+    result = zoo_tools.zoo_snapshot(
+        kcl_code=None,
+        kcl_path=None,
+        session_id="session-id",
+        max_image_dimension=256,
+    )
+
+    assert result == b"resized-jpeg"
+    command = cast(ModelingCmd, execute.call_args.args[2])
+    assert isinstance(command.root, OptionTakeSnapshot)
+    assert command.root.format == "jpeg"
+    assert execute.call_args.args[3] is zoo_tools.ResponseTakeSnapshot
+    assert execute.call_args.args[5] == "session-id"
+    resize.assert_called_once_with(b"jpeg", 256)

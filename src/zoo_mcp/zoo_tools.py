@@ -62,9 +62,7 @@ from kittycad.models import (
     Point2d,
     Point3d,
     PostEffectType,
-    SceneSelectionType,
     SelectEntity,
-    SelectWithPoint,
     SetSelectionFilter,
     System,
     UnitArea,
@@ -102,7 +100,6 @@ from kittycad.models.modeling_cmd import (
     OptionHighlightSetEntities,
     OptionImportFiles,
     OptionSelectEntity,
-    OptionSelectWithPoint,
     OptionSetSelectionFilter,
     OptionTakeSnapshot,
     OptionViewIsometric,
@@ -151,10 +148,10 @@ from kittycad.models.ok_modeling_cmd_response import (
     OptionSelectEntity as ResponseSelectEntity,
 )
 from kittycad.models.ok_modeling_cmd_response import (
-    OptionSelectWithPoint as ResponseSelectWithPoint,
+    OptionSetSelectionFilter as ResponseSetSelectionFilter,
 )
 from kittycad.models.ok_modeling_cmd_response import (
-    OptionSetSelectionFilter as ResponseSetSelectionFilter,
+    OptionTakeSnapshot as ResponseTakeSnapshot,
 )
 from kittycad.models.ok_web_socket_response_data import OptionModeling
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
@@ -2530,29 +2527,6 @@ def zoo_entity_distance(
 # Selection tools.
 
 
-def zoo_select_with_point(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-    selected_at_window: Point2d,
-    selection_type: SceneSelectionType,
-    session_id: str | None = None,
-) -> SelectWithPoint:
-    response = _execute_project_modeling_command(
-        kcl_code,
-        kcl_path,
-        ModelingCmd(
-            OptionSelectWithPoint(
-                selected_at_window=selected_at_window,
-                selection_type=selection_type,
-            )
-        ),
-        ResponseSelectWithPoint,
-        "select with point",
-        session_id,
-    )
-    return response.data
-
-
 def zoo_set_selection_filter(
     kcl_code: str | None,
     kcl_path: Path | str | None,
@@ -2745,6 +2719,23 @@ def zoo_highlight_set_entities(
         session_id,
     )
     return response.data
+
+
+def zoo_snapshot(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    session_id: str | None = None,
+    max_image_dimension: int = 512,
+) -> bytes:
+    response = _execute_project_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionTakeSnapshot(format=ImageFormat.JPEG)),
+        ResponseTakeSnapshot,
+        "snapshot",
+        session_id,
+    )
+    return resize_image(response.data.contents, max_image_dimension)
 
 
 async def zoo_snapshot_of_kcl(
