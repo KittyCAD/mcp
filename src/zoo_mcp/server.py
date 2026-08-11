@@ -949,7 +949,7 @@ async def highlight_set_entities(
 ) -> HighlightSetEntities:
     """Replace the currently highlighted entities. Does NOT modify the "selection set".
 
-    This is a purely visual command, which means a snapshot command show be followed up with
+    This is a visual command, meaning the `snapshot` tool must be followed up with
     to see the result. It highlights edges, surfaces and bodies.
 
     Args:
