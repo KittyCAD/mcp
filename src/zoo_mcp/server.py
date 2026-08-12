@@ -725,11 +725,6 @@ async def entity_distance(
     ).data
 
 
-# Selection and highlight commands mutate engine scene state, so they only make
-# sense against a session that outlives the call. Executing KCL just to set a
-# selection would discard the scene, and the selection with it.
-
-
 @mcp.tool()
 async def set_selection_filter(
     entity_types: list[EntityType],
@@ -869,9 +864,6 @@ async def highlight_set_entities(
         "highlight entities",
         session_id,
     ).data
-
-
-# Get information around curves and segments.
 
 
 @mcp.tool()
@@ -1026,9 +1018,6 @@ async def edge_get_length(
         "edge length",
         session_id,
     ).data
-
-
-# Entity relationship tools.
 
 
 @mcp.tool()
