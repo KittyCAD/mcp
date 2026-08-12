@@ -10,6 +10,13 @@ import pytest
 import pytest_asyncio
 from kittycad import KittyCAD
 from kittycad.exceptions import KittyCADClientError
+from kittycad.models import (
+    FaceGetCenter,
+    FaceGetGradient,
+    FaceGetPosition,
+    OrgDataset,
+    Point3d,
+)
 from mcp.types import ImageContent, TextContent
 
 import zoo_mcp
@@ -25,6 +32,14 @@ def _meta_result(response: Sequence[Any] | dict[str, Any]) -> Any:
     meta = response[1]
     assert isinstance(meta, dict)
     return cast(dict[str, Any], meta)["result"]
+
+
+def _structured_result(response: Sequence[Any] | dict[str, Any]) -> dict[str, Any]:
+    """Extract structured content with proper typing for ty."""
+    assert isinstance(response, Sequence)
+    result = response[1]
+    assert isinstance(result, dict)
+    return cast(dict[str, Any], result)
 
 
 def _content_list(response: Sequence[Any] | dict[str, Any]) -> list[Any]:
@@ -441,7 +456,7 @@ async def test_execute_kcl_error():
 def test_exec_kcl_project_extracts_artifact_graph():
     raw_socket = MagicMock()
 
-    def recv():
+    def recv(timeout: float | None = None):
         request = json.loads(raw_socket.send.call_args.args[0])
         return json.dumps(
             {
@@ -492,10 +507,11 @@ async def test_exec_kcl_project_tool(monkeypatch):
         arguments={"kcl_code": "sketch = startSketchOn(XY)", "kcl_path": None},
     )
 
-    assert _meta_result(response) == artifact_graph
+    assert _structured_result(response) == artifact_graph
     mock.assert_called_once_with(
         kcl_code="sketch = startSketchOn(XY)",
         kcl_path=None,
+        session_id=None,
     )
 
 
@@ -936,22 +952,14 @@ async def test_get_sketch_constraint_status_error():
 
 @pytest.mark.asyncio
 async def test_get_face_info(monkeypatch):
-    face_info = SimpleNamespace(
-        face_get_position=MagicMock(
-            model_dump=MagicMock(return_value={"pos": {"x": 1.0, "y": 2.0, "z": 3.0}})
+    face_info = zoo_mcp.zoo_tools.FaceInfo(
+        face_get_position=FaceGetPosition(pos=Point3d(x=1.0, y=2.0, z=3.0)),
+        face_get_gradient=FaceGetGradient(
+            df_du=Point3d(x=1.0, y=0.0, z=0.0),
+            df_dv=Point3d(x=0.0, y=1.0, z=0.0),
+            normal=Point3d(x=0.0, y=0.0, z=1.0),
         ),
-        face_get_gradient=MagicMock(
-            model_dump=MagicMock(
-                return_value={
-                    "df_du": {"x": 1.0, "y": 0.0, "z": 0.0},
-                    "df_dv": {"x": 0.0, "y": 1.0, "z": 0.0},
-                    "normal": {"x": 0.0, "y": 0.0, "z": 1.0},
-                }
-            )
-        ),
-        face_get_center=MagicMock(
-            model_dump=MagicMock(return_value={"pos": {"x": 0.5, "y": 0.5, "z": 0.0}})
-        ),
+        face_get_center=FaceGetCenter(pos=Point3d(x=0.5, y=0.5, z=0.0)),
     )
     mock = MagicMock(return_value=face_info)
     monkeypatch.setattr("zoo_mcp.server.zoo_face_info", mock)
@@ -965,7 +973,7 @@ async def test_get_face_info(monkeypatch):
         },
     )
 
-    result = _meta_result(response)
+    result = _structured_result(response)
     assert result == {
         "face_get_position": {"pos": {"x": 1.0, "y": 2.0, "z": 3.0}},
         "face_get_gradient": {
@@ -979,6 +987,7 @@ async def test_get_face_info(monkeypatch):
         kcl_code="cube = startSketchOn(XY)",
         kcl_path=None,
         face_id="face-id",
+        session_id=None,
     )
 
 
@@ -1965,6 +1974,53 @@ async def test_list_org_datasets_success(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_list_org_datasets_falls_back_for_unknown_status(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with pytest.raises(ValueError) as exc_info:
+        OrgDataset.model_validate({"status": "paused"})
+
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kittycad_client.orgs,
+        "list_org_datasets",
+        MagicMock(side_effect=exc_info.value),
+    )
+    raw_response = SimpleNamespace(
+        is_success=True,
+        json=MagicMock(
+            return_value={
+                "items": [
+                    {
+                        "id": "uuid-paused",
+                        "name": "paused dataset",
+                        "description": "temporarily paused",
+                        "status": "paused",
+                    }
+                ],
+                "next_page": None,
+            }
+        ),
+    )
+    http_client = MagicMock()
+    http_client.get.return_value = raw_response
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kittycad_client,
+        "get_http_client",
+        MagicMock(return_value=http_client),
+    )
+
+    response = await mcp.call_tool("list_org_datasets", arguments={})
+
+    assert _meta_result(response) == [
+        {
+            "id": "uuid-paused",
+            "name": "paused dataset",
+            "description": "temporarily paused",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_list_org_datasets_empty_when_404(monkeypatch: pytest.MonkeyPatch):
     def raise_404(*args: Any, **kwargs: Any):
         raise KittyCADClientError(message="No org found", status_code=404)
@@ -1978,6 +2034,37 @@ async def test_list_org_datasets_empty_when_404(monkeypatch: pytest.MonkeyPatch)
     response = await mcp.call_tool("list_org_datasets", arguments={})
     result = _meta_result(response)
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_org_datasets_empty_when_fallback_hits_404(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Schema drift plus a 404 must still be empty, not an uncaught client error."""
+    with pytest.raises(ValueError) as exc_info:
+        OrgDataset.model_validate({"status": "paused"})
+
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kittycad_client.orgs,
+        "list_org_datasets",
+        MagicMock(side_effect=exc_info.value),
+    )
+    http_client = MagicMock()
+    http_client.get.return_value = SimpleNamespace(is_success=False)
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kittycad_client,
+        "get_http_client",
+        MagicMock(return_value=http_client),
+    )
+    monkeypatch.setattr(
+        "kittycad.response_helpers.raise_for_status",
+        MagicMock(
+            side_effect=KittyCADClientError(message="No org found", status_code=404)
+        ),
+    )
+
+    response = await mcp.call_tool("list_org_datasets", arguments={})
+    assert _meta_result(response) == []
 
 
 @pytest.mark.asyncio

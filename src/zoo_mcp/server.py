@@ -3,7 +3,83 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import kcl
-from kittycad.models.modeling_cmd import OptionDefaultCameraLookAt, Point3d
+from kittycad.models import (
+    CameraMovement,
+    CurveGetEndPoints,
+    CurveGetType,
+    DefaultCameraCenterToSelection,
+    DistanceType,
+    EdgeGetLength,
+    EngineUtilEvaluatePath,
+    EntityGetAllChildUuids,
+    EntityGetDistance,
+    EntityGetIndex,
+    EntityGetParentId,
+    EntityGetSketchPaths,
+    EntityType,
+    GlobalAxis,
+    HighlightSetEntities,
+    ModelingCmd,
+    SelectReplace,
+    SetSelectionFilter,
+)
+from kittycad.models.distance_type import OptionEuclidean, OptionOnAxis
+from kittycad.models.modeling_cmd import (
+    OptionCurveGetEndPoints,
+    OptionCurveGetType,
+    OptionDefaultCameraCenterToSelection,
+    OptionDefaultCameraLookAt,
+    OptionEdgeGetLength,
+    OptionEngineUtilEvaluatePath,
+    OptionEntityGetAllChildUuids,
+    OptionEntityGetDistance,
+    OptionEntityGetIndex,
+    OptionEntityGetParentId,
+    OptionEntityGetSketchPaths,
+    OptionHighlightSetEntities,
+    OptionSelectReplace,
+    OptionSetSelectionFilter,
+    Point3d,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionCurveGetEndPoints as ResponseCurveGetEndPoints,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionCurveGetType as ResponseCurveGetType,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionDefaultCameraCenterToSelection as ResponseDefaultCameraCenterToSelection,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEdgeGetLength as ResponseEdgeGetLength,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEngineUtilEvaluatePath as ResponseEngineUtilEvaluatePath,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetAllChildUuids as ResponseEntityGetAllChildUuids,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetDistance as ResponseEntityGetDistance,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetIndex as ResponseEntityGetIndex,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetParentId as ResponseEntityGetParentId,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEntityGetSketchPaths as ResponseEntityGetSketchPaths,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionHighlightSetEntities as ResponseHighlightSetEntities,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionSelectReplace as ResponseSelectReplace,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionSetSelectionFilter as ResponseSetSelectionFilter,
+)
 from kittycad.models.uuid import Uuid
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent
@@ -29,6 +105,7 @@ from zoo_mcp.utils.image_utils import (
 )
 from zoo_mcp.zoo_tools import (
     CameraView,
+    FaceInfo,
     zoo_calculate_bounding_box_cad,
     zoo_calculate_bounding_box_kcl,
     zoo_calculate_cad_physical_properties,
@@ -40,6 +117,7 @@ from zoo_mcp.zoo_tools import (
     zoo_convert_cad_file,
     zoo_exec_kcl_project,
     zoo_execute_kcl,
+    zoo_execute_modeling_command,
     zoo_export_kcl,
     zoo_face_info,
     zoo_format_kcl,
@@ -53,8 +131,12 @@ from zoo_mcp.zoo_tools import (
     zoo_multiview_snapshot_of_cad,
     zoo_multiview_snapshot_of_kcl,
     zoo_search_org_dataset_semantic,
+    zoo_snapshot,
     zoo_snapshot_of_cad,
     zoo_snapshot_of_kcl,
+    zoo_start_modeling_session,
+    zoo_stop_all_modeling_sessions,
+    zoo_stop_modeling_session,
 )
 
 
@@ -105,6 +187,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        zoo_stop_all_modeling_sessions()
         if _kcl_index_task is not None and not _kcl_index_task.done():
             _kcl_index_task.cancel()
         _kcl_index_task = None
@@ -395,12 +478,16 @@ async def convert_cad_file(
 async def execute_kcl(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    session_id: str | None = None,
 ) -> tuple[bool, str]:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
+
+      Does NOT return an artifact graph and can have large network overhead depending on the model.
 
     Args:
         kcl_code (str | None): The KCL code to execute.
         kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file.
+        session_id: An open modeling session in which to execute the KCL.
 
     Returns:
         tuple(bool, str): Returns True if the KCL code executed successfully and a success message, False otherwise and the error message.
@@ -409,7 +496,11 @@ async def execute_kcl(
     logger.info("execute_kcl tool called")
 
     try:
-        return await zoo_execute_kcl(kcl_code=kcl_code, kcl_path=kcl_path)
+        return await zoo_execute_kcl(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            session_id=session_id,
+        )
     except Exception as e:
         return False, f"Failed to execute KCL code: {e}"
 
@@ -418,23 +509,56 @@ async def execute_kcl(
 async def exec_kcl_project(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
-) -> dict | str:
+    session_id: str | None = None,
+) -> dict[str, object]:
     """Run a KCL project on the server side and return its artifact graph.
 
     Args:
         kcl_code (str | None): KCL code to run as a single-file project.
         kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session in which to execute the project.
 
     Returns:
-        dict | str: The artifact graph produced by execution, or an error message.
-                    Contains UUID mappings to source code and somewhat structured understanding of the model.
+        dict[str, object]: The artifact graph produced by execution. Contains UUID
+                           mappings to source code and a somewhat structured
+                           understanding of the model.
     """
     logger.info("exec_kcl_project tool called")
 
-    try:
-        return zoo_exec_kcl_project(kcl_code=kcl_code, kcl_path=kcl_path)
-    except Exception as e:
-        return f"Failed to execute KCL project: {e}"
+    return zoo_exec_kcl_project(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        session_id=session_id,
+    )
+
+
+@mcp.tool()
+async def start_modeling_session() -> str:
+    """Open an empty modeling websocket for subsequent tools.
+
+    Pass the returned session_id to execute_kcl or exec_kcl_project to populate
+    the scene, then reuse it with modeling query, selection, and highlight tools.
+    Stop the session explicitly with stop_modeling_session when finished.
+
+    Returns:
+        str: The session ID to pass to session-aware modeling tools.
+    """
+    logger.info("start_modeling_session tool called")
+    return zoo_start_modeling_session()
+
+
+@mcp.tool()
+async def stop_modeling_session(session_id: str) -> None:
+    """Close a persistent modeling websocket session.
+
+    Args:
+        session_id: The ID returned by start_modeling_session.
+
+    Returns:
+        None
+    """
+    logger.info("stop_modeling_session tool called")
+    zoo_stop_modeling_session(session_id)
 
 
 @mcp.tool()
@@ -532,36 +656,533 @@ async def get_face_info(
     face_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
-) -> dict | str:
+    session_id: str | None = None,
+) -> FaceInfo:
     """Get the position, gradient, normal, and center of a face in a KCL model.
 
     Args:
-        face_id (str): Intended to be a face id selected and sent by the user.
+        face_id (str): Usually a user or LLM-selected face id.
         kcl_code (str | None): The KCL code defining the model.
         kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
-        dict | str: The face position, gradient, normal, and center, or an error message.
-                    The position is the starting point of the face's outside perimeter in KittyCAD engine space. Pretty confusing.
-                    The gradient is the direction of greatest change of a scalar function.
-                    The normal is a typical face normal.
-                    The center is the geometric center of the face. *Prefer this over the position.*
+        FaceInfo: The face position, gradient, normal, and center. The position is
+                  the starting point of the face's outside perimeter in KittyCAD
+                  engine space. The center is the geometric center of the face and
+                  should generally be preferred over the position.
     """
     logger.info("get_face_info tool called for face_id=%s", face_id)
 
-    try:
-        face_info = zoo_face_info(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            face_id=Uuid(face_id),
-        )
-        return {
-            "face_get_position": face_info.face_get_position.model_dump(),
-            "face_get_gradient": face_info.face_get_gradient.model_dump(),
-            "face_get_center": face_info.face_get_center.model_dump(),
+    return zoo_face_info(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        face_id=Uuid(face_id),
+        session_id=session_id,
+    )
+
+
+@mcp.tool()
+async def entity_distance(
+    entity_id1: str,
+    entity_id2: str,
+    on_axis: GlobalAxis | None = None,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+) -> EntityGetDistance:
+    """Get the minimum and maximum distance between two model entities.
+
+    Args:
+        entity_id1: The first entity UUID, typically obtained from an artifact graph.
+        entity_id2: The second entity UUID.
+        on_axis: Optional global axis for projected distance; omit for Euclidean distance.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        EntityGetDistance: The minimum and maximum distance between the entities.
+    """
+    logger.info("entity_distance tool called")
+    return zoo_execute_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(
+            OptionEntityGetDistance(
+                entity_id1=Uuid(entity_id1),
+                entity_id2=Uuid(entity_id2),
+                distance_type=DistanceType(
+                    OptionOnAxis(axis=on_axis)
+                    if on_axis is not None
+                    else OptionEuclidean()
+                ),
+            )
+        ),
+        ResponseEntityGetDistance,
+        "entity distance",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def set_selection_filter(
+    entity_types: list[EntityType],
+    session_id: str,
+) -> SetSelectionFilter:
+    """Set which model entity types can be added to the "selection set".
+
+    Args:
+        entity_types: Entity types permitted by the selection filter.
+        session_id: An open modeling session, from start_modeling_session. Required:
+                    the filter is scene state and would be discarded without one.
+
+    Returns:
+        SetSelectionFilter: Confirmation that the filter was set.
+    """
+    logger.info("set_selection_filter tool called")
+    return zoo_execute_modeling_command(
+        None,
+        None,
+        ModelingCmd(OptionSetSelectionFilter(filter=entity_types)),
+        ResponseSetSelectionFilter,
+        "selection filter",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def select_entities(
+    entity_ids: list[str],
+    session_id: str,
+) -> SelectReplace:
+    """Replace the "selection set" with the given entities.
+
+    Takes UUIDs exactly as they appear in an artifact graph, and works for faces,
+    edges, and solids alike.
+
+    Selected entities render with a distinct color tint and an outline, which is
+    considerably more obvious in a `snapshot` than the subtler brightening that
+    highlight_set_entities applies. For the strongest emphasis on a face, call
+    both this and highlight_set_entities; for an edge use just one, as selection
+    overrides the highlight. Follow with `snapshot` (passing zoom=False to keep
+    the current camera) to see the result.
+
+    Args:
+        entity_ids: Entity UUIDs to select; pass an empty list to clear the selection.
+        session_id: An open modeling session, from start_modeling_session. Required:
+                    the selection is scene state and would be discarded without one.
+
+    Returns:
+        SelectReplace: Confirmation that the selection was replaced.
+    """
+    logger.info("select_entities tool called")
+    return zoo_execute_modeling_command(
+        None,
+        None,
+        ModelingCmd(OptionSelectReplace(entities=entity_ids)),
+        ResponseSelectReplace,
+        "select entities",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def center_camera_on_selection(
+    session_id: str,
+    move_vantage: bool = True,
+) -> DefaultCameraCenterToSelection:
+    """Point the camera at the current "selection set".
+
+    Useful for making a small selection legible, especially an edge: an edge is
+    only a pixel or two wide, so centring it helps far more than any change of
+    colour. Set the selection first with select_entities.
+
+    Centring moves the camera without re-framing the scene, so parts of the model
+    may fall outside the image. Follow with `snapshot` passing zoom=False, since
+    zoom=True re-frames the whole scene and undoes the centring.
+
+    Args:
+        session_id: An open modeling session, from start_modeling_session. Required:
+                    camera position is scene state and would be discarded without one.
+        move_vantage: Move the camera's vantage point as well as its target.
+                      True (the default) centres the selection most precisely;
+                      False re-aims the camera from where it already is.
+
+    Returns:
+        DefaultCameraCenterToSelection: Confirmation that the camera was centred.
+    """
+    logger.info("center_camera_on_selection tool called")
+    return zoo_execute_modeling_command(
+        None,
+        None,
+        ModelingCmd(
+            OptionDefaultCameraCenterToSelection(
+                camera_movement=CameraMovement.VANTAGE
+                if move_vantage
+                else CameraMovement.NONE
+            )
+        ),
+        ResponseDefaultCameraCenterToSelection,
+        "camera centering",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def highlight_set_entities(
+    entity_ids: list[str],
+    session_id: str,
+) -> HighlightSetEntities:
+    """Replace the currently highlighted entities. Does NOT modify the "selection set".
+
+    This is a visual command: follow it with the `snapshot` tool, passing the same
+    session_id and zoom=False, to see the highlight without moving the camera. It
+    highlights edges, surfaces and bodies.
+
+    Highlighting only brightens an entity slightly. select_entities is markedly
+    more obvious, tinting the entity and drawing an outline around it. For the
+    strongest emphasis on a face, call both; on an edge call only one, because
+    selection overrides the highlight. An edge is a pixel or two wide whichever
+    you choose, so also consider center_camera_on_selection or a larger
+    max_image_dimension to make one legible.
+
+    Args:
+        entity_ids: Entity UUIDs to highlight; pass an empty list to clear highlights.
+        session_id: An open modeling session, from start_modeling_session. Required:
+                    highlights are scene state and would be discarded without one.
+
+    Returns:
+        HighlightSetEntities: Confirmation that the highlights were replaced.
+    """
+    logger.info("highlight_set_entities tool called")
+    return zoo_execute_modeling_command(
+        None,
+        None,
+        ModelingCmd(OptionHighlightSetEntities(entities=entity_ids)),
+        ResponseHighlightSetEntities,
+        "highlight entities",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def curve_get_end_points(
+    curve_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+) -> CurveGetEndPoints:
+    """Get the start and end points of a curve entity.
+
+    Args:
+        curve_id: Curve UUID, typically obtained from an artifact graph.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        CurveGetEndPoints: The curve's start and end points.
+    """
+    logger.info("curve_get_end_points tool called")
+    return zoo_execute_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionCurveGetEndPoints(curve_id=Uuid(curve_id))),
+        ResponseCurveGetEndPoints,
+        "curve endpoints",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def engine_util_evaluate_path(
+    path_json: str,
+    t: float,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+) -> EngineUtilEvaluatePath:
+    """Evaluate a serialized KCL path at parameter t.
+
+    Examples of `path_json`:
+
+    ```json
+    {
+      "start": {
+        "from": [10, 0]
+      },
+      "value": [
+        {
+          "type": "Arc",
+          "center": [0, 0],
+          "radius": 10,
+          "angle_range": [0, 90]
         }
-    except Exception as e:
-        return f"Failed to get face information: {e}"
+      ]
+    }
+    ```
+
+    ```json
+    {
+      "start": {
+        "from": [0, 0]
+      },
+      "value": [
+        {
+          "type": "ToPoint",
+          "to": [10, 0]
+        },
+        {
+          "type": "ToPoint",
+          "to": [10, 10]
+        }
+      ]
+    }
+    ```
+
+    Args:
+        path_json: The serialized JSON representation of the KCL sketch or path.
+        t: Normalized path parameter, conventionally between 0 and 1.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        EngineUtilEvaluatePath: The position on the path at parameter t.
+    """
+    logger.info("engine_util_evaluate_path tool called")
+    return zoo_execute_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEngineUtilEvaluatePath(path_json=path_json, t=t)),
+        ResponseEngineUtilEvaluatePath,
+        "path evaluation",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def curve_get_type(
+    curve_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+) -> CurveGetType:
+    """Get whether a curve is a line, arc, or NURBS curve.
+
+    Args:
+        curve_id: Curve UUID, typically obtained from an artifact graph.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        CurveGetType: The curve's geometric type.
+    """
+    logger.info("curve_get_type tool called")
+    return zoo_execute_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionCurveGetType(curve_id=Uuid(curve_id))),
+        ResponseCurveGetType,
+        "curve type",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def edge_get_length(
+    edge_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+) -> EdgeGetLength:
+    """Get the length of an edge entity in the current scene units.
+
+    Args:
+        edge_id: Edge UUID, typically obtained from an artifact graph.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        EdgeGetLength: The edge length in the current scene units.
+    """
+    logger.info("edge_get_length tool called")
+    return zoo_execute_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEdgeGetLength(edge_id=Uuid(edge_id))),
+        ResponseEdgeGetLength,
+        "edge length",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def entity_get_all_child_uuids(
+    entity_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+) -> EntityGetAllChildUuids:
+    """Get all child UUIDs belonging to an entity.
+
+    Args:
+        entity_id: Entity UUID, typically obtained from an artifact graph.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        EntityGetAllChildUuids: All child entity UUIDs.
+    """
+    logger.info("entity_get_all_child_uuids tool called")
+    return zoo_execute_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEntityGetAllChildUuids(entity_id=Uuid(entity_id))),
+        ResponseEntityGetAllChildUuids,
+        "entity child IDs",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def entity_get_index(
+    entity_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+) -> EntityGetIndex:
+    """Get an entity's index within its parent.
+
+    Args:
+        entity_id: Entity UUID, typically obtained from an artifact graph.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        EntityGetIndex: The entity's index within its parent.
+    """
+    logger.info("entity_get_index tool called")
+    return zoo_execute_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEntityGetIndex(entity_id=Uuid(entity_id))),
+        ResponseEntityGetIndex,
+        "entity index",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def entity_get_parent_id(
+    entity_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+) -> EntityGetParentId:
+    """Get the UUID of an entity's parent.
+
+    Args:
+        entity_id: Entity UUID, typically obtained from an artifact graph.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        EntityGetParentId: The parent entity's UUID.
+    """
+    logger.info("entity_get_parent_id tool called")
+    return zoo_execute_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEntityGetParentId(entity_id=Uuid(entity_id))),
+        ResponseEntityGetParentId,
+        "entity parent ID",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def entity_get_sketch_paths(
+    entity_id: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+) -> EntityGetSketchPaths:
+    """Get the sketch path UUIDs belonging to an entity.
+
+    Args:
+        entity_id: Entity UUID, typically obtained from an artifact graph.
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to reuse instead of executing KCL again.
+
+    Returns:
+        EntityGetSketchPaths: The sketch path UUIDs belonging to the entity.
+    """
+    logger.info("entity_get_sketch_paths tool called")
+    return zoo_execute_modeling_command(
+        kcl_code,
+        kcl_path,
+        ModelingCmd(OptionEntityGetSketchPaths(entity_id=Uuid(entity_id))),
+        ResponseEntityGetSketchPaths,
+        "entity sketch paths",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def snapshot(
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    session_id: str | None = None,
+    max_image_dimension: int = 512,
+    zoom: bool = True,
+    highlight_edges: bool = False,
+    output_path: str | None = None,
+) -> ImageContent | str:
+    """Take a snapshot of a KCL model or the current modeling session.
+
+    Provide kcl_code or kcl_path to execute a model in a temporary scene. To
+    capture an existing scene without re-executing KCL, provide the session_id
+    returned by start_modeling_session. The camera always uses an orthographic
+    projection.
+
+    Args:
+        kcl_code: KCL code defining the model.
+        kcl_path: A .kcl file or project directory containing main.kcl.
+        session_id: An open modeling session to capture.
+        max_image_dimension: Maximum width or height of the returned JPEG.
+        zoom: Point the camera isometrically and zoom to fit before capturing.
+              Leave True unless you have positioned the session's camera
+              yourself; a freshly executed scene is not framed, so zoom=False
+              renders the model only a few pixels wide.
+        highlight_edges: Whether rendered edges should be outlined. Default is
+                         False so that entities highlighted with
+                         highlight_set_entities are obvious in the image.
+        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
+
+    Returns:
+        ImageContent | str: The snapshot as an inline image when output_path is
+                            omitted; otherwise the absolute path to the saved file.
+    """
+    logger.info("snapshot tool called")
+    image = zoo_snapshot(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        session_id=session_id,
+        max_image_dimension=max_image_dimension,
+        zoom=zoom,
+        highlight_edges=highlight_edges,
+    )
+    if output_path is not None:
+        return save_image_bytes_to_disk(image, output_path)
+    return encode_image(image)
 
 
 @mcp.tool()

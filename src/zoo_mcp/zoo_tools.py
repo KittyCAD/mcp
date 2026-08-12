@@ -1,9 +1,12 @@
 import io
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
@@ -66,6 +69,7 @@ from kittycad.models.input_format3d import (
 from kittycad.models.modeling_cmd import (
     OptionDefaultCameraLookAt,
     OptionDefaultCameraSetOrthographic,
+    OptionEdgeLinesVisible,
     OptionFaceGetCenter,
     OptionFaceGetGradient,
     OptionFaceGetPosition,
@@ -73,6 +77,12 @@ from kittycad.models.modeling_cmd import (
     OptionTakeSnapshot,
     OptionViewIsometric,
     OptionZoomToFit,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionDefaultCameraSetOrthographic as ResponseDefaultCameraSetOrthographic,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEdgeLinesVisible as ResponseEdgeLinesVisible,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionFaceGetCenter as ResponseFaceGetCenter,
@@ -83,10 +93,20 @@ from kittycad.models.ok_modeling_cmd_response import (
 from kittycad.models.ok_modeling_cmd_response import (
     OptionFaceGetPosition as ResponseFaceGetPosition,
 )
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionTakeSnapshot as ResponseTakeSnapshot,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionViewIsometric as ResponseViewIsometric,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionZoomToFit as ResponseZoomToFit,
+)
 from kittycad.models.ok_web_socket_response_data import OptionModeling
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
+from websockets.exceptions import WebSocketException
 
 from zoo_mcp import ZooMCPException, kittycad_client, logger
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
@@ -1082,6 +1102,7 @@ async def zoo_convert_cad_file(
 async def zoo_execute_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
+    session_id: str | None = None,
 ) -> tuple[bool, str]:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -1090,13 +1111,30 @@ async def zoo_execute_kcl(
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
 
     Returns:
-        tuple(bool, str): Returns True if the KCL code ran to completion and a result message, False otherwise and the error message. When the run completes, it may still report compilation issues (warnings, errors, and fatal issues, e.g. a CSG operation with no overlap); these are appended to the message rather than treated as a hard failure.
+        tuple(bool, str): Returns True if the KCL code ran to completion and a result message, False otherwise and the error message. When the run completes, it may still report compilation issues (warnings, errors, and fatal issues, e.g. a CSG operation with no overlap); these are appended to the message rather than treated as a hard failure. Note that session_id runs are executed by the engine, whose response carries no non-fatal diagnostics, so the message says so instead of implying the code is clean.
     """
     logger.info("Executing KCL code")
 
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
+        if session_id is not None:
+            zoo_exec_kcl_project(
+                kcl_code=kcl_code,
+                kcl_path=kcl_path,
+                session_id=session_id,
+            )
+            logger.info("KCL code executed in modeling session")
+            # The engine's exec_kcl_project response carries only an artifact
+            # graph, so warnings the local compiler would surface are not
+            # available here. Say so rather than report an unqualified success.
+            return True, (
+                "KCL code executed successfully in the modeling session. "
+                "Non-fatal diagnostics (warnings and non-fatal errors) are not "
+                "reported for session runs; re-run without session_id to check "
+                "them."
+            )
+
         if kcl_code:
             outcome = await _execute_with_retries(kcl.execute_code, kcl_code)
         else:
@@ -2111,7 +2149,7 @@ def _exec_kcl_project(
     ws: WebSocketModelingCommandsWs,
     entrypoint: str,
     files: list[dict[str, str | list[int]]],
-) -> dict:
+) -> dict[str, object]:
     """Execute a KCL project through the server-side websocket protocol."""
     request_id = ModelingCmdId(uuid4())
     request = {
@@ -2124,9 +2162,13 @@ def _exec_kcl_project(
     }
     ws.ws.send(json.dumps(request))
 
+    # Mirrors the timeout the SDK's own typed recv() applies; reading the raw
+    # socket without one hangs the caller forever if the engine drops the reply.
+    recv_timeout = getattr(ws, "_recv_timeout", 60.0)
+
     # This response is not represented in the generated SDK yet.
     while True:
-        raw_response = ws.ws.recv()
+        raw_response = ws.ws.recv(timeout=recv_timeout)
         try:
             response = json.loads(raw_response)
         except (TypeError, json.JSONDecodeError):
@@ -2156,26 +2198,30 @@ def _exec_kcl_project(
         return artifact_graph
 
 
-def zoo_exec_kcl_project(
-    kcl_code: str | None = None,
-    kcl_path: Path | str | None = None,
-) -> dict:
-    """Run a KCL project on the server side and return its artifact graph."""
-    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
-
-    with kittycad_client.modeling.modeling_commands_ws(webrtc=False) as ws:
-        return _exec_kcl_project(ws, entrypoint, files)
+@dataclass
+class _ModelingSession:
+    context: AbstractContextManager[WebSocketModelingCommandsWs]
+    websocket: WebSocketModelingCommandsWs
+    lock: Lock
+    last_used: float
 
 
-def zoo_face_info(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-    face_id: Uuid,
-) -> FaceInfo:
-    """Get the position, gradient, and center of a face in a KCL project."""
-    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+_modeling_sessions: dict[str, _ModelingSession] = {}
+_modeling_sessions_lock = Lock()
 
-    with kittycad_client.modeling.modeling_commands_ws(
+# The engine drops idle connections on its own, so an entry older than this is
+# assumed dead and is reaped rather than handed back to a caller.
+_MODELING_SESSION_IDLE_TIMEOUT = 600.0
+
+# A cap so a client that never calls stop_modeling_session cannot pin an
+# unbounded number of engine instances.
+_MAX_MODELING_SESSIONS = 8
+
+
+def _modeling_websocket_context() -> AbstractContextManager[
+    WebSocketModelingCommandsWs
+]:
+    return kittycad_client.modeling.modeling_commands_ws(
         fps=30,
         post_effect=PostEffectType.SSAO,
         show_grid=False,
@@ -2183,9 +2229,153 @@ def zoo_face_info(
         video_res_height=1024,
         video_res_width=1024,
         webrtc=False,
-    ) as ws:
-        _exec_kcl_project(ws, entrypoint, files)
+    )
 
+
+def _close_modeling_session(session: _ModelingSession) -> None:
+    """Close one session's websocket, waiting for any in-flight command."""
+    with session.lock:
+        session.context.__exit__(None, None, None)
+
+
+def _reap_idle_modeling_sessions() -> list[_ModelingSession]:
+    """Remove sessions idle long enough that the engine has likely dropped them.
+
+    The caller must hold ``_modeling_sessions_lock``. Returns the evicted
+    sessions so they can be closed without holding the registry lock.
+    """
+    cutoff = monotonic() - _MODELING_SESSION_IDLE_TIMEOUT
+    expired = [
+        session_id
+        for session_id, session in _modeling_sessions.items()
+        if session.last_used < cutoff
+    ]
+    evicted = []
+    for session_id in expired:
+        logger.info("Reaping idle modeling session %s", session_id)
+        evicted.append(_modeling_sessions.pop(session_id))
+    return evicted
+
+
+def zoo_start_modeling_session() -> str:
+    with _modeling_sessions_lock:
+        evicted = _reap_idle_modeling_sessions()
+        active = len(_modeling_sessions)
+    for session in evicted:
+        try:
+            _close_modeling_session(session)
+        except Exception as error:
+            logger.warning("Failed to close idle modeling session: %s", error)
+
+    if active >= _MAX_MODELING_SESSIONS:
+        raise ZooMCPException(
+            f"Too many open modeling sessions ({active}); "
+            "call stop_modeling_session on a session you no longer need"
+        )
+
+    context = _modeling_websocket_context()
+    websocket = context.__enter__()
+
+    session_id = str(uuid4())
+    with _modeling_sessions_lock:
+        _modeling_sessions[session_id] = _ModelingSession(
+            context=context,
+            websocket=websocket,
+            lock=Lock(),
+            last_used=monotonic(),
+        )
+    return session_id
+
+
+def zoo_stop_modeling_session(session_id: str) -> None:
+    with _modeling_sessions_lock:
+        session = _modeling_sessions.pop(session_id, None)
+    if session is None:
+        raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+
+    _close_modeling_session(session)
+
+
+def zoo_stop_all_modeling_sessions() -> None:
+    """Close all persistent modeling sessions, normally during server shutdown."""
+    with _modeling_sessions_lock:
+        sessions = list(_modeling_sessions.values())
+        _modeling_sessions.clear()
+
+    for session in sessions:
+        try:
+            _close_modeling_session(session)
+        except Exception as error:
+            logger.warning("Failed to close modeling session: %s", error)
+
+
+def _evict_modeling_session(session_id: str) -> None:
+    """Drop a session whose websocket is no longer usable."""
+    with _modeling_sessions_lock:
+        _modeling_sessions.pop(session_id, None)
+
+
+# Allows external agents to reuse engine connections so the Zoo infrastructure
+# isn't spinning up and down engines for each command, when many times the same
+# engine scene has the same model.
+
+
+@contextmanager
+def _modeling_websocket(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    session_id: str | None,
+) -> Iterator[WebSocketModelingCommandsWs]:
+    if session_id is not None:
+        with _modeling_sessions_lock:
+            session = _modeling_sessions.get(session_id)
+            if session is None:
+                raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+
+        # Acquired outside the registry lock: blocking on a busy session while
+        # holding it would stall every other session's management calls.
+        session.lock.acquire()
+        try:
+            yield session.websocket
+        except (WebSocketException, OSError) as error:
+            _evict_modeling_session(session_id)
+            raise ZooMCPException(
+                f"Modeling session '{session_id}' is no longer connected "
+                f"({error}); start a new session"
+            ) from error
+        finally:
+            session.last_used = monotonic()
+            session.lock.release()
+        return
+
+    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+    with _modeling_websocket_context() as websocket:
+        _exec_kcl_project(websocket, entrypoint, files)
+        yield websocket
+
+
+def zoo_exec_kcl_project(
+    kcl_code: str | None = None,
+    kcl_path: Path | str | None = None,
+    session_id: str | None = None,
+) -> dict[str, object]:
+    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+
+    if session_id is not None:
+        with _modeling_websocket(None, None, session_id) as ws:
+            return _exec_kcl_project(ws, entrypoint, files)
+
+    with _modeling_websocket_context() as ws:
+        return _exec_kcl_project(ws, entrypoint, files)
+
+
+def zoo_face_info(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    face_id: Uuid,
+    session_id: str | None = None,
+) -> FaceInfo:
+    with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
         cmd_id_face_get_position = ModelingCmdId(uuid4())
         ws.send(
             WebSocketRequest(
@@ -2236,13 +2426,21 @@ def zoo_face_info(
             or face_get_center is False
         ):
             message = ws.recv().root
-            if not isinstance(message, SuccessWebSocketResponse):
-                raise ZooMCPException(message)
-            if message.request_id not in {
+
+            # Match on request_id first; see _send_modeling_command.
+            request_id = getattr(message, "request_id", None)
+            expected_ids = {
                 cmd_id_face_get_position,
                 cmd_id_face_get_gradient,
                 cmd_id_face_get_center,
-            }:
+            }
+
+            if not isinstance(message, SuccessWebSocketResponse):
+                if request_id is None or request_id in expected_ids:
+                    raise ZooMCPException(_format_websocket_failure(message))
+                continue
+
+            if request_id not in expected_ids:
                 continue
 
             response = message.resp.root
@@ -2272,6 +2470,146 @@ def zoo_face_info(
             face_get_gradient=face_get_gradient,
             face_get_center=face_get_center,
         )
+
+
+_ModelingResponseT = TypeVar("_ModelingResponseT")
+
+
+def _format_websocket_failure(message: object) -> str:
+    """Render an engine failure frame as a readable message, not a model repr."""
+    errors = getattr(message, "errors", None)
+    if not errors:
+        return f"The modeling engine reported a failure: {message}"
+
+    rendered = "; ".join(
+        f"{getattr(error, 'error_code', 'error')}: {getattr(error, 'message', error)}"
+        for error in errors
+    )
+    return f"The modeling engine reported a failure: {rendered}"
+
+
+def _send_modeling_command(
+    ws: WebSocketModelingCommandsWs,
+    command: ModelingCmd,
+    expected_response: type[_ModelingResponseT],
+    response_description: str,
+) -> _ModelingResponseT:
+    """Send one modeling command and return its matching typed response."""
+    command_id = ModelingCmdId(uuid4())
+    ws.send(
+        WebSocketRequest(
+            OptionModelingCmdReq(
+                cmd=command,
+                cmd_id=command_id,
+            )
+        )
+    )
+
+    while True:
+        message = ws.recv().root
+
+        request_id = getattr(message, "request_id", None)
+
+        if not isinstance(message, SuccessWebSocketResponse):
+            # Only raise on a failure that is actually ours. A failure carrying
+            # no request_id is connection-level so it does apply; one for
+            # another command is stale and would report a bogus cause here.
+            if request_id is None or request_id == command_id:
+                raise ZooMCPException(_format_websocket_failure(message))
+            continue
+
+        # Successes must match exactly. A persistent session also carries
+        # unsolicited informational frames (session data, ICE) with no
+        # request_id, and those are not responses to this command.
+        if request_id != command_id:
+            continue
+
+        response = message.resp.root
+        if not isinstance(response, OptionModeling):
+            raise ZooMCPException("Received an unexpected websocket response")
+        modeling_response = response.data.modeling_response.root
+
+        if not isinstance(modeling_response, expected_response):
+            raise ZooMCPException(
+                f"Received an unexpected {response_description} response"
+            )
+        return modeling_response
+
+
+def zoo_execute_modeling_command(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    command: ModelingCmd,
+    expected_response: type[_ModelingResponseT],
+    response_description: str,
+    session_id: str | None = None,
+) -> _ModelingResponseT:
+    """Execute a KCL project, then run one modeling command in its session."""
+    with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
+        return _send_modeling_command(
+            ws,
+            command,
+            expected_response,
+            response_description,
+        )
+
+
+def zoo_snapshot(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    session_id: str | None = None,
+    max_image_dimension: int = 512,
+    zoom: bool = True,
+    highlight_edges: bool = False,
+) -> bytes:
+    """Capture the current scene as a JPEG.
+
+    The camera is always switched to an orthographic projection, matching the
+    other snapshot tools. Unless ``zoom`` is False the camera is also pointed
+    isometrically and zoomed to fit; a raw take_snapshot uses whatever camera
+    the scene happens to have, which on a freshly executed project leaves the
+    model a few pixels wide.
+
+    Edge lines are hidden unless ``highlight_edges`` is True, so that entities
+    highlighted via highlight_set_entities stand out instead of competing with
+    the outline drawn on every edge in the scene.
+    """
+    with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
+        _send_modeling_command(
+            ws,
+            ModelingCmd(OptionDefaultCameraSetOrthographic()),
+            ResponseDefaultCameraSetOrthographic,
+            "orthographic camera",
+        )
+
+        if zoom:
+            _send_modeling_command(
+                ws,
+                ModelingCmd(OptionViewIsometric()),
+                ResponseViewIsometric,
+                "isometric view",
+            )
+            _send_modeling_command(
+                ws,
+                ModelingCmd(OptionZoomToFit(padding=0.1)),
+                ResponseZoomToFit,
+                "zoom to fit",
+            )
+
+        _send_modeling_command(
+            ws,
+            ModelingCmd(OptionEdgeLinesVisible(hidden=not highlight_edges)),
+            ResponseEdgeLinesVisible,
+            "edge line visibility",
+        )
+
+        response = _send_modeling_command(
+            ws,
+            ModelingCmd(OptionTakeSnapshot(format=ImageFormat.JPEG)),
+            ResponseTakeSnapshot,
+            "snapshot",
+        )
+    return resize_image(response.data.contents, max_image_dimension)
 
 
 async def zoo_snapshot_of_kcl(
@@ -2347,6 +2685,68 @@ async def zoo_snapshot_of_kcl(
     return resize_image(jpeg_contents_list[0], max_image_dimension)
 
 
+def _list_org_datasets_raw() -> list[dict[str, str | None]]:
+    """List datasets without validating fields unrelated to this tool's output."""
+    client = kittycad_client.get_http_client()
+    url = f"{kittycad_client.base_url}/org/datasets"
+    page_token: str | None = None
+    seen_page_tokens: set[str] = set()
+    datasets: list[dict[str, str | None]] = []
+
+    while True:
+        params = {"page_token": page_token} if page_token is not None else None
+        response = client.get(
+            url=url,
+            headers=kittycad_client.get_headers(),
+            params=params,
+        )
+        if not response.is_success:
+            from kittycad.response_helpers import raise_for_status
+
+            raise_for_status(response)
+
+        payload = response.json()
+        items = payload.get("items", [])
+        if not isinstance(items, list):
+            raise ZooMCPException("Failed to list org datasets: invalid response")
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            dataset_id = item.get("id")
+            name = item.get("name")
+            description = item.get("description")
+            if isinstance(dataset_id, str) and isinstance(name, str):
+                datasets.append(
+                    {
+                        "id": dataset_id,
+                        "name": name,
+                        "description": description
+                        if isinstance(description, str)
+                        else None,
+                    }
+                )
+
+        page_token = payload.get("next_page")
+        if not isinstance(page_token, str) or not page_token:
+            return datasets
+        if page_token in seen_page_tokens:
+            logger.warning(
+                "Org datasets pagination repeated page token; stopping early"
+            )
+            return datasets
+        seen_page_tokens.add(page_token)
+
+
+def _org_datasets_empty_or_raise(
+    exc: KittyCADClientError,
+) -> list[dict[str, str | None]]:
+    """Treat a missing datasets endpoint as empty; re-raise anything else."""
+    if exc.status_code == 404:
+        return []
+    raise ZooMCPException(f"Failed to list org datasets: {exc}") from exc
+
+
 def zoo_list_org_datasets() -> list[dict[str, str | None]]:
     """List all datasets visible to the org tied to the current ZOO_API_TOKEN.
 
@@ -2355,14 +2755,28 @@ def zoo_list_org_datasets() -> list[dict[str, str | None]]:
         entries, possibly empty.
     """
     logger.info("Listing org datasets")
+    use_raw_fallback = False
+    datasets = []
     try:
         datasets = list(
             kittycad_client.orgs.list_org_datasets(limit=None, page_token=None)
         )
+    except ValueError as exc:
+        logger.warning(
+            "SDK could not validate org datasets; falling back to raw JSON: %s",
+            exc,
+        )
+        use_raw_fallback = True
     except KittyCADClientError as exc:
-        if exc.status_code == 404:
-            return []
-        raise ZooMCPException(f"Failed to list org datasets: {exc}") from exc
+        return _org_datasets_empty_or_raise(exc)
+
+    # Run the fallback outside the handler above so its own client errors still
+    # get the 404-means-empty treatment instead of escaping uncaught.
+    if use_raw_fallback:
+        try:
+            return _list_org_datasets_raw()
+        except KittyCADClientError as exc:
+            return _org_datasets_empty_or_raise(exc)
 
     return [
         {"id": str(d.id), "name": d.name, "description": d.description}
