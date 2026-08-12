@@ -2,7 +2,6 @@ import base64
 import io
 import json
 import os
-from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -19,8 +18,13 @@ from kittycad.models import (
     OrgDataset,
     Point3d,
 )
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent, TextContent
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import (
+    CallToolResult,
+    ImageContent,
+    InputRequiredResult,
+    TextContent,
+)
 from PIL import Image as PILImage
 
 import zoo_mcp
@@ -29,29 +33,27 @@ from zoo_mcp.kcl_docs import KCLDocs
 from zoo_mcp.kcl_samples import KCLSamples, SampleMetadata
 from zoo_mcp.server import mcp
 
-
-def _meta_result(response: Sequence[Any] | dict[str, Any]) -> Any:
-    """Extract response[1]["result"] with proper typing for ty."""
-    assert isinstance(response, Sequence)
-    meta = response[1]
-    assert isinstance(meta, dict)
-    return cast(dict[str, Any], meta)["result"]
+# What MCPServer.call_tool returns in mcp 2.x.
+ToolResponse = CallToolResult | InputRequiredResult
 
 
-def _structured_result(response: Sequence[Any] | dict[str, Any]) -> dict[str, Any]:
+def _meta_result(response: ToolResponse) -> Any:
+    """Extract the wrapped ``result`` value with proper typing for ty."""
+    return _structured_result(response)["result"]
+
+
+def _structured_result(response: ToolResponse) -> dict[str, Any]:
     """Extract structured content with proper typing for ty."""
-    assert isinstance(response, Sequence)
-    result = response[1]
-    assert isinstance(result, dict)
-    return cast(dict[str, Any], result)
+    assert isinstance(response, CallToolResult)
+    structured = response.structured_content
+    assert isinstance(structured, dict)
+    return cast(dict[str, Any], structured)
 
 
-def _content_list(response: Sequence[Any] | dict[str, Any]) -> list[Any]:
-    """Extract response[0] as a typed list for ty."""
-    assert isinstance(response, Sequence)
-    content = response[0]
-    assert isinstance(content, list)
-    return cast(list[Any], content)
+def _content_list(response: ToolResponse) -> list[Any]:
+    """Extract the content blocks as a typed list for ty."""
+    assert isinstance(response, CallToolResult)
+    return list(response.content)
 
 
 @pytest.mark.asyncio
@@ -1289,7 +1291,7 @@ async def test_search_kcl_docs(live_docs_index):
     response = await mcp.call_tool(
         "search_kcl_docs", arguments={"query": "extrude", "max_results": 5}
     )
-    # FastMCP returns list results as [list_of_TextContent]
+    # MCPServer returns list results as [list_of_TextContent]
     inner_list = _content_list(response)
     assert len(inner_list) > 0, "Should find results for 'extrude'"
 

@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -37,26 +36,31 @@ from kittycad.models.modeling_cmd import (
     OptionSelectReplace,
     OptionSetSelectionFilter,
 )
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, ImageContent, InputRequiredResult
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
 from zoo_mcp.zoo_tools import CameraView
 
-
-def _result(response: Sequence[Any] | dict[str, Any]) -> Any:
-    assert isinstance(response, Sequence)
-    meta = response[1]
-    assert isinstance(meta, dict)
-    return cast(dict[str, Any], meta)["result"]
+# What MCPServer.call_tool returns in mcp 2.x.
+ToolResponse = CallToolResult | InputRequiredResult
 
 
-def _structured_result(response: Sequence[Any] | dict[str, Any]) -> dict[str, Any]:
-    assert isinstance(response, Sequence)
-    result = response[1]
-    assert isinstance(result, dict)
-    return cast(dict[str, Any], result)
+def _result(response: ToolResponse) -> Any:
+    return _structured_result(response)["result"]
+
+
+def _structured_result(response: ToolResponse) -> dict[str, Any]:
+    assert isinstance(response, CallToolResult)
+    structured = response.structured_content
+    assert isinstance(structured, dict)
+    return cast(dict[str, Any], structured)
+
+
+def _content_list(response: ToolResponse) -> list[Any]:
+    assert isinstance(response, CallToolResult)
+    return list(response.content)
 
 
 @pytest.mark.asyncio
@@ -244,7 +248,7 @@ async def test_selection_tools_require_a_session():
         "highlight_set_entities",
         "center_camera_on_selection",
     ):
-        schema = tools[tool_name].inputSchema
+        schema = tools[tool_name].input_schema
         assert "session_id" in schema.get("required", []), tool_name
         assert "kcl_code" not in schema.get("properties", {}), tool_name
 
@@ -339,9 +343,7 @@ async def test_snapshot_tool_forwards_session_and_zoom(
         arguments={"session_id": "session-id", "max_image_dimension": 256},
     )
 
-    assert isinstance(response, Sequence)
-    content = response[0]
-    assert isinstance(content, list)
+    content = _content_list(response)
     assert len(content) == 1
     assert isinstance(content[0], ImageContent)
     mock.assert_called_once_with(
@@ -539,9 +541,7 @@ async def test_snapshot_tool_returns_image_when_output_path_omitted(
 
     response = await mcp.call_tool("snapshot", arguments={"session_id": "session-id"})
 
-    assert isinstance(response, Sequence)
-    content = response[0]
-    assert isinstance(content, list)
+    content = _content_list(response)
     assert isinstance(content[0], ImageContent)
 
 

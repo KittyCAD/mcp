@@ -68,10 +68,10 @@ one MCP server per agent, each agent in a sense "embeds" the server in their own
 runtime. It has the additional benefit of preventing shared state.
 
 ```python
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from zoo_mcp.zoo_tools import zoo_execute_kcl
 
-mcp = FastMCP(name="My Example Server")
+mcp = MCPServer(name="My Example Server")
 
 
 @mcp.tool()

@@ -82,7 +82,7 @@ from kittycad.models.ok_modeling_cmd_response import (
     OptionSetSelectionFilter as ResponseSetSelectionFilter,
 )
 from kittycad.models.uuid import Uuid
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ImageContent
 
 from zoo_mcp import ZooMCPException, logger
@@ -170,7 +170,7 @@ async def _ensure_kcl_indexes() -> None:
 
 
 @asynccontextmanager
-async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
+async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
     """Eagerly start index population when the server starts.
 
     Tools still ``await _ensure_kcl_indexes()`` so they wait for completion
@@ -190,7 +190,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
         KCLSamples._instance = None
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     name="Zoo MCP Server",
     log_level="INFO",
     lifespan=_lifespan,

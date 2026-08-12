@@ -3,7 +3,7 @@ import io
 import tempfile
 from pathlib import Path
 
-from mcp.server.fastmcp.utilities.types import Image
+from mcp.server.mcpserver.utilities.types import Image
 from mcp.types import ImageContent
 from PIL import Image as PILImage
 
