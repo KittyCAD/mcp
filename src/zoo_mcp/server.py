@@ -1,6 +1,9 @@
 import asyncio
+import atexit
+import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import FrameType
 
 from kittycad.models import (
     CameraMovement,
@@ -1635,8 +1638,27 @@ async def get_kcl_sample(sample_name: str) -> SampleData | str:
         return f"There was an error retrieving KCL sample: {e}"
 
 
+def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:
+    """Turn a termination signal into the interrupt the server unwinds on."""
+    logger.info("Received signal %s, shutting down MCP server...", signum)
+    raise KeyboardInterrupt
+
+
+def install_shutdown_handlers() -> None:
+    """Make the server close its modeling sessions on the way out."""
+    try:
+        signal.signal(signal.SIGTERM, _shutdown_on_signal)
+    except ValueError:
+        # Only the main thread may install handlers; elsewhere the embedding
+        # application owns signal disposition.
+        logger.debug("Not on the main thread, leaving signal handlers alone")
+
+    atexit.register(zoo_stop_all_modeling_sessions)
+
+
 def main():
     logger.info("Starting MCP server...")
+    install_shutdown_handlers()
     mcp.run(transport="stdio")
 
 
