@@ -1091,7 +1091,8 @@ async def snapshot(
     max_image_dimension: int = 512,
     zoom: bool = True,
     highlight_edges: bool = False,
-) -> ImageContent:
+    output_path: str | None = None,
+) -> ImageContent | str:
     """Take a snapshot of a KCL model or the current modeling session.
 
     Provide kcl_code or kcl_path to execute a model in a temporary scene. To
@@ -1111,21 +1112,24 @@ async def snapshot(
         highlight_edges: Whether rendered edges should be outlined. Default is
                          False so that entities highlighted with
                          highlight_set_entities are obvious in the image.
+        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
 
     Returns:
-        ImageContent: A JPEG snapshot of the current scene.
+        ImageContent | str: The snapshot as an inline image when output_path is
+                            omitted; otherwise the absolute path to the saved file.
     """
     logger.info("snapshot tool called")
-    return encode_image(
-        zoo_snapshot(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            session_id=session_id,
-            max_image_dimension=max_image_dimension,
-            zoom=zoom,
-            highlight_edges=highlight_edges,
-        )
+    image = zoo_snapshot(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        session_id=session_id,
+        max_image_dimension=max_image_dimension,
+        zoom=zoom,
+        highlight_edges=highlight_edges,
     )
+    if output_path is not None:
+        return save_image_bytes_to_disk(image, output_path)
+    return encode_image(image)
 
 
 @mcp.tool()

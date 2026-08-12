@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -332,6 +333,54 @@ async def test_snapshot_tool_forwards_session_and_zoom(
         arguments={"session_id": "session-id", "highlight_edges": True},
     )
     assert mock.call_args.kwargs["highlight_edges"] is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tool_writes_to_output_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    """output_path returns the saved path instead of an inline image."""
+    monkeypatch.setattr(server, "zoo_snapshot", MagicMock(return_value=b"jpeg-bytes"))
+    output_path = tmp_path / "snap.jpg"
+
+    response = await mcp.call_tool(
+        "snapshot",
+        arguments={"session_id": "session-id", "output_path": str(output_path)},
+    )
+
+    result = _result(response)
+    assert Path(result) == output_path.resolve()
+    assert output_path.read_bytes() == b"jpeg-bytes"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tool_output_path_accepts_a_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+):
+    monkeypatch.setattr(server, "zoo_snapshot", MagicMock(return_value=b"jpeg-bytes"))
+
+    response = await mcp.call_tool(
+        "snapshot",
+        arguments={"session_id": "session-id", "output_path": str(tmp_path)},
+    )
+
+    result = _result(response)
+    assert Path(result) == (tmp_path / "image.jpg").resolve()
+    assert (tmp_path / "image.jpg").read_bytes() == b"jpeg-bytes"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tool_returns_image_when_output_path_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(server, "zoo_snapshot", MagicMock(return_value=b"jpeg-bytes"))
+
+    response = await mcp.call_tool("snapshot", arguments={"session_id": "session-id"})
+
+    assert isinstance(response, Sequence)
+    content = response[0]
+    assert isinstance(content, list)
+    assert isinstance(content[0], ImageContent)
 
 
 @pytest.mark.asyncio
