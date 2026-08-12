@@ -3,6 +3,26 @@ from pathlib import Path
 
 import pytest
 
+# Modules whose tests open engine websockets. Concurrent engine connections make
+# the engine drop sockets (surfacing as "received 1005"), so they all share one
+# xdist group and run on a single worker.
+_ENGINE_TEST_MODULES = frozenset(
+    {
+        "test_server",
+        "test_snapshot_edge_visibility",
+    }
+)
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        module = item.module.__name__.rsplit(".", 1)[-1] if item.module else ""
+        if module not in _ENGINE_TEST_MODULES:
+            continue
+        if any(mark.name == "xdist_group" for mark in item.iter_markers()):
+            continue
+        item.add_marker(pytest.mark.xdist_group(name="engine"))
+
 
 @pytest.fixture
 def cube_kcl():

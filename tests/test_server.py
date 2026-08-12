@@ -456,7 +456,7 @@ async def test_execute_kcl_error():
 def test_exec_kcl_project_extracts_artifact_graph():
     raw_socket = MagicMock()
 
-    def recv():
+    def recv(timeout: float | None = None):
         request = json.loads(raw_socket.send.call_args.args[0])
         return json.dumps(
             {
@@ -2034,6 +2034,37 @@ async def test_list_org_datasets_empty_when_404(monkeypatch: pytest.MonkeyPatch)
     response = await mcp.call_tool("list_org_datasets", arguments={})
     result = _meta_result(response)
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_org_datasets_empty_when_fallback_hits_404(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Schema drift plus a 404 must still be empty, not an uncaught client error."""
+    with pytest.raises(ValueError) as exc_info:
+        OrgDataset.model_validate({"status": "paused"})
+
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kittycad_client.orgs,
+        "list_org_datasets",
+        MagicMock(side_effect=exc_info.value),
+    )
+    http_client = MagicMock()
+    http_client.get.return_value = SimpleNamespace(is_success=False)
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kittycad_client,
+        "get_http_client",
+        MagicMock(return_value=http_client),
+    )
+    monkeypatch.setattr(
+        "kittycad.response_helpers.raise_for_status",
+        MagicMock(
+            side_effect=KittyCADClientError(message="No org found", status_code=404)
+        ),
+    )
+
+    response = await mcp.call_tool("list_org_datasets", arguments={})
+    assert _meta_result(response) == []
 
 
 @pytest.mark.asyncio
