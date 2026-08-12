@@ -18,6 +18,7 @@ from kittycad.models.modeling_cmd import (
     OptionViewIsometric,
     OptionZoomToFit,
 )
+from kittycad.models.modeling_session_data import ModelingSessionData
 from kittycad.models.ok_modeling_cmd_response import (
     OkModelingCmdResponse,
 )
@@ -26,8 +27,10 @@ from kittycad.models.ok_modeling_cmd_response import (
 )
 from kittycad.models.ok_web_socket_response_data import (
     ModelingData,
+    ModelingSessionDataData,
     OkWebSocketResponseData,
     OptionModeling,
+    OptionModelingSessionData,
 )
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
@@ -106,6 +109,47 @@ def test_send_modeling_command_skips_another_commands_failure_frame():
             request = websocket.send.call_args.args[0].root
             frames.append(
                 _failure_frame("00000000-0000-0000-0000-000000000000", "stale error")
+            )
+            frames.append(_ok_frame(request.cmd_id, expected_response))
+        return frames.pop(0)
+
+    websocket.recv.side_effect = recv
+
+    result = zoo_tools._send_modeling_command(
+        cast(Any, websocket),
+        ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
+        ResponseEntityGetIndex,
+        "entity index",
+    )
+
+    assert result == expected_response
+
+
+def test_send_modeling_command_skips_unsolicited_session_frames():
+    """A live session interleaves informational frames that carry no request_id."""
+    websocket = MagicMock()
+    expected_response = ResponseEntityGetIndex(data=EntityGetIndex(entity_index=9))
+    frames: list[SimpleNamespace] = []
+
+    def recv() -> SimpleNamespace:
+        if not frames:
+            request = websocket.send.call_args.args[0].root
+            frames.append(
+                SimpleNamespace(
+                    root=SuccessWebSocketResponse(
+                        request_id=None,
+                        resp=OkWebSocketResponseData(
+                            OptionModelingSessionData(
+                                data=ModelingSessionDataData(
+                                    session=ModelingSessionData(
+                                        api_call_id="api-call-id"
+                                    )
+                                )
+                            )
+                        ),
+                        success=True,
+                    )
+                )
             )
             frames.append(_ok_frame(request.cmd_id, expected_response))
         return frames.pop(0)

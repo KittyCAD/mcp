@@ -2422,14 +2422,19 @@ def zoo_face_info(
 
             # Match on request_id first; see _send_modeling_command.
             request_id = getattr(message, "request_id", None)
-            if request_id is not None and request_id not in {
+            expected_ids = {
                 cmd_id_face_get_position,
                 cmd_id_face_get_gradient,
                 cmd_id_face_get_center,
-            }:
-                continue
+            }
+
             if not isinstance(message, SuccessWebSocketResponse):
-                raise ZooMCPException(_format_websocket_failure(message))
+                if request_id is None or request_id in expected_ids:
+                    raise ZooMCPException(_format_websocket_failure(message))
+                continue
+
+            if request_id not in expected_ids:
+                continue
 
             response = message.resp.root
             if not isinstance(response, OptionModeling):
@@ -2496,15 +2501,21 @@ def _send_modeling_command(
     while True:
         message = ws.recv().root
 
-        # Match on request_id before judging success: a persistent session can
-        # still hold frames for earlier commands, and failing this command on
-        # another command's error frame reports a bogus cause. A failure with no
-        # request_id is connection-level and does apply to us.
         request_id = getattr(message, "request_id", None)
-        if request_id is not None and request_id != command_id:
-            continue
+
         if not isinstance(message, SuccessWebSocketResponse):
-            raise ZooMCPException(_format_websocket_failure(message))
+            # Only raise on a failure that is actually ours. A failure carrying
+            # no request_id is connection-level so it does apply; one for
+            # another command is stale and would report a bogus cause here.
+            if request_id is None or request_id == command_id:
+                raise ZooMCPException(_format_websocket_failure(message))
+            continue
+
+        # Successes must match exactly. A persistent session also carries
+        # unsolicited informational frames (session data, ICE) with no
+        # request_id, and those are not responses to this command.
+        if request_id != command_id:
+            continue
 
         response = message.resp.root
         if not isinstance(response, OptionModeling):
