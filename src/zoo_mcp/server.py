@@ -1,8 +1,10 @@
 import asyncio
+import atexit
+import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import FrameType
 
-import kcl
 from kittycad.models import (
     CameraMovement,
     CurveGetEndPoints,
@@ -39,7 +41,6 @@ from kittycad.models.modeling_cmd import (
     OptionHighlightSetEntities,
     OptionSelectReplace,
     OptionSetSelectionFilter,
-    Point3d,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionCurveGetEndPoints as ResponseCurveGetEndPoints,
@@ -126,14 +127,8 @@ from zoo_mcp.zoo_tools import (
     zoo_list_org_datasets,
     zoo_list_org_skills,
     zoo_mock_execute_kcl,
-    zoo_multi_isometric_snapshot_of_cad,
-    zoo_multi_isometric_snapshot_of_kcl,
-    zoo_multiview_snapshot_of_cad,
-    zoo_multiview_snapshot_of_kcl,
     zoo_search_org_dataset_semantic,
     zoo_snapshot,
-    zoo_snapshot_of_cad,
-    zoo_snapshot_of_kcl,
     zoo_start_modeling_session,
     zoo_stop_all_modeling_sessions,
     zoo_stop_modeling_session,
@@ -768,6 +763,13 @@ async def select_entities(
     overrides the highlight. Follow with `snapshot` (passing zoom=False to keep
     the current camera) to see the result.
 
+    Selections draw through the solid. An entity facing away from the camera
+    still renders tinted, seen through the body, so a tinted entity in a
+    snapshot is not evidence that it faces the camera: an occluded edge shows
+    up as an interior diagonal rather than on the silhouette, and an occluded
+    face looks washed out rather than solid. Pick a camera on the same side as
+    the entity to see it properly.
+
     Args:
         entity_ids: Entity UUIDs to select; pass an empty list to clear the selection.
         session_id: An open modeling session, from start_modeling_session. Required:
@@ -846,6 +848,11 @@ async def highlight_set_entities(
     selection overrides the highlight. An edge is a pixel or two wide whichever
     you choose, so also consider center_camera_on_selection or a larger
     max_image_dimension to make one legible.
+
+    Highlights draw through the solid, so an entity facing away from the camera
+    still renders, seen through the body. A highlighted entity in a snapshot is
+    therefore not evidence that it faces the camera; choose a camera on the same
+    side as the entity to see it properly.
 
     Args:
         entity_ids: Entity UUIDs to highlight; pass an empty list to clear highlights.
@@ -1136,47 +1143,181 @@ async def entity_get_sketch_paths(
     ).data
 
 
+# Shorthands for the two view sets worth asking for by name. Each tiles into a
+# 2x2 collage in the order listed.
+_CAMERA_VIEW_PRESETS: dict[str, list[str]] = {
+    "multiview": ["front", "right", "top", "isometric"],
+    "multi_isometric": [
+        "isometric_front_right",
+        "isometric_front_left",
+        "isometric_back_right",
+        "isometric_back_left",
+    ],
+}
+
+# One snapshot per view on a 2x2 grid; more would not fit the collage.
+_MAX_CAMERA_VIEWS = 4
+
+
+def _resolve_camera_view(
+    view: str | dict[str, list[float]],
+) -> OptionDefaultCameraLookAt:
+    """Turn a single named or explicit camera view into a modeling command.
+
+    Named and explicit views share one conversion so the two paths cannot
+    disagree about the coordinate frame.
+    """
+    if isinstance(view, dict):
+        try:
+            return CameraView.to_kittycad_camera(view)
+        except (KeyError, IndexError, TypeError) as e:
+            raise ZooMCPException(
+                f"Invalid camera view {view}: expected 'up', 'vantage' and "
+                f"'center' keys, each a list of 3 numbers ({e})"
+            ) from e
+
+    if view not in CameraView.views.value:
+        raise ZooMCPException(
+            f"Invalid camera view: {view}. Must be one of "
+            f"{list(CameraView.views.value.keys())}"
+        )
+    return CameraView.to_kittycad_camera(CameraView.views.value[view])
+
+
+def _resolve_camera_views(
+    camera_view: str
+    | dict[str, list[float]]
+    | list[str | dict[str, list[float]]]
+    | None,
+) -> list[OptionDefaultCameraLookAt] | None:
+    """Expand the camera_view argument into the list of views to capture.
+
+    None means the scene's own framing decides, which zoo_snapshot renders
+    isometrically when zooming and leaves alone otherwise.
+    """
+    if camera_view is None:
+        return None
+
+    if isinstance(camera_view, str) and camera_view in _CAMERA_VIEW_PRESETS:
+        requested: list[str | dict[str, list[float]]] = list(
+            _CAMERA_VIEW_PRESETS[camera_view]
+        )
+    elif isinstance(camera_view, list):
+        requested = camera_view
+    else:
+        requested = [camera_view]
+
+    if not requested:
+        return None
+    if len(requested) > _MAX_CAMERA_VIEWS:
+        raise ZooMCPException(
+            f"At most {_MAX_CAMERA_VIEWS} camera views can be captured at "
+            f"once, got {len(requested)}"
+        )
+    return [_resolve_camera_view(view) for view in requested]
+
+
 @mcp.tool()
 async def snapshot(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
+    input_file: str | None = None,
     session_id: str | None = None,
-    max_image_dimension: int = 512,
+    camera_view: str
+    | dict[str, list[float]]
+    | list[str | dict[str, list[float]]]
+    | None = None,
     zoom: bool = True,
     highlight_edges: bool = False,
+    max_image_dimension: int = 512,
+    padding: float = 0.1,
     output_path: str | None = None,
 ) -> ImageContent | str:
-    """Take a snapshot of a KCL model or the current modeling session.
+    """Render a KCL model, a CAD file, or an open modeling session as an image.
 
-    Provide kcl_code or kcl_path to execute a model in a temporary scene. To
-    capture an existing scene without re-executing KCL, provide the session_id
-    returned by start_modeling_session. The camera always uses an orthographic
-    projection.
+    Provide exactly one source: kcl_code or kcl_path to execute a model in a
+    temporary scene, input_file to import an existing CAD file, or session_id
+    to capture a scene already open via start_modeling_session without
+    re-executing anything. The camera always uses an orthographic projection,
+    so measurements read off the image are not distorted by perspective.
 
     Args:
         kcl_code: KCL code defining the model.
         kcl_path: A .kcl file or project directory containing main.kcl.
+        input_file: A CAD file to import. One of .fbx, .gltf, .obj, .ply,
+                    .sldprt, .step, .stp, .stl (case-insensitive).
         session_id: An open modeling session to capture.
-        max_image_dimension: Maximum width or height of the returned JPEG.
-        zoom: Point the camera isometrically and zoom to fit before capturing.
-              Leave True unless you have positioned the session's camera
-              yourself; a freshly executed scene is not framed, so zoom=False
-              renders the model only a few pixels wide.
+        camera_view: Which view or views to capture. Omit it for a single
+                     isometric view. Otherwise one of:
+
+            1. A named view: 'front', 'back', 'left', 'right', 'top',
+               'bottom', 'isometric', 'isometric_front_right',
+               'isometric_front_left', 'isometric_back_right',
+               'isometric_back_left'.
+
+               A named view puts the camera on that axis looking back at the
+               origin, matching the app's standard views: 'front' is -Y,
+               'back' is +Y, 'left' is -X, 'right' is +X, 'top' is +Z and
+               'bottom' is -Z.
+
+               So 'front' shows the face whose outward normal is -Y. The four
+               isometric views all look down from above, from (+X, -Y, +Z)
+               for 'isometric_front_right', (-X, -Y, +Z) for
+               'isometric_front_left', (+X, +Y, +Z) for
+               'isometric_back_right' and (-X, +Y, +Z) for
+               'isometric_back_left'. Plain 'isometric' is front-right.
+
+            2. A dict with "up", "vantage" and "center" keys, each a list of 3
+               floats in model space: "vantage" is the camera position and
+               "center" the point it looks at. For example
+               {"up": [0, 0, 1], "vantage": [0, -1, 0], "center": [0, 0, 0]}
+               looks at the origin from the front, showing the -Y face.
+
+               With zoom=True only the direction from "center" to "vantage"
+               matters, because zooming to fit sets the distance: [0, -1, 0]
+               and [0, -200, 0] frame identically. "up" must not be parallel
+               to that direction.
+
+            3. 'multiview' for a 2x2 collage of front (top left), right (top
+               right), top (bottom left) and isometric (bottom right).
+
+            4. 'multi_isometric' for a 2x2 collage of the front-right (top
+               left), front-left (top right), back-right (bottom left) and
+               back-left (bottom right) isometric views.
+
+            5. A list of up to 4 names and/or dicts, tiled in the order given.
+
+        zoom: Zoom to fit before capturing each view. Leave True unless you
+              have positioned the session's camera yourself; a freshly
+              executed scene is not framed, so zoom=False renders the model
+              only a few pixels wide.
         highlight_edges: Whether rendered edges should be outlined. Default is
                          False so that entities highlighted with
                          highlight_set_entities are obvious in the image.
-        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
+        max_image_dimension: Maximum width or height of the returned JPEG.
+        padding: Fraction of the frame left as margin when zooming to fit.
+        output_path: If provided, the snapshot is written to disk and the
+                     absolute file path is returned instead of the image. May
+                     be a file path (e.g. '/path/to/image.jpg') or a directory
+                     (in which case the file is named 'image.jpg'). If
+                     omitted, the image is returned inline as an ImageContent.
+                     The file is always JPEG data whatever extension is given,
+                     so prefer '.jpg' to avoid writing a JPEG named '.png'.
 
     Returns:
         ImageContent | str: The snapshot as an inline image when output_path is
                             omitted; otherwise the absolute path to the saved file.
     """
     logger.info("snapshot tool called")
+
     image = zoo_snapshot(
         kcl_code=kcl_code,
         kcl_path=kcl_path,
+        input_file=input_file,
         session_id=session_id,
+        views=_resolve_camera_views(camera_view),
         max_image_dimension=max_image_dimension,
+        padding=padding,
         zoom=zoom,
         highlight_edges=highlight_edges,
     )
@@ -1237,302 +1378,6 @@ async def mock_execute_kcl(
 
 
 @mcp.tool()
-async def multiview_snapshot_of_cad(
-    input_file: str,
-    zoom: bool = True,
-    output_path: str | None = None,
-) -> ImageContent | str:
-    """Save a multiview snapshot of a CAD file. The input file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-
-    This multiview image shows the render of the model from 4 different views:
-        The top left images is a front view.
-        The top right image is a right side view.
-        The bottom left image is a top view.
-        The bottom right image is an isometric view
-
-    Args:
-        input_file (str): The path of the file to get the mass from. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-        zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
-        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
-
-    Returns:
-        ImageContent | str: The multiview snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
-    """
-
-    logger.info("multiview_snapshot_of_cad tool called for file: %s", input_file)
-
-    try:
-        image = zoo_multiview_snapshot_of_cad(
-            input_path=input_file,
-            zoom=zoom,
-        )
-        if output_path is not None:
-            return save_image_bytes_to_disk(image, output_path)
-        return encode_image(image)
-    except Exception as e:
-        return f"There was an error creating the multiview snapshot: {e}"
-
-
-@mcp.tool()
-async def multiview_snapshot_of_kcl(
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    zoom: bool = True,
-    output_path: str | None = None,
-    highlight_edges: bool = False,
-) -> ImageContent | str:
-    """Save a multiview snapshot of KCL code. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
-
-    This multiview image shows the render of the model from 4 different views:
-        The top left images is a front view.
-        The top right image is a right side view.
-        The bottom left image is a top view.
-        The bottom right image is an isometric view
-
-    Args:
-        kcl_code (str | None): The KCL code to export to a CAD file.
-        kcl_path (str | None): The path to a KCL file to export to a CAD file. The path should point to a .kcl file or a directory containing a main.kcl file.
-        zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
-        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
-        highlight_edges (bool): Whether rendered edges should be highlighted. Default is False.
-
-    Returns:
-        ImageContent | str: The multiview snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
-    """
-
-    logger.info("multiview_snapshot_of_kcl tool called")
-
-    try:
-        image = await zoo_multiview_snapshot_of_kcl(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            zoom=zoom,
-            highlight_edges=highlight_edges,
-        )
-        if output_path is not None:
-            return save_image_bytes_to_disk(image, output_path)
-        return encode_image(image)
-    except Exception as e:
-        return f"There was an error creating the multiview snapshot: {e}"
-
-
-@mcp.tool()
-async def multi_isometric_snapshot_of_cad(
-    input_file: str,
-    zoom: bool = True,
-    output_path: str | None = None,
-) -> ImageContent | str:
-    """Save a multi-isometric snapshot of a CAD file showing 4 isometric views. The input file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-
-    This multi-isometric image shows the render of the model from 4 different isometric views:
-        The top left image is an isometric view from the front-right corner.
-        The top right image is an isometric view from the front-left corner.
-        The bottom left image is an isometric view from the back-right corner.
-        The bottom right image is an isometric view from the back-left corner.
-
-    Args:
-        input_file (str): The path of the file to snapshot. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-        zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
-        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
-
-    Returns:
-        ImageContent | str: The multi-isometric snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
-    """
-
-    logger.info("multi_isometric_snapshot_of_cad tool called for file: %s", input_file)
-
-    try:
-        image = zoo_multi_isometric_snapshot_of_cad(
-            input_path=input_file,
-            zoom=zoom,
-        )
-        if output_path is not None:
-            return save_image_bytes_to_disk(image, output_path)
-        return encode_image(image)
-    except Exception as e:
-        return f"There was an error creating the multi-isometric snapshot: {e}"
-
-
-@mcp.tool()
-async def multi_isometric_snapshot_of_kcl(
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    zoom: bool = True,
-    output_path: str | None = None,
-    highlight_edges: bool = False,
-) -> ImageContent | str:
-    """Save a multi-isometric snapshot of KCL code showing 4 isometric views. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
-
-    This multi-isometric image shows the render of the model from 4 different isometric views:
-        The top left image is an isometric view from the front-right corner.
-        The top right image is an isometric view from the front-left corner.
-        The bottom left image is an isometric view from the back-right corner.
-        The bottom right image is an isometric view from the back-left corner.
-
-    Args:
-        kcl_code (str | None): The KCL code to export to a CAD file.
-        kcl_path (str | None): The path to a KCL file to export to a CAD file. The path should point to a .kcl file or a directory containing a main.kcl file.
-        zoom (bool): Whether to zoom-to-fit the model before each snapshot. Default is True.
-        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
-        highlight_edges (bool): Whether rendered edges should be highlighted. Default is False.
-
-    Returns:
-        ImageContent | str: The multi-isometric snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
-    """
-
-    logger.info("multi_isometric_snapshot_of_kcl tool called")
-
-    try:
-        image = await zoo_multi_isometric_snapshot_of_kcl(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            zoom=zoom,
-            highlight_edges=highlight_edges,
-        )
-        if output_path is not None:
-            return save_image_bytes_to_disk(image, output_path)
-        return encode_image(image)
-    except Exception as e:
-        return f"There was an error creating the multi-isometric snapshot: {e}"
-
-
-@mcp.tool()
-async def snapshot_of_cad(
-    input_file: str,
-    camera_view: dict[str, list[float]] | str = "isometric",
-    zoom: bool = True,
-    output_path: str | None = None,
-) -> ImageContent | str:
-    """Save a snapshot of a CAD file.
-
-    Args:
-        input_file (str): The path of the file to get the mass from. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-        camera_view (dict | str): The camera to use for the snapshot.
-
-            1. If a string is provided, it should be one of 'front', 'back', 'left', 'right', 'top', 'bottom', 'isometric', 'isometric_front_right', 'isometric_front_left', 'isometric_back_right', 'isometric_back_left' to set the camera to a predefined view.
-
-            2. If a dict is provided, supply a dict with the following keys and values:
-               "up" (list of 3 floats) defining the up vector of the camera, "vantage" (list of 3 floats), and "center" (list of 3 floats).
-               For example camera = {"up": [0, 0, 1], "vantage": [0, -1, 0], "center": [0, 0, 0]} would set the camera to be looking at the origin from the front side (-y direction).
-        zoom (bool): Whether to zoom-to-fit the model before the snapshot. Default is True.
-        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
-
-    Returns:
-        ImageContent | str: The snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
-    """
-
-    logger.info("snapshot_of_cad tool called for file: %s", input_file)
-
-    try:
-        if isinstance(camera_view, dict):
-            camera = OptionDefaultCameraLookAt(
-                up=Point3d(
-                    x=camera_view["up"][0],
-                    y=camera_view["up"][1],
-                    z=camera_view["up"][2],
-                ),
-                vantage=Point3d(
-                    x=camera_view["vantage"][0],
-                    y=-camera_view["vantage"][1],
-                    z=camera_view["vantage"][2],
-                ),
-                center=Point3d(
-                    x=camera_view["center"][0],
-                    y=camera_view["center"][1],
-                    z=camera_view["center"][2],
-                ),
-            )
-        else:
-            if camera_view not in CameraView.views.value:
-                raise ZooMCPException(
-                    f"Invalid camera view: {camera_view}. Must be one of {list(CameraView.views.value.keys())}"
-                )
-            camera = CameraView.to_kittycad_camera(CameraView.views.value[camera_view])
-
-        image = zoo_snapshot_of_cad(
-            input_path=input_file,
-            camera=camera,
-            zoom=zoom,
-        )
-        if output_path is not None:
-            return save_image_bytes_to_disk(image, output_path)
-        return encode_image(image)
-    except Exception as e:
-        return f"There was an error creating the snapshot: {e}"
-
-
-@mcp.tool()
-async def snapshot_of_kcl(
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    camera_view: dict[str, list[float]] | str = "isometric",
-    zoom: bool = True,
-    output_path: str | None = None,
-    highlight_edges: bool = False,
-) -> ImageContent | str:
-    """Save a snapshot of a model represented by KCL. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
-
-    Args:
-        kcl_code (str | None): The KCL code to export to a CAD file.
-        kcl_path (str | None): The path to a KCL file to export to a CAD file. The path should point to a .kcl file or a directory containing a main.kcl file.
-        camera_view (dict | str): The camera to use for the snapshot.
-
-            1. If a string is provided, it should be one of 'front', 'back', 'left', 'right', 'top', 'bottom', 'isometric', 'isometric_front_right', 'isometric_front_left', 'isometric_back_right', 'isometric_back_left' to set the camera to a predefined view.
-
-            2. If a dict is provided, supply a dict with the following keys and values:
-               "up" (list of 3 floats) defining the up vector of the camera, "vantage" (list of 3 floats), and "center" (list of 3 floats).
-               For example camera = {"up": [0, 0, 1], "vantage": [0, -1, 0], "center": [0, 0, 0]} would set the camera to be looking at the origin from the front side (-y direction).
-        zoom (bool): Whether to zoom-to-fit the model before the snapshot. Default is True.
-        output_path (str | None): If provided, the snapshot is written to disk and the absolute file path is returned instead of the image. May be a file path (e.g. '/path/to/image.jpg') or a directory (in which case the file is named 'image.jpg'). If omitted, the image is returned inline as an ImageContent.
-        highlight_edges (bool): Whether rendered edges should be highlighted. Default is False.
-
-    Returns:
-        ImageContent | str: The snapshot as an inline image when output_path is omitted; otherwise the absolute path to the saved file. Returns an error message string if the operation fails.
-    """
-
-    logger.info("snapshot_of_kcl tool called")
-
-    try:
-        if isinstance(camera_view, dict):
-            camera = kcl.CameraLookAt(
-                up=kcl.Point3d(
-                    x=camera_view["up"][0],
-                    y=camera_view["up"][1],
-                    z=camera_view["up"][2],
-                ),
-                vantage=kcl.Point3d(
-                    x=camera_view["vantage"][0],
-                    y=-camera_view["vantage"][1],
-                    z=camera_view["vantage"][2],
-                ),
-                center=kcl.Point3d(
-                    x=camera_view["center"][0],
-                    y=camera_view["center"][1],
-                    z=camera_view["center"][2],
-                ),
-            )
-        else:
-            if camera_view not in CameraView.views.value:
-                raise ZooMCPException(
-                    f"Invalid camera view: {camera_view}. Must be one of {list(CameraView.views.value.keys())}"
-                )
-            camera = CameraView.to_kcl_camera(CameraView.views.value[camera_view])
-
-        image = await zoo_snapshot_of_kcl(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            camera=camera,
-            zoom=zoom,
-            highlight_edges=highlight_edges,
-        )
-        if output_path is not None:
-            return save_image_bytes_to_disk(image, output_path)
-        return encode_image(image)
-    except Exception as e:
-        return f"There was an error creating the snapshot: {e}"
-
-
-@mcp.tool()
 async def save_image(
     image: ImageContent,
     output_path: str | None = None,
@@ -1540,7 +1385,7 @@ async def save_image(
     """Save an ImageContent object to disk. This allows a human to review images locally that an LLM has requested.
 
     Args:
-        image (ImageContent): The ImageContent object to save. This is typically returned by snapshot tools like snapshot_of_kcl, snapshot_of_cad, multiview_snapshot_of_kcl, or multiview_snapshot_of_cad.
+        image (ImageContent): The ImageContent object to save. This is typically returned by the snapshot tool. Note that snapshot can write straight to disk via its own output_path argument; this tool is for images you already hold.
         output_path (str | None): The path where the image should be saved. Can be a file path (e.g., '/path/to/image.jpg') or a directory (e.g., '/path/to/dir'). If a directory is provided, the file will be named 'image.jpg'. If not provided, a temporary file will be created.
 
     Returns:
@@ -1811,8 +1656,27 @@ async def get_kcl_sample(sample_name: str) -> SampleData | str:
         return f"There was an error retrieving KCL sample: {e}"
 
 
+def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:
+    """Turn a termination signal into the interrupt the server unwinds on."""
+    logger.info("Received signal %s, shutting down MCP server...", signum)
+    raise KeyboardInterrupt
+
+
+def install_shutdown_handlers() -> None:
+    """Make the server close its modeling sessions on the way out."""
+    try:
+        signal.signal(signal.SIGTERM, _shutdown_on_signal)
+    except ValueError:
+        # Only the main thread may install handlers; elsewhere the embedding
+        # application owns signal disposition.
+        logger.debug("Not on the main thread, leaving signal handlers alone")
+
+    atexit.register(zoo_stop_all_modeling_sessions)
+
+
 def main():
     logger.info("Starting MCP server...")
+    install_shutdown_handlers()
     mcp.run(transport="stdio")
 
 

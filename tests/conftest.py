@@ -6,12 +6,7 @@ import pytest
 # Modules whose tests open engine websockets. Concurrent engine connections make
 # the engine drop sockets (surfacing as "received 1005"), so they all share one
 # xdist group and run on a single worker.
-_ENGINE_TEST_MODULES = frozenset(
-    {
-        "test_server",
-        "test_snapshot_edge_visibility",
-    }
-)
+_ENGINE_TEST_MODULES = frozenset({"test_server"})
 
 
 def pytest_collection_modifyitems(items):

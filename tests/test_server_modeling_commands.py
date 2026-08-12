@@ -42,6 +42,7 @@ from mcp.types import ImageContent
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
+from zoo_mcp.zoo_tools import CameraView
 
 
 def _result(response: Sequence[Any] | dict[str, Any]) -> Any:
@@ -346,8 +347,11 @@ async def test_snapshot_tool_forwards_session_and_zoom(
     mock.assert_called_once_with(
         kcl_code=None,
         kcl_path=None,
+        input_file=None,
         session_id="session-id",
+        views=None,
         max_image_dimension=256,
+        padding=0.1,
         zoom=True,
         highlight_edges=False,
     )
@@ -363,6 +367,134 @@ async def test_snapshot_tool_forwards_session_and_zoom(
         arguments={"session_id": "session-id", "highlight_edges": True},
     )
     assert mock.call_args.kwargs["highlight_edges"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("camera_view", "expected_views"),
+    [
+        (None, None),
+        ("front", ["front"]),
+        (["front", "top"], ["front", "top"]),
+        ("multiview", ["front", "right", "top", "isometric"]),
+        (
+            "multi_isometric",
+            [
+                "isometric_front_right",
+                "isometric_front_left",
+                "isometric_back_right",
+                "isometric_back_left",
+            ],
+        ),
+    ],
+    ids=["default", "named", "list", "multiview", "multi_isometric"],
+)
+async def test_snapshot_tool_resolves_camera_views(
+    monkeypatch: pytest.MonkeyPatch,
+    camera_view: object,
+    expected_views: list[str] | None,
+):
+    mock = MagicMock(return_value=b"jpeg")
+    monkeypatch.setattr(server, "zoo_snapshot", mock)
+
+    arguments: dict[str, Any] = {"session_id": "session-id"}
+    if camera_view is not None:
+        arguments["camera_view"] = camera_view
+    await mcp.call_tool("snapshot", arguments=arguments)
+
+    views = mock.call_args.kwargs["views"]
+    if expected_views is None:
+        assert views is None
+    else:
+        assert views == [
+            CameraView.to_kittycad_camera(CameraView.views.value[name])
+            for name in expected_views
+        ]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_vantage"),
+    [
+        ("front", (0.0, -1.0, 0.0)),
+        ("back", (0.0, 1.0, 0.0)),
+        ("left", (-1.0, 0.0, 0.0)),
+        ("right", (1.0, 0.0, 0.0)),
+        ("top", (0.0, 0.0, 1.0)),
+        ("bottom", (0.0, 0.0, -1.0)),
+        ("isometric_front_right", (1.0, -1.0, 1.0)),
+        ("isometric_front_left", (-1.0, -1.0, 1.0)),
+        ("isometric_back_right", (1.0, 1.0, 1.0)),
+        ("isometric_back_left", (-1.0, 1.0, 1.0)),
+    ],
+)
+def test_named_views_sit_on_the_expected_axis(
+    name: str,
+    expected_vantage: tuple[float, float, float],
+):
+    """Named views reach the engine on the app's axes, unmirrored.
+
+    'front' must look from -Y so it shows the -Y face, and every isometric
+    must look down from +Z rather than up from below.
+    """
+    view = CameraView.to_kittycad_camera(CameraView.views.value[name])
+
+    assert (view.vantage.x, view.vantage.y, view.vantage.z) == expected_vantage
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tool_accepts_an_explicit_camera(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An explicit camera reaches the engine in the frame the caller gave it."""
+    mock = MagicMock(return_value=b"jpeg")
+    monkeypatch.setattr(server, "zoo_snapshot", mock)
+
+    await mcp.call_tool(
+        "snapshot",
+        arguments={
+            "session_id": "session-id",
+            "camera_view": {
+                "up": [0, 0, 1],
+                "vantage": [0, -1, 0],
+                "center": [0, 0, 0],
+            },
+        },
+    )
+
+    (view,) = mock.call_args.kwargs["views"]
+    assert (view.up.x, view.up.y, view.up.z) == (0, 0, 1)
+    assert (view.vantage.x, view.vantage.y, view.vantage.z) == (0, -1, 0)
+    assert (view.center.x, view.center.y, view.center.z) == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tool_rejects_an_unknown_camera_view():
+    with pytest.raises(ToolError, match="Invalid camera view"):
+        await mcp.call_tool(
+            "snapshot",
+            arguments={"session_id": "session-id", "camera_view": "asdf"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tool_rejects_a_malformed_camera_view():
+    with pytest.raises(ToolError, match="Invalid camera view"):
+        await mcp.call_tool(
+            "snapshot",
+            arguments={"session_id": "session-id", "camera_view": {"hello": [0, 0, 0]}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tool_rejects_more_views_than_fit_a_collage():
+    with pytest.raises(ToolError, match="At most 4 camera views"):
+        await mcp.call_tool(
+            "snapshot",
+            arguments={
+                "session_id": "session-id",
+                "camera_view": ["front", "back", "left", "right", "top"],
+            },
+        )
 
 
 @pytest.mark.asyncio

@@ -7,11 +7,26 @@ from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import ImageContent
 from PIL import Image as PILImage
 
+MAX_COLLAGE_IMAGES = 4
+
 
 def create_image_collage(image_byte_list: list[bytes]) -> bytes:
-    assert len(image_byte_list) == 4, (
-        "Exactly 4 images are required to create a 2x2 collage."
-    )
+    """Tile up to four equally sized images into a single JPEG.
+
+    One image is passed through untouched, two are laid out side by side, and
+    three or four fill a 2x2 grid. The finished grid is scaled back down so its
+    width matches a single tile, keeping the result roughly the size of one
+    view rather than growing with the number of views.
+    """
+    if not image_byte_list:
+        raise ValueError("At least one image is required to create a collage.")
+    if len(image_byte_list) > MAX_COLLAGE_IMAGES:
+        raise ValueError(
+            f"At most {MAX_COLLAGE_IMAGES} images can be tiled into a collage, "
+            f"got {len(image_byte_list)}."
+        )
+    if len(image_byte_list) == 1:
+        return image_byte_list[0]
 
     # Load images
     images = []
@@ -23,24 +38,29 @@ def create_image_collage(image_byte_list: list[bytes]) -> bytes:
     # Verify all are same size
     widths, heights = zip(*(img.size for img in images))
     if len(set(widths)) > 1 or len(set(heights)) > 1:
+        for img in images:
+            img.close()
         raise ValueError("All images must have the same dimensions.")
 
     img_w, img_h = images[0].size
 
-    # Create blank canvas 2x2
-    collage = PILImage.new("RGB", (img_w * 2, img_h * 2))
-    positions = [
-        (0, 0),  # Top-left
-        (img_w, 0),  # Top-right
-        (0, img_h),  # Bottom-left
-        (img_w, img_h),  # Bottom-right
-    ]
+    # Two images sit in a single row; three or four fill a 2x2 grid.
+    columns = 2
+    rows = (len(images) + columns - 1) // columns
 
-    for img, pos in zip(images, positions):
-        collage.paste(img, pos)
+    # An odd count leaves one cell empty. Filling it with the render's own
+    # background colour keeps it from reading as a black panel in the collage.
+    collage = PILImage.new(
+        "RGB", (img_w * columns, img_h * rows), images[0].getpixel((0, 0))
+    )
+    for index, img in enumerate(images):
+        collage.paste(img, ((index % columns) * img_w, (index // columns) * img_h))
 
-    # Scale down by 2x
-    collage = collage.resize((img_w, img_h), PILImage.Resampling.LANCZOS)
+    # Scale the grid back down so one tile's width is the collage's width.
+    collage = collage.resize(
+        (img_w, max(1, round(img_h * rows / columns))),
+        PILImage.Resampling.LANCZOS,
+    )
 
     # Save to bytes
     out = io.BytesIO()
