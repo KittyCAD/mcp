@@ -14,6 +14,7 @@ from kittycad.models import (
 from kittycad.models.api_error import ApiError
 from kittycad.models.failure_web_socket_response import FailureWebSocketResponse
 from kittycad.models.modeling_cmd import (
+    OptionDefaultCameraLookAt,
     OptionDefaultCameraSetOrthographic,
     OptionEdgeLinesVisible,
     OptionEntityGetIndex,
@@ -425,10 +426,16 @@ def test_exec_kcl_project_reads_with_a_timeout(monkeypatch: pytest.MonkeyPatch):
 
 def _capture_snapshot_commands(
     monkeypatch: pytest.MonkeyPatch,
+    object_id: str | None = None,
 ) -> list[ModelingCmd]:
-    """Record the command sequence zoo_snapshot sends, stubbing the transport."""
+    """Record the command sequence zoo_snapshot sends, stubbing the transport.
+
+    ``object_id`` stands in for an imported CAD file; leaving it None gives the
+    KCL/session case, where there is no single object to frame on.
+    """
     commands: list[ModelingCmd] = []
     responses = {
+        zoo_tools.ResponseDefaultCameraLookAt: SimpleNamespace(data=None),
         zoo_tools.ResponseDefaultCameraSetOrthographic: SimpleNamespace(data=None),
         zoo_tools.ResponseViewIsometric: SimpleNamespace(data=None),
         zoo_tools.ResponseZoomToFit: SimpleNamespace(data=None),
@@ -450,10 +457,16 @@ def _capture_snapshot_commands(
     monkeypatch.setattr(zoo_tools, "_send_modeling_command", send_command)
     monkeypatch.setattr(
         zoo_tools,
-        "_modeling_websocket",
-        lambda *args, **kwargs: nullcontext(MagicMock()),
+        "_snapshot_scene",
+        lambda *args, **kwargs: nullcontext((MagicMock(), object_id)),
     )
     return commands
+
+
+def _camera_view(name: str) -> OptionDefaultCameraLookAt:
+    return zoo_tools.CameraView.to_kittycad_camera(
+        zoo_tools.CameraView.views.value[name]
+    )
 
 
 def test_snapshot_frames_the_scene_before_capturing(monkeypatch: pytest.MonkeyPatch):
@@ -462,8 +475,6 @@ def test_snapshot_frames_the_scene_before_capturing(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(zoo_tools, "resize_image", resize)
 
     result = zoo_tools.zoo_snapshot(
-        kcl_code=None,
-        kcl_path=None,
         session_id="session-id",
         max_image_dimension=256,
     )
@@ -471,9 +482,9 @@ def test_snapshot_frames_the_scene_before_capturing(monkeypatch: pytest.MonkeyPa
     assert result == b"resized-jpeg"
     assert [type(command.root) for command in commands] == [
         OptionDefaultCameraSetOrthographic,
+        OptionEdgeLinesVisible,
         OptionViewIsometric,
         OptionZoomToFit,
-        OptionEdgeLinesVisible,
         OptionTakeSnapshot,
     ]
     assert cast(Any, commands[-1].root).format == "jpeg"
@@ -485,7 +496,7 @@ def test_snapshot_hides_edge_lines_by_default(monkeypatch: pytest.MonkeyPatch):
     commands = _capture_snapshot_commands(monkeypatch)
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
 
-    zoo_tools.zoo_snapshot(kcl_code=None, kcl_path=None, session_id="session-id")
+    zoo_tools.zoo_snapshot(session_id="session-id")
 
     edge_commands = [
         command.root
@@ -500,12 +511,7 @@ def test_snapshot_can_show_edge_lines(monkeypatch: pytest.MonkeyPatch):
     commands = _capture_snapshot_commands(monkeypatch)
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
 
-    zoo_tools.zoo_snapshot(
-        kcl_code=None,
-        kcl_path=None,
-        session_id="session-id",
-        highlight_edges=True,
-    )
+    zoo_tools.zoo_snapshot(session_id="session-id", highlight_edges=True)
 
     edge_commands = [
         command.root
@@ -516,6 +522,33 @@ def test_snapshot_can_show_edge_lines(monkeypatch: pytest.MonkeyPatch):
     assert cast(Any, edge_commands[0]).hidden is False
 
 
+def test_snapshot_sets_edge_visibility_once_across_views(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """It is a scene-wide setting, so re-sending it per view is wasted work."""
+    commands = _capture_snapshot_commands(monkeypatch)
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
+    monkeypatch.setattr(
+        zoo_tools, "create_image_collage", MagicMock(return_value=b"collage")
+    )
+
+    zoo_tools.zoo_snapshot(
+        session_id="session-id",
+        views=[_camera_view("front"), _camera_view("top")],
+    )
+
+    assert (
+        len(
+            [
+                command
+                for command in commands
+                if isinstance(command.root, OptionEdgeLinesVisible)
+            ]
+        )
+        == 1
+    )
+
+
 def test_snapshot_always_uses_orthographic_projection(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -524,12 +557,7 @@ def test_snapshot_always_uses_orthographic_projection(
 
     for zoom in (True, False):
         commands = _capture_snapshot_commands(monkeypatch)
-        zoo_tools.zoo_snapshot(
-            kcl_code=None,
-            kcl_path=None,
-            session_id="session-id",
-            zoom=zoom,
-        )
+        zoo_tools.zoo_snapshot(session_id="session-id", zoom=zoom)
         assert any(
             isinstance(command.root, OptionDefaultCameraSetOrthographic)
             for command in commands
@@ -540,18 +568,90 @@ def test_snapshot_can_preserve_the_current_camera(monkeypatch: pytest.MonkeyPatc
     commands = _capture_snapshot_commands(monkeypatch)
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
 
-    zoo_tools.zoo_snapshot(
-        kcl_code=None,
-        kcl_path=None,
-        session_id="session-id",
-        zoom=False,
-    )
+    zoo_tools.zoo_snapshot(session_id="session-id", zoom=False)
 
     # No isometric/zoom-to-fit: the caller's framing is left alone.
     assert not any(
         isinstance(command.root, OptionViewIsometric | OptionZoomToFit)
         for command in commands
     )
+
+
+def test_snapshot_captures_one_image_per_view(monkeypatch: pytest.MonkeyPatch):
+    commands = _capture_snapshot_commands(monkeypatch)
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"resized"))
+    collage = MagicMock(return_value=b"collage")
+    monkeypatch.setattr(zoo_tools, "create_image_collage", collage)
+
+    views = [_camera_view(name) for name in ("front", "right", "top")]
+    result = zoo_tools.zoo_snapshot(session_id="session-id", views=views)
+
+    assert result == b"resized"
+    # Each requested view is aimed explicitly, so no isometric fallback.
+    assert [
+        command.root
+        for command in commands
+        if isinstance(command.root, OptionDefaultCameraLookAt)
+    ] == views
+    assert not any(
+        isinstance(command.root, OptionViewIsometric) for command in commands
+    )
+    assert (
+        len(
+            [
+                command
+                for command in commands
+                if isinstance(command.root, OptionTakeSnapshot)
+            ]
+        )
+        == 3
+    )
+    collage.assert_called_once_with([b"jpeg"] * 3)
+
+
+def test_snapshot_frames_an_imported_cad_object_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A CAD import gives a specific object to fit; KCL scenes fit everything."""
+    commands = _capture_snapshot_commands(monkeypatch, object_id="imported-object")
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
+
+    zoo_tools.zoo_snapshot(input_file="part.step", padding=0.25)
+
+    zoom_commands = [
+        command.root
+        for command in commands
+        if isinstance(command.root, OptionZoomToFit)
+    ]
+    assert len(zoom_commands) == 1
+    assert cast(Any, zoom_commands[0]).object_ids == ["imported-object"]
+    assert cast(Any, zoom_commands[0]).padding == 0.25
+
+
+def test_snapshot_fits_the_whole_scene_without_an_imported_object(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    commands = _capture_snapshot_commands(monkeypatch)
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
+
+    zoo_tools.zoo_snapshot(session_id="session-id")
+
+    zoom_commands = [
+        command.root
+        for command in commands
+        if isinstance(command.root, OptionZoomToFit)
+    ]
+    assert len(zoom_commands) == 1
+    assert cast(Any, zoom_commands[0]).object_ids == []
+
+
+def test_import_cad_file_rejects_an_unsupported_extension(tmp_path):
+    """Caught before opening a websocket, so the message names the file."""
+    bad_file = tmp_path / "notes.txt"
+    bad_file.write_text("not a model")
+
+    with pytest.raises(zoo_tools.ZooMCPException, match="supported CAD extension"):
+        zoo_tools._import_cad_file(cast(Any, MagicMock()), bad_file)
 
 
 def test_face_info_uuid_type_is_accepted():

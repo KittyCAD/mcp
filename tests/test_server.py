@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import os
 from collections.abc import Sequence
@@ -17,7 +19,9 @@ from kittycad.models import (
     OrgDataset,
     Point3d,
 )
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ImageContent, TextContent
+from PIL import Image as PILImage
 
 import zoo_mcp
 import zoo_mcp.zoo_tools
@@ -1022,396 +1026,167 @@ async def test_mock_execute_kcl_error():
 
 
 @pytest.mark.asyncio
-async def test_multiview_snapshot_of_cad(cube_stl: str):
-    response = await mcp.call_tool(
-        "multiview_snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-        },
-    )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
+@pytest.mark.parametrize(
+    "source",
+    ["kcl_path", "kcl_code", "input_file"],
+)
+async def test_snapshot_from_each_source(source: str, cube_kcl: str, cube_stl: str):
+    """Every way of populating a scene produces an image."""
+    if source == "kcl_code":
+        arguments = {"kcl_code": Path(cube_kcl).read_text()}
+    elif source == "kcl_path":
+        arguments = {"kcl_path": cube_kcl}
+    else:
+        arguments = {"input_file": cube_stl}
+
+    response = await mcp.call_tool("snapshot", arguments=arguments)
+
+    assert isinstance(_content_list(response)[0], ImageContent)
 
 
 @pytest.mark.asyncio
-async def test_multiview_snapshot_of_cad_error(empty_step: str):
-    response = await mcp.call_tool(
-        "multiview_snapshot_of_cad",
-        arguments={
-            "input_file": empty_step,
-        },
+async def test_snapshot_from_a_modeling_session(cube_kcl: str):
+    session_id = _meta_result(
+        await mcp.call_tool("start_modeling_session", arguments={})
     )
-    result = _meta_result(response)
-    assert "error creating the multiview snapshot" in result
+    try:
+        await mcp.call_tool(
+            "exec_kcl_project",
+            arguments={"kcl_path": cube_kcl, "session_id": session_id},
+        )
+        response = await mcp.call_tool("snapshot", arguments={"session_id": session_id})
+        assert isinstance(_content_list(response)[0], ImageContent)
+    finally:
+        await mcp.call_tool(
+            "stop_modeling_session", arguments={"session_id": session_id}
+        )
 
 
 @pytest.mark.asyncio
-async def test_multiview_snapshot_of_kcl(cube_kcl: str):
+@pytest.mark.parametrize(
+    "camera_view",
+    [
+        "front",
+        "isometric",
+        "multiview",
+        "multi_isometric",
+        ["front", "top"],
+        {"up": [0, 0, 1], "vantage": [0, -1, 0], "center": [0, 0, 0]},
+    ],
+    ids=["named", "isometric", "multiview", "multi_isometric", "list", "explicit"],
+)
+async def test_snapshot_camera_views(camera_view: object, cube_kcl: str):
     response = await mcp.call_tool(
-        "multiview_snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-        },
+        "snapshot",
+        arguments={"kcl_path": cube_kcl, "camera_view": camera_view},
     )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
+
+    assert isinstance(_content_list(response)[0], ImageContent)
 
 
 @pytest.mark.asyncio
-async def test_multiview_snapshot_of_kcl_error(empty_step: str):
+async def test_snapshot_of_a_cad_file_with_a_named_view(cube_stl: str):
     response = await mcp.call_tool(
-        "multiview_snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": empty_step,
-        },
+        "snapshot",
+        arguments={"input_file": cube_stl, "camera_view": "multiview"},
     )
-    result = _meta_result(response)
-    assert "error creating the multiview snapshot" in result
+
+    assert isinstance(_content_list(response)[0], ImageContent)
 
 
 @pytest.mark.asyncio
-async def test_multi_isometric_snapshot_of_cad(cube_stl: str):
-    response = await mcp.call_tool(
-        "multi_isometric_snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-        },
-    )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
+async def test_snapshot_rejects_an_unknown_camera_view(cube_kcl: str):
+    with pytest.raises(ToolError, match="Invalid camera view"):
+        await mcp.call_tool(
+            "snapshot",
+            arguments={"kcl_path": cube_kcl, "camera_view": "asdf"},
+        )
 
 
 @pytest.mark.asyncio
-async def test_multi_isometric_snapshot_of_cad_error(empty_step: str):
-    response = await mcp.call_tool(
-        "multi_isometric_snapshot_of_cad",
-        arguments={
-            "input_file": empty_step,
-        },
-    )
-    result = _meta_result(response)
-    assert "error creating the multi-isometric snapshot" in result
+async def test_snapshot_rejects_a_malformed_camera_view(cube_kcl: str):
+    with pytest.raises(ToolError, match="Invalid camera view"):
+        await mcp.call_tool(
+            "snapshot",
+            arguments={"kcl_path": cube_kcl, "camera_view": {"hello": [0, 0, 0]}},
+        )
 
 
 @pytest.mark.asyncio
-async def test_multi_isometric_snapshot_of_kcl(cube_kcl: str):
-    response = await mcp.call_tool(
-        "multi_isometric_snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-        },
-    )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
+async def test_snapshot_rejects_a_non_kcl_path(empty_step: str):
+    """A non-KCL path is rejected before any engine work happens."""
+    with pytest.raises(ToolError):
+        await mcp.call_tool("snapshot", arguments={"kcl_path": empty_step})
 
 
 @pytest.mark.asyncio
-async def test_multi_isometric_snapshot_of_kcl_error(empty_step: str):
-    response = await mcp.call_tool(
-        "multi_isometric_snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": empty_step,
-        },
-    )
-    result = _meta_result(response)
-    assert "error creating the multi-isometric snapshot" in result
+async def test_snapshot_surfaces_a_cad_import_failure(empty_step: str):
+    with pytest.raises(ToolError):
+        await mcp.call_tool("snapshot", arguments={"input_file": empty_step})
 
 
 @pytest.mark.asyncio
-async def test_snapshot_of_cad(cube_stl: str):
-    response = await mcp.call_tool(
-        "snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-            "camera_view": "isometric",
-        },
-    )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
+async def test_snapshot_rejects_an_unsupported_input_file(cube_kcl: str):
+    with pytest.raises(ToolError, match="supported CAD extension"):
+        await mcp.call_tool("snapshot", arguments={"input_file": cube_kcl})
 
 
 @pytest.mark.asyncio
-async def test_snapshot_of_cad_error(empty_step: str):
-    response = await mcp.call_tool(
-        "snapshot_of_cad",
-        arguments={
-            "input_file": empty_step,
-            "camera_view": "isometric",
-        },
-    )
-    result = _meta_result(response)
-    assert "error creating the snapshot" in result
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_cad_camera(cube_stl: str):
-    response = await mcp.call_tool(
-        "snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-            "camera_view": {
-                "up": [0, 0, 1],
-                "vantage": [0, -1, 0],
-                "center": [0, 0, 0],
-            },
-        },
-    )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_cad_camera_error(empty_step: str):
-    response = await mcp.call_tool(
-        "snapshot_of_cad",
-        arguments={
-            "input_file": empty_step,
-            "camera_view": {
-                "hello": [0, 0, 0],
-            },
-        },
-    )
-    result = _meta_result(response)
-    assert "error creating the snapshot" in result
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_cad_view(cube_stl: str):
-    response = await mcp.call_tool(
-        "snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-            "camera_view": "front",
-        },
-    )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_cad_view_error(cube_stl: str):
-    response = await mcp.call_tool(
-        "snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-            "camera_view": "asdf",
-        },
-    )
-    result = _meta_result(response)
-    assert "Invalid camera view" in result
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_kcl(cube_kcl: str):
-    response = await mcp.call_tool(
-        "snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-            "camera_view": "isometric",
-        },
-    )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_kcl_error(empty_step: str):
-    response = await mcp.call_tool(
-        "snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": empty_step,
-            "camera_view": "isometric",
-        },
-    )
-    result = _meta_result(response)
-    assert "error creating the snapshot" in result
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_kcl_camera(cube_kcl: str):
-    response = await mcp.call_tool(
-        "snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-            "camera_view": {
-                "up": [0, 0, 1],
-                "vantage": [0, -1, 0],
-                "center": [0, 0, 0],
-            },
-        },
-    )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_kcl_camera_error(empty_kcl: str):
-    response = await mcp.call_tool(
-        "snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": empty_kcl,
-            "camera_view": {
-                "hello": [0, 0, 0],
-            },
-        },
-    )
-    result = _meta_result(response)
-    assert "error creating the snapshot" in result
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_kcl_view(cube_kcl: str):
-    response = await mcp.call_tool(
-        "snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-            "camera_view": "front",
-        },
-    )
-    result = _content_list(response)[0]
-    assert isinstance(result, ImageContent)
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_kcl_view_error(cube_kcl: str):
-    response = await mcp.call_tool(
-        "snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-            "camera_view": "asdf",
-        },
-    )
-    result = _meta_result(response)
-    assert "Invalid camera view" in result
-
-
-@pytest.mark.asyncio
-async def test_multiview_snapshot_of_cad_output_path(cube_stl: str, tmp_path):
+async def test_snapshot_output_path(cube_kcl: str, tmp_path):
     """When output_path is provided, the tool writes to disk and returns the path."""
     output_path = tmp_path / "snap.jpg"
     response = await mcp.call_tool(
-        "multiview_snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-            "output_path": str(output_path),
-        },
+        "snapshot",
+        arguments={"kcl_path": cube_kcl, "output_path": str(output_path)},
     )
+
     result = _meta_result(response)
     assert Path(result) == output_path.resolve()
-    assert Path(result).exists()
     assert Path(result).stat().st_size > 0
 
 
 @pytest.mark.asyncio
-async def test_multiview_snapshot_of_kcl_output_path(cube_kcl: str, tmp_path):
-    output_path = tmp_path / "snap.jpg"
-    response = await mcp.call_tool(
-        "multiview_snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-            "output_path": str(output_path),
-        },
-    )
-    result = _meta_result(response)
-    assert Path(result) == output_path.resolve()
-    assert Path(result).exists()
-    assert Path(result).stat().st_size > 0
-
-
-@pytest.mark.asyncio
-async def test_multi_isometric_snapshot_of_cad_output_path(cube_stl: str, tmp_path):
-    output_path = tmp_path / "snap.jpg"
-    response = await mcp.call_tool(
-        "multi_isometric_snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-            "output_path": str(output_path),
-        },
-    )
-    result = _meta_result(response)
-    assert Path(result) == output_path.resolve()
-    assert Path(result).exists()
-    assert Path(result).stat().st_size > 0
-
-
-@pytest.mark.asyncio
-async def test_multi_isometric_snapshot_of_kcl_output_path(cube_kcl: str, tmp_path):
-    output_path = tmp_path / "snap.jpg"
-    response = await mcp.call_tool(
-        "multi_isometric_snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-            "output_path": str(output_path),
-        },
-    )
-    result = _meta_result(response)
-    assert Path(result) == output_path.resolve()
-    assert Path(result).exists()
-    assert Path(result).stat().st_size > 0
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_cad_output_path(cube_stl: str, tmp_path):
-    output_path = tmp_path / "snap.jpg"
-    response = await mcp.call_tool(
-        "snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-            "camera_view": "isometric",
-            "output_path": str(output_path),
-        },
-    )
-    result = _meta_result(response)
-    assert Path(result) == output_path.resolve()
-    assert Path(result).exists()
-    assert Path(result).stat().st_size > 0
-
-
-@pytest.mark.asyncio
-async def test_snapshot_of_cad_output_path_directory(cube_stl: str, tmp_path):
+async def test_snapshot_output_path_directory(cube_stl: str, tmp_path):
     """A directory output_path writes image.jpg into that directory."""
     response = await mcp.call_tool(
-        "snapshot_of_cad",
-        arguments={
-            "input_file": cube_stl,
-            "camera_view": "isometric",
-            "output_path": str(tmp_path),
-        },
+        "snapshot",
+        arguments={"input_file": cube_stl, "output_path": str(tmp_path)},
     )
+
     result = _meta_result(response)
     assert Path(result).name == "image.jpg"
-    assert Path(result).exists()
     assert Path(result).stat().st_size > 0
 
 
 @pytest.mark.asyncio
-async def test_snapshot_of_kcl_output_path(cube_kcl: str, tmp_path):
-    output_path = tmp_path / "snap.jpg"
+async def test_snapshot_respects_max_image_dimension(cube_kcl: str):
     response = await mcp.call_tool(
-        "snapshot_of_kcl",
-        arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-            "camera_view": "isometric",
-            "output_path": str(output_path),
-        },
+        "snapshot",
+        arguments={"kcl_path": cube_kcl, "max_image_dimension": 128},
     )
-    result = _meta_result(response)
-    assert Path(result) == output_path.resolve()
-    assert Path(result).exists()
-    assert Path(result).stat().st_size > 0
+
+    image = _content_list(response)[0]
+    assert isinstance(image, ImageContent)
+    with PILImage.open(io.BytesIO(base64.b64decode(image.data))) as rendered:
+        assert max(rendered.size) <= 128
+
+
+@pytest.mark.asyncio
+async def test_collapsed_snapshot_tools_are_gone():
+    """The per-source/per-layout snapshot tools folded into `snapshot`."""
+    tool_names = {tool.name for tool in await mcp.list_tools()}
+
+    assert "snapshot" in tool_names
+    assert tool_names.isdisjoint(
+        {
+            "snapshot_of_kcl",
+            "snapshot_of_cad",
+            "multiview_snapshot_of_kcl",
+            "multiview_snapshot_of_cad",
+            "multi_isometric_snapshot_of_kcl",
+            "multi_isometric_snapshot_of_cad",
+        }
+    )
 
 
 @pytest.mark.asyncio
@@ -1845,9 +1620,9 @@ async def test_get_kcl_sample_path_traversal(live_samples_index):
 @pytest.mark.asyncio
 async def test_save_image(cube_stl: str, tmp_path):
     """Test saving an image to disk."""
-    # First get an image from snapshot_of_cad
+    # First get an image from snapshot
     snapshot_response = await mcp.call_tool(
-        "snapshot_of_cad",
+        "snapshot",
         arguments={
             "input_file": cube_stl,
             "camera_view": "isometric",
@@ -1873,9 +1648,9 @@ async def test_save_image(cube_stl: str, tmp_path):
 @pytest.mark.asyncio
 async def test_save_image_to_directory(cube_stl: str, tmp_path):
     """Test saving an image to a directory creates image.jpg."""
-    # First get an image from snapshot_of_cad
+    # First get an image from snapshot
     snapshot_response = await mcp.call_tool(
-        "snapshot_of_cad",
+        "snapshot",
         arguments={
             "input_file": cube_stl,
             "camera_view": "isometric",
@@ -1901,9 +1676,9 @@ async def test_save_image_to_directory(cube_stl: str, tmp_path):
 @pytest.mark.asyncio
 async def test_save_image_creates_parent_dirs(cube_stl: str, tmp_path):
     """Test that save_image creates parent directories if they don't exist."""
-    # First get an image from snapshot_of_cad
+    # First get an image from snapshot
     snapshot_response = await mcp.call_tool(
-        "snapshot_of_cad",
+        "snapshot",
         arguments={
             "input_file": cube_stl,
             "camera_view": "isometric",
@@ -1929,9 +1704,9 @@ async def test_save_image_creates_parent_dirs(cube_stl: str, tmp_path):
 @pytest.mark.asyncio
 async def test_save_image_to_temp_file(cube_stl: str):
     """Test that save_image creates a temp file when no path is provided."""
-    # First get an image from snapshot_of_cad
+    # First get an image from snapshot
     snapshot_response = await mcp.call_tool(
-        "snapshot_of_cad",
+        "snapshot",
         arguments={
             "input_file": cube_stl,
             "camera_view": "isometric",
