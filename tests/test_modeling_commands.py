@@ -1,5 +1,6 @@
 import threading
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -13,6 +14,8 @@ from kittycad.models import (
 from kittycad.models.api_error import ApiError
 from kittycad.models.failure_web_socket_response import FailureWebSocketResponse
 from kittycad.models.modeling_cmd import (
+    OptionDefaultCameraSetOrthographic,
+    OptionEdgeLinesVisible,
     OptionEntityGetIndex,
     OptionTakeSnapshot,
     OptionViewIsometric,
@@ -420,11 +423,16 @@ def test_exec_kcl_project_reads_with_a_timeout(monkeypatch: pytest.MonkeyPatch):
     assert result == {"nodes": {}}
 
 
-def test_snapshot_frames_the_scene_before_capturing(monkeypatch: pytest.MonkeyPatch):
+def _capture_snapshot_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[ModelingCmd]:
+    """Record the command sequence zoo_snapshot sends, stubbing the transport."""
     commands: list[ModelingCmd] = []
     responses = {
+        zoo_tools.ResponseDefaultCameraSetOrthographic: SimpleNamespace(data=None),
         zoo_tools.ResponseViewIsometric: SimpleNamespace(data=None),
         zoo_tools.ResponseZoomToFit: SimpleNamespace(data=None),
+        zoo_tools.ResponseEdgeLinesVisible: SimpleNamespace(data=None),
         zoo_tools.ResponseTakeSnapshot: SimpleNamespace(
             data=TakeSnapshot(contents="anBlZw==")
         ),
@@ -439,14 +447,19 @@ def test_snapshot_frames_the_scene_before_capturing(monkeypatch: pytest.MonkeyPa
         commands.append(command)
         return responses[cast(Any, expected_response)]
 
-    resize = MagicMock(return_value=b"resized-jpeg")
     monkeypatch.setattr(zoo_tools, "_send_modeling_command", send_command)
-    monkeypatch.setattr(zoo_tools, "resize_image", resize)
     monkeypatch.setattr(
         zoo_tools,
         "_modeling_websocket",
-        lambda *args, **kwargs: __import__("contextlib").nullcontext(MagicMock()),
+        lambda *args, **kwargs: nullcontext(MagicMock()),
     )
+    return commands
+
+
+def test_snapshot_frames_the_scene_before_capturing(monkeypatch: pytest.MonkeyPatch):
+    commands = _capture_snapshot_commands(monkeypatch)
+    resize = MagicMock(return_value=b"resized-jpeg")
+    monkeypatch.setattr(zoo_tools, "resize_image", resize)
 
     result = zoo_tools.zoo_snapshot(
         kcl_code=None,
@@ -457,33 +470,75 @@ def test_snapshot_frames_the_scene_before_capturing(monkeypatch: pytest.MonkeyPa
 
     assert result == b"resized-jpeg"
     assert [type(command.root) for command in commands] == [
+        OptionDefaultCameraSetOrthographic,
         OptionViewIsometric,
         OptionZoomToFit,
+        OptionEdgeLinesVisible,
         OptionTakeSnapshot,
     ]
-    assert cast(Any, commands[2].root).format == "jpeg"
+    assert cast(Any, commands[-1].root).format == "jpeg"
     resize.assert_called_once_with(b"jpeg", 256)
 
 
-def test_snapshot_can_preserve_the_current_camera(monkeypatch: pytest.MonkeyPatch):
-    commands: list[ModelingCmd] = []
-
-    def send_command(
-        ws: object,
-        command: ModelingCmd,
-        expected_response: type,
-        description: str,
-    ) -> object:
-        commands.append(command)
-        return SimpleNamespace(data=TakeSnapshot(contents="anBlZw=="))
-
-    monkeypatch.setattr(zoo_tools, "_send_modeling_command", send_command)
+def test_snapshot_hides_edge_lines_by_default(monkeypatch: pytest.MonkeyPatch):
+    """Edge outlines otherwise compete with highlight_set_entities."""
+    commands = _capture_snapshot_commands(monkeypatch)
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
-    monkeypatch.setattr(
-        zoo_tools,
-        "_modeling_websocket",
-        lambda *args, **kwargs: __import__("contextlib").nullcontext(MagicMock()),
+
+    zoo_tools.zoo_snapshot(kcl_code=None, kcl_path=None, session_id="session-id")
+
+    edge_commands = [
+        command.root
+        for command in commands
+        if isinstance(command.root, OptionEdgeLinesVisible)
+    ]
+    assert len(edge_commands) == 1
+    assert cast(Any, edge_commands[0]).hidden is True
+
+
+def test_snapshot_can_show_edge_lines(monkeypatch: pytest.MonkeyPatch):
+    commands = _capture_snapshot_commands(monkeypatch)
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
+
+    zoo_tools.zoo_snapshot(
+        kcl_code=None,
+        kcl_path=None,
+        session_id="session-id",
+        highlight_edges=True,
     )
+
+    edge_commands = [
+        command.root
+        for command in commands
+        if isinstance(command.root, OptionEdgeLinesVisible)
+    ]
+    assert len(edge_commands) == 1
+    assert cast(Any, edge_commands[0]).hidden is False
+
+
+def test_snapshot_always_uses_orthographic_projection(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Perspective projection distorts measurements read off the image."""
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
+
+    for zoom in (True, False):
+        commands = _capture_snapshot_commands(monkeypatch)
+        zoo_tools.zoo_snapshot(
+            kcl_code=None,
+            kcl_path=None,
+            session_id="session-id",
+            zoom=zoom,
+        )
+        assert any(
+            isinstance(command.root, OptionDefaultCameraSetOrthographic)
+            for command in commands
+        ), f"zoom={zoom} did not set an orthographic camera"
+
+
+def test_snapshot_can_preserve_the_current_camera(monkeypatch: pytest.MonkeyPatch):
+    commands = _capture_snapshot_commands(monkeypatch)
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
 
     zoo_tools.zoo_snapshot(
         kcl_code=None,
@@ -492,7 +547,11 @@ def test_snapshot_can_preserve_the_current_camera(monkeypatch: pytest.MonkeyPatc
         zoom=False,
     )
 
-    assert [type(command.root) for command in commands] == [OptionTakeSnapshot]
+    # No isometric/zoom-to-fit: the caller's framing is left alone.
+    assert not any(
+        isinstance(command.root, OptionViewIsometric | OptionZoomToFit)
+        for command in commands
+    )
 
 
 def test_face_info_uuid_type_is_accepted():

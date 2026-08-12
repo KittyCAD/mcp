@@ -1090,12 +1090,14 @@ async def snapshot(
     session_id: str | None = None,
     max_image_dimension: int = 512,
     zoom: bool = True,
+    highlight_edges: bool = False,
 ) -> ImageContent:
     """Take a snapshot of a KCL model or the current modeling session.
 
     Provide kcl_code or kcl_path to execute a model in a temporary scene. To
     capture an existing scene without re-executing KCL, provide the session_id
-    returned by start_modeling_session.
+    returned by start_modeling_session. The camera always uses an orthographic
+    projection.
 
     Args:
         kcl_code: KCL code defining the model.
@@ -1106,6 +1108,9 @@ async def snapshot(
               Leave True unless you have positioned the session's camera
               yourself; a freshly executed scene is not framed, so zoom=False
               renders the model only a few pixels wide.
+        highlight_edges: Whether rendered edges should be outlined. Default is
+                         False so that entities highlighted with
+                         highlight_set_entities are obvious in the image.
 
     Returns:
         ImageContent: A JPEG snapshot of the current scene.
@@ -1118,6 +1123,7 @@ async def snapshot(
             session_id=session_id,
             max_image_dimension=max_image_dimension,
             zoom=zoom,
+            highlight_edges=highlight_edges,
         )
     )
 

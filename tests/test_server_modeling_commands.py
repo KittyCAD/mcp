@@ -318,6 +318,7 @@ async def test_snapshot_tool_forwards_session_and_zoom(
         session_id="session-id",
         max_image_dimension=256,
         zoom=True,
+        highlight_edges=False,
     )
 
     await mcp.call_tool(
@@ -325,6 +326,12 @@ async def test_snapshot_tool_forwards_session_and_zoom(
         arguments={"session_id": "session-id", "zoom": False},
     )
     assert mock.call_args.kwargs["zoom"] is False
+
+    await mcp.call_tool(
+        "snapshot",
+        arguments={"session_id": "session-id", "highlight_edges": True},
+    )
+    assert mock.call_args.kwargs["highlight_edges"] is True
 
 
 @pytest.mark.asyncio

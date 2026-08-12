@@ -69,6 +69,7 @@ from kittycad.models.input_format3d import (
 from kittycad.models.modeling_cmd import (
     OptionDefaultCameraLookAt,
     OptionDefaultCameraSetOrthographic,
+    OptionEdgeLinesVisible,
     OptionFaceGetCenter,
     OptionFaceGetGradient,
     OptionFaceGetPosition,
@@ -76,6 +77,12 @@ from kittycad.models.modeling_cmd import (
     OptionTakeSnapshot,
     OptionViewIsometric,
     OptionZoomToFit,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionDefaultCameraSetOrthographic as ResponseDefaultCameraSetOrthographic,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionEdgeLinesVisible as ResponseEdgeLinesVisible,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionFaceGetCenter as ResponseFaceGetCenter,
@@ -2553,15 +2560,28 @@ def zoo_snapshot(
     session_id: str | None = None,
     max_image_dimension: int = 512,
     zoom: bool = True,
+    highlight_edges: bool = False,
 ) -> bytes:
     """Capture the current scene as a JPEG.
 
-    Unless ``zoom`` is False the camera is pointed isometrically and zoomed to
-    fit first; a raw take_snapshot uses whatever camera the scene happens to
-    have, which on a freshly executed project leaves the model a few pixels
-    wide.
+    The camera is always switched to an orthographic projection, matching the
+    other snapshot tools. Unless ``zoom`` is False the camera is also pointed
+    isometrically and zoomed to fit; a raw take_snapshot uses whatever camera
+    the scene happens to have, which on a freshly executed project leaves the
+    model a few pixels wide.
+
+    Edge lines are hidden unless ``highlight_edges`` is True, so that entities
+    highlighted via highlight_set_entities stand out instead of competing with
+    the outline drawn on every edge in the scene.
     """
     with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
+        _send_modeling_command(
+            ws,
+            ModelingCmd(OptionDefaultCameraSetOrthographic()),
+            ResponseDefaultCameraSetOrthographic,
+            "orthographic camera",
+        )
+
         if zoom:
             _send_modeling_command(
                 ws,
@@ -2575,6 +2595,13 @@ def zoo_snapshot(
                 ResponseZoomToFit,
                 "zoom to fit",
             )
+
+        _send_modeling_command(
+            ws,
+            ModelingCmd(OptionEdgeLinesVisible(hidden=not highlight_edges)),
+            ResponseEdgeLinesVisible,
+            "edge line visibility",
+        )
 
         response = _send_modeling_command(
             ws,
