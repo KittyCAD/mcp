@@ -8,6 +8,7 @@ import pytest
 from kittycad.models import (
     CurveGetEndPoints,
     CurveGetType,
+    DefaultCameraCenterToSelection,
     EdgeGetLength,
     EngineUtilEvaluatePath,
     EntityGetAllChildUuids,
@@ -15,17 +16,16 @@ from kittycad.models import (
     EntityGetIndex,
     EntityGetParentId,
     EntityGetSketchPaths,
-    EntityReference,
     HighlightSetEntities,
     ModelingCmd,
     Point3d,
-    SelectEntity,
+    SelectReplace,
     SetSelectionFilter,
 )
-from kittycad.models.entity_reference import OptionFace
 from kittycad.models.modeling_cmd import (
     OptionCurveGetEndPoints,
     OptionCurveGetType,
+    OptionDefaultCameraCenterToSelection,
     OptionEdgeGetLength,
     OptionEngineUtilEvaluatePath,
     OptionEntityGetAllChildUuids,
@@ -34,7 +34,7 @@ from kittycad.models.modeling_cmd import (
     OptionEntityGetParentId,
     OptionEntityGetSketchPaths,
     OptionHighlightSetEntities,
-    OptionSelectEntity,
+    OptionSelectReplace,
     OptionSetSelectionFilter,
 )
 from mcp.server.fastmcp.exceptions import ToolError
@@ -64,7 +64,8 @@ async def test_modeling_tools_are_registered():
     assert {
         "entity_distance",
         "set_selection_filter",
-        "select_entity",
+        "select_entities",
+        "center_camera_on_selection",
         "curve_get_end_points",
         "engine_util_evaluate_path",
         "curve_get_type",
@@ -116,25 +117,32 @@ async def test_modeling_tools_are_registered():
             SetSelectionFilter(),
         ),
         (
-            "select_entity",
-            {
-                "entities": [{"type": "face", "face_id": "face-id"}],
-                "session_id": "session-id",
-            },
-            OptionSelectEntity,
-            {
-                "entities": [
-                    {"face_id": "face-id", "topology_fallback": None, "type": "face"}
-                ]
-            },
-            SelectEntity(),
-        ),
-        (
             "highlight_set_entities",
             {"entity_ids": ["entity-1", "entity-2"], "session_id": "session-id"},
             OptionHighlightSetEntities,
             {"entities": ["entity-1", "entity-2"]},
             HighlightSetEntities(),
+        ),
+        (
+            "select_entities",
+            {"entity_ids": ["entity-1", "entity-2"], "session_id": "session-id"},
+            OptionSelectReplace,
+            {"entities": ["entity-1", "entity-2"]},
+            SelectReplace(),
+        ),
+        (
+            "center_camera_on_selection",
+            {"session_id": "session-id"},
+            OptionDefaultCameraCenterToSelection,
+            {"camera_movement": "vantage"},
+            DefaultCameraCenterToSelection(),
+        ),
+        (
+            "center_camera_on_selection",
+            {"session_id": "session-id", "move_vantage": False},
+            OptionDefaultCameraCenterToSelection,
+            {"camera_movement": "none"},
+            DefaultCameraCenterToSelection(),
         ),
         (
             "curve_get_end_points",
@@ -221,8 +229,9 @@ async def test_selection_tools_require_a_session():
     """Selection state is discarded without a session, so it must be required."""
     for tool_name, arguments in (
         ("set_selection_filter", {"entity_types": ["face"]}),
-        ("select_entity", {"entities": [{"type": "face", "face_id": "face-id"}]}),
+        ("select_entities", {"entity_ids": ["entity-1"]}),
         ("highlight_set_entities", {"entity_ids": ["entity-1"]}),
+        ("center_camera_on_selection", {}),
     ):
         with pytest.raises(ToolError):
             await mcp.call_tool(tool_name, arguments=arguments)
@@ -230,12 +239,33 @@ async def test_selection_tools_require_a_session():
     tools = {tool.name: tool for tool in await mcp.list_tools()}
     for tool_name in (
         "set_selection_filter",
-        "select_entity",
+        "select_entities",
         "highlight_set_entities",
+        "center_camera_on_selection",
     ):
         schema = tools[tool_name].inputSchema
         assert "session_id" in schema.get("required", []), tool_name
         assert "kcl_code" not in schema.get("properties", {}), tool_name
+
+
+@pytest.mark.asyncio
+async def test_emphasis_guidance_is_documented():
+    """The relative strength of highlight vs selection is easy to get wrong."""
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    highlight = tools["highlight_set_entities"].description or ""
+    assert "select_entities" in highlight
+    assert "center_camera_on_selection" in highlight
+
+    select = tools["select_entities"].description or ""
+    assert "highlight_set_entities" in select
+
+
+@pytest.mark.asyncio
+async def test_only_one_selection_tool_is_exposed():
+    """Two selection tools with different argument shapes invite the wrong pick."""
+    names = {tool.name for tool in await mcp.list_tools()}
+    assert "select_entities" in names
+    assert "select_entity" not in names
 
 
 @pytest.mark.asyncio
@@ -432,9 +462,3 @@ async def test_query_tools_document_their_arguments():
         description = tools[tool_name].description or ""
         assert "Args:" in description, tool_name
         assert "session_id:" in description, tool_name
-
-
-@pytest.mark.asyncio
-async def test_entity_reference_is_still_exported():
-    """select_entity's schema depends on this alias."""
-    assert EntityReference(OptionFace(face_id="face-id")) is not None

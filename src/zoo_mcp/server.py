@@ -4,8 +4,10 @@ from contextlib import asynccontextmanager
 
 import kcl
 from kittycad.models import (
+    CameraMovement,
     CurveGetEndPoints,
     CurveGetType,
+    DefaultCameraCenterToSelection,
     DistanceType,
     EdgeGetLength,
     EngineUtilEvaluatePath,
@@ -14,18 +16,18 @@ from kittycad.models import (
     EntityGetIndex,
     EntityGetParentId,
     EntityGetSketchPaths,
-    EntityReference,
     EntityType,
     GlobalAxis,
     HighlightSetEntities,
     ModelingCmd,
-    SelectEntity,
+    SelectReplace,
     SetSelectionFilter,
 )
 from kittycad.models.distance_type import OptionEuclidean, OptionOnAxis
 from kittycad.models.modeling_cmd import (
     OptionCurveGetEndPoints,
     OptionCurveGetType,
+    OptionDefaultCameraCenterToSelection,
     OptionDefaultCameraLookAt,
     OptionEdgeGetLength,
     OptionEngineUtilEvaluatePath,
@@ -35,7 +37,7 @@ from kittycad.models.modeling_cmd import (
     OptionEntityGetParentId,
     OptionEntityGetSketchPaths,
     OptionHighlightSetEntities,
-    OptionSelectEntity,
+    OptionSelectReplace,
     OptionSetSelectionFilter,
     Point3d,
 )
@@ -44,6 +46,9 @@ from kittycad.models.ok_modeling_cmd_response import (
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionCurveGetType as ResponseCurveGetType,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionDefaultCameraCenterToSelection as ResponseDefaultCameraCenterToSelection,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionEdgeGetLength as ResponseEdgeGetLength,
@@ -70,7 +75,7 @@ from kittycad.models.ok_modeling_cmd_response import (
     OptionHighlightSetEntities as ResponseHighlightSetEntities,
 )
 from kittycad.models.ok_modeling_cmd_response import (
-    OptionSelectEntity as ResponseSelectEntity,
+    OptionSelectReplace as ResponseSelectReplace,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionSetSelectionFilter as ResponseSetSelectionFilter,
@@ -752,27 +757,79 @@ async def set_selection_filter(
 
 
 @mcp.tool()
-async def select_entity(
-    entities: list[EntityReference],
+async def select_entities(
+    entity_ids: list[str],
     session_id: str,
-) -> SelectEntity:
-    """Replace the current "selection set" with explicit entity references.
+) -> SelectReplace:
+    """Replace the "selection set" with the given entities.
+
+    Takes UUIDs exactly as they appear in an artifact graph, and works for faces,
+    edges, and solids alike.
+
+    Selected entities render with a distinct color tint and an outline, which is
+    considerably more obvious in a `snapshot` than the subtler brightening that
+    highlight_set_entities applies. For the strongest emphasis on a face, call
+    both this and highlight_set_entities; for an edge use just one, as selection
+    overrides the highlight. Follow with `snapshot` (passing zoom=False to keep
+    the current camera) to see the result.
 
     Args:
-        entities: Typed face, edge, solid, segment, or other entity references.
+        entity_ids: Entity UUIDs to select; pass an empty list to clear the selection.
         session_id: An open modeling session, from start_modeling_session. Required:
                     the selection is scene state and would be discarded without one.
 
     Returns:
-        SelectEntity: Confirmation that the selection was replaced.
+        SelectReplace: Confirmation that the selection was replaced.
     """
-    logger.info("select_entity tool called")
+    logger.info("select_entities tool called")
     return zoo_execute_modeling_command(
         None,
         None,
-        ModelingCmd(OptionSelectEntity(entities=entities)),
-        ResponseSelectEntity,
-        "select entity",
+        ModelingCmd(OptionSelectReplace(entities=entity_ids)),
+        ResponseSelectReplace,
+        "select entities",
+        session_id,
+    ).data
+
+
+@mcp.tool()
+async def center_camera_on_selection(
+    session_id: str,
+    move_vantage: bool = True,
+) -> DefaultCameraCenterToSelection:
+    """Point the camera at the current "selection set".
+
+    Useful for making a small selection legible, especially an edge: an edge is
+    only a pixel or two wide, so centring it helps far more than any change of
+    colour. Set the selection first with select_entities.
+
+    Centring moves the camera without re-framing the scene, so parts of the model
+    may fall outside the image. Follow with `snapshot` passing zoom=False, since
+    zoom=True re-frames the whole scene and undoes the centring.
+
+    Args:
+        session_id: An open modeling session, from start_modeling_session. Required:
+                    camera position is scene state and would be discarded without one.
+        move_vantage: Move the camera's vantage point as well as its target.
+                      True (the default) centres the selection most precisely;
+                      False re-aims the camera from where it already is.
+
+    Returns:
+        DefaultCameraCenterToSelection: Confirmation that the camera was centred.
+    """
+    logger.info("center_camera_on_selection tool called")
+    return zoo_execute_modeling_command(
+        None,
+        None,
+        ModelingCmd(
+            OptionDefaultCameraCenterToSelection(
+                camera_movement=CameraMovement.VANTAGE
+                if move_vantage
+                else CameraMovement.NONE
+            )
+        ),
+        ResponseDefaultCameraCenterToSelection,
+        "camera centering",
         session_id,
     ).data
 
@@ -787,6 +844,13 @@ async def highlight_set_entities(
     This is a visual command: follow it with the `snapshot` tool, passing the same
     session_id and zoom=False, to see the highlight without moving the camera. It
     highlights edges, surfaces and bodies.
+
+    Highlighting only brightens an entity slightly. select_entities is markedly
+    more obvious, tinting the entity and drawing an outline around it. For the
+    strongest emphasis on a face, call both; on an edge call only one, because
+    selection overrides the highlight. An edge is a pixel or two wide whichever
+    you choose, so also consider center_camera_on_selection or a larger
+    max_image_dimension to make one legible.
 
     Args:
         entity_ids: Entity UUIDs to highlight; pass an empty list to clear highlights.
