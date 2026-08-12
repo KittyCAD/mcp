@@ -408,12 +408,12 @@ class CameraView(Enum):
         },
         "isometric_back_right": {
             "up": [0.0, 0.0, 1.0],
-            "vantage": [1.0, 1.0, -1.0],
+            "vantage": [1.0, 1.0, 1.0],
             "center": [0.0, 0.0, 0.0],
         },
         "isometric_back_left": {
             "up": [0.0, 0.0, 1.0],
-            "vantage": [-1.0, 1.0, -1.0],
+            "vantage": [-1.0, 1.0, 1.0],
             "center": [0.0, 0.0, 0.0],
         },
     }
@@ -428,7 +428,7 @@ class CameraView(Enum):
             ),
             vantage=Point3d(
                 x=view["vantage"][0],
-                y=-view["vantage"][1],
+                y=view["vantage"][1],
                 z=view["vantage"][2],
             ),
             center=Point3d(

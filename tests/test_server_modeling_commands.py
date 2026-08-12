@@ -412,11 +412,40 @@ async def test_snapshot_tool_resolves_camera_views(
         ]
 
 
+@pytest.mark.parametrize(
+    ("name", "expected_vantage"),
+    [
+        ("front", (0.0, -1.0, 0.0)),
+        ("back", (0.0, 1.0, 0.0)),
+        ("left", (-1.0, 0.0, 0.0)),
+        ("right", (1.0, 0.0, 0.0)),
+        ("top", (0.0, 0.0, 1.0)),
+        ("bottom", (0.0, 0.0, -1.0)),
+        ("isometric_front_right", (1.0, -1.0, 1.0)),
+        ("isometric_front_left", (-1.0, -1.0, 1.0)),
+        ("isometric_back_right", (1.0, 1.0, 1.0)),
+        ("isometric_back_left", (-1.0, 1.0, 1.0)),
+    ],
+)
+def test_named_views_sit_on_the_expected_axis(
+    name: str,
+    expected_vantage: tuple[float, float, float],
+):
+    """Named views reach the engine on the app's axes, unmirrored.
+
+    'front' must look from -Y so it shows the -Y face, and every isometric
+    must look down from +Z rather than up from below.
+    """
+    view = CameraView.to_kittycad_camera(CameraView.views.value[name])
+
+    assert (view.vantage.x, view.vantage.y, view.vantage.z) == expected_vantage
+
+
 @pytest.mark.asyncio
 async def test_snapshot_tool_accepts_an_explicit_camera(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The vantage's y is mirrored to match the engine's axis convention."""
+    """An explicit camera reaches the engine in the frame the caller gave it."""
     mock = MagicMock(return_value=b"jpeg")
     monkeypatch.setattr(server, "zoo_snapshot", mock)
 
@@ -434,7 +463,7 @@ async def test_snapshot_tool_accepts_an_explicit_camera(
 
     (view,) = mock.call_args.kwargs["views"]
     assert (view.up.x, view.up.y, view.up.z) == (0, 0, 1)
-    assert (view.vantage.x, view.vantage.y, view.vantage.z) == (0, 1, 0)
+    assert (view.vantage.x, view.vantage.y, view.vantage.z) == (0, -1, 0)
     assert (view.center.x, view.center.y, view.center.z) == (0, 0, 0)
 
 

@@ -41,7 +41,6 @@ from kittycad.models.modeling_cmd import (
     OptionHighlightSetEntities,
     OptionSelectReplace,
     OptionSetSelectionFilter,
-    Point3d,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionCurveGetEndPoints as ResponseCurveGetEndPoints,
@@ -764,6 +763,13 @@ async def select_entities(
     overrides the highlight. Follow with `snapshot` (passing zoom=False to keep
     the current camera) to see the result.
 
+    Selections draw through the solid. An entity facing away from the camera
+    still renders tinted, seen through the body, so a tinted entity in a
+    snapshot is not evidence that it faces the camera: an occluded edge shows
+    up as an interior diagonal rather than on the silhouette, and an occluded
+    face looks washed out rather than solid. Pick a camera on the same side as
+    the entity to see it properly.
+
     Args:
         entity_ids: Entity UUIDs to select; pass an empty list to clear the selection.
         session_id: An open modeling session, from start_modeling_session. Required:
@@ -842,6 +848,11 @@ async def highlight_set_entities(
     selection overrides the highlight. An edge is a pixel or two wide whichever
     you choose, so also consider center_camera_on_selection or a larger
     max_image_dimension to make one legible.
+
+    Highlights draw through the solid, so an entity facing away from the camera
+    still renders, seen through the body. A highlighted entity in a snapshot is
+    therefore not evidence that it faces the camera; choose a camera on the same
+    side as the entity to see it properly.
 
     Args:
         entity_ids: Entity UUIDs to highlight; pass an empty list to clear highlights.
@@ -1151,28 +1162,14 @@ _MAX_CAMERA_VIEWS = 4
 def _resolve_camera_view(
     view: str | dict[str, list[float]],
 ) -> OptionDefaultCameraLookAt:
-    """Turn a single named or explicit camera view into a modeling command."""
+    """Turn a single named or explicit camera view into a modeling command.
+
+    Named and explicit views share one conversion so the two paths cannot
+    disagree about the coordinate frame.
+    """
     if isinstance(view, dict):
         try:
-            return OptionDefaultCameraLookAt(
-                up=Point3d(
-                    x=view["up"][0],
-                    y=view["up"][1],
-                    z=view["up"][2],
-                ),
-                # The engine's y axis runs opposite to the one callers describe
-                # vantages in, so it is mirrored on the way through.
-                vantage=Point3d(
-                    x=view["vantage"][0],
-                    y=-view["vantage"][1],
-                    z=view["vantage"][2],
-                ),
-                center=Point3d(
-                    x=view["center"][0],
-                    y=view["center"][1],
-                    z=view["center"][2],
-                ),
-            )
+            return CameraView.to_kittycad_camera(view)
         except (KeyError, IndexError, TypeError) as e:
             raise ZooMCPException(
                 f"Invalid camera view {view}: expected 'up', 'vantage' and "
@@ -1258,9 +1255,28 @@ async def snapshot(
                'isometric_front_left', 'isometric_back_right',
                'isometric_back_left'.
 
+               A named view puts the camera on that axis looking back at the
+               origin, matching the app's standard views: 'front' is -Y,
+               'back' is +Y, 'left' is -X, 'right' is +X, 'top' is +Z and
+               'bottom' is -Z.
+
+               So 'front' shows the face whose outward normal is -Y. The four
+               isometric views all look down from above, from (+X, -Y, +Z)
+               for 'isometric_front_right', (-X, -Y, +Z) for
+               'isometric_front_left', (+X, +Y, +Z) for
+               'isometric_back_right' and (-X, +Y, +Z) for
+               'isometric_back_left'. Plain 'isometric' is front-right.
+
             2. A dict with "up", "vantage" and "center" keys, each a list of 3
-               floats. For example {"up": [0, 0, 1], "vantage": [0, -1, 0],
-               "center": [0, 0, 0]} looks at the origin from the front.
+               floats in model space: "vantage" is the camera position and
+               "center" the point it looks at. For example
+               {"up": [0, 0, 1], "vantage": [0, -1, 0], "center": [0, 0, 0]}
+               looks at the origin from the front, showing the -Y face.
+
+               With zoom=True only the direction from "center" to "vantage"
+               matters, because zooming to fit sets the distance: [0, -1, 0]
+               and [0, -200, 0] frame identically. "up" must not be parallel
+               to that direction.
 
             3. 'multiview' for a 2x2 collage of front (top left), right (top
                right), top (bottom left) and isometric (bottom right).
@@ -1285,6 +1301,8 @@ async def snapshot(
                      be a file path (e.g. '/path/to/image.jpg') or a directory
                      (in which case the file is named 'image.jpg'). If
                      omitted, the image is returned inline as an ImageContent.
+                     The file is always JPEG data whatever extension is given,
+                     so prefer '.jpg' to avoid writing a JPEG named '.png'.
 
     Returns:
         ImageContent | str: The snapshot as an inline image when output_path is
