@@ -881,6 +881,33 @@ sketch(on = YZ) {
 
 
 @pytest.mark.asyncio
+async def test_get_sketch_constraint_status_includes_execution_warnings():
+    kcl_code = """
+@settings(defaultLengthUnit = mm)
+
+warningSketch = sketch(on = XY) {
+  horizontalLine = line(start = [var 0mm, var 0mm], end = [var 10mm, var 0mm])
+  verticalLine = line(start = [var 10mm, var 0mm], end = [var 10mm, var 10mm])
+  coincident([horizontalLine.end, verticalLine.start])
+  horizontal(horizontalLine)
+  vertical(verticalLine)
+  angle([horizontalLine, verticalLine]) == 90deg
+}
+"""
+    response = await mcp.call_tool(
+        "get_sketch_constraint_status",
+        arguments={"kcl_code": kcl_code, "kcl_path": None},
+    )
+
+    result = _meta_result(response)
+    assert isinstance(result, dict)
+    assert len(result["warnings"]) == 1
+    assert result["warnings"][0]["phase"] == "execution"
+    assert "Instead of constraining to 90deg" in result["warnings"][0]["text"]
+    assert "constraint to Perpendicular" in result["warnings"][0]["text"]
+
+
+@pytest.mark.asyncio
 async def test_get_sketch_constraint_status_under_constrained_code():
     kcl_code = """
 sketch(on = YZ) {

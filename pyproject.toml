@@ -76,3 +76,6 @@ dev = [
     "ty",
     "uv-build",
 ]
+
+[tool.uv.sources]
+zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app.git", rev = "6d4b258a2455cebca69b0991c76e6660696836fc", subdirectory = "rust/kcl-python-bindings" }
