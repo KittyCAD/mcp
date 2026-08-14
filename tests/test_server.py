@@ -65,7 +65,10 @@ async def populated_modeling_session(cube_kcl: str):
             "exec_kcl_project",
             arguments={"kcl_path": cube_kcl, "session_id": session_id},
         )
-        artifact_graph_path = Path(_meta_result(response))
+        assert isinstance(response, Sequence)
+        content = response[0]
+        assert isinstance(content, TextContent)
+        artifact_graph_path = Path(json.loads(content.text))
         yield session_id
     finally:
         if artifact_graph_path is not None:
