@@ -42,7 +42,7 @@ from mcp.types import ImageContent
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
-from zoo_mcp.zoo_tools import CameraView
+from zoo_mcp.zoo_tools import CameraView, ResultZooExecuteKclRemote
 
 
 def _result(response: Sequence[Any] | dict[str, Any]) -> Any:
@@ -216,23 +216,36 @@ async def test_modeling_tool_builds_expected_command(
 ):
     mock = MagicMock(return_value=SimpleNamespace(data=response_data))
     monkeypatch.setattr(server, "zoo_execute_modeling_command", mock)
+    arguments["session_id"] = "session-id"
 
     response = await mcp.call_tool(tool_name, arguments=arguments)
 
     assert _structured_result(response) == cast(Any, response_data).model_dump()
-    command = cast(ModelingCmd, mock.call_args.args[2])
+    command = cast(ModelingCmd, mock.call_args.args[0])
     assert isinstance(command.root, request_type)
     assert command.root.model_dump(exclude={"type"}) == request_fields
+    assert mock.call_args.args[3] == "session-id"
 
 
 @pytest.mark.asyncio
-async def test_selection_tools_require_a_session():
-    """Selection state is discarded without a session, so it must be required."""
+async def test_scene_tools_require_a_session():
     for tool_name, arguments in (
+        ("get_face_info", {"face_id": "face-id"}),
+        ("entity_distance", {"entity_id1": "a", "entity_id2": "b"}),
+        ("curve_get_end_points", {"curve_id": "curve-id"}),
+        ("engine_util_evaluate_path", {"path_json": "{}", "t": 0.5}),
+        ("curve_get_type", {"curve_id": "curve-id"}),
+        ("edge_get_length", {"edge_id": "edge-id"}),
+        ("entity_get_all_child_uuids", {"entity_id": "entity-id"}),
+        ("entity_get_index", {"entity_id": "entity-id"}),
+        ("entity_get_parent_id", {"entity_id": "entity-id"}),
+        ("entity_get_sketch_paths", {"entity_id": "entity-id"}),
         ("set_selection_filter", {"entity_types": ["face"]}),
         ("select_entities", {"entity_ids": ["entity-1"]}),
         ("highlight_set_entities", {"entity_ids": ["entity-1"]}),
         ("center_camera_on_selection", {}),
+        ("snapshot", {}),
+        ("exec_kcl_project", {"kcl_code": "code"}),
     ):
         with pytest.raises(ToolError):
             await mcp.call_tool(tool_name, arguments=arguments)
@@ -243,10 +256,26 @@ async def test_selection_tools_require_a_session():
         "select_entities",
         "highlight_set_entities",
         "center_camera_on_selection",
+        "get_face_info",
+        "entity_distance",
+        "curve_get_end_points",
+        "engine_util_evaluate_path",
+        "curve_get_type",
+        "edge_get_length",
+        "entity_get_all_child_uuids",
+        "entity_get_index",
+        "entity_get_parent_id",
+        "entity_get_sketch_paths",
+        "snapshot",
+        "exec_kcl_project",
     ):
         schema = tools[tool_name].inputSchema
         assert "session_id" in schema.get("required", []), tool_name
-        assert "kcl_code" not in schema.get("properties", {}), tool_name
+        if tool_name != "exec_kcl_project":
+            properties = schema.get("properties", {})
+            assert "kcl_code" not in properties, tool_name
+            assert "kcl_path" not in properties, tool_name
+            assert "input_file" not in properties, tool_name
 
 
 @pytest.mark.asyncio
@@ -270,7 +299,7 @@ async def test_only_one_selection_tool_is_exposed():
 
 
 @pytest.mark.asyncio
-async def test_query_tool_forwards_kcl_and_session(monkeypatch: pytest.MonkeyPatch):
+async def test_query_tool_forwards_session(monkeypatch: pytest.MonkeyPatch):
     mock = MagicMock(
         return_value=SimpleNamespace(data=EntityGetIndex(entity_index=3)),
     )
@@ -278,17 +307,9 @@ async def test_query_tool_forwards_kcl_and_session(monkeypatch: pytest.MonkeyPat
 
     await mcp.call_tool(
         "entity_get_index",
-        arguments={"entity_id": "entity-id", "kcl_code": "code"},
-    )
-    assert mock.call_args.args[0] == "code"
-    assert mock.call_args.args[5] is None
-
-    await mcp.call_tool(
-        "entity_get_index",
         arguments={"entity_id": "entity-id", "session_id": "session-id"},
     )
-    assert mock.call_args.args[0] is None
-    assert mock.call_args.args[5] == "session-id"
+    assert mock.call_args.args[3] == "session-id"
 
 
 @pytest.mark.asyncio
@@ -302,7 +323,7 @@ async def test_modeling_tool_returns_error(monkeypatch: pytest.MonkeyPatch):
     with pytest.raises(ToolError, match="Error executing tool entity_get_index: boom"):
         await mcp.call_tool(
             "entity_get_index",
-            arguments={"entity_id": "entity-id", "kcl_code": "code"},
+            arguments={"entity_id": "entity-id", "session_id": "session-id"},
         )
 
 
@@ -345,9 +366,6 @@ async def test_snapshot_tool_forwards_session_and_zoom(
     assert len(content) == 1
     assert isinstance(content[0], ImageContent)
     mock.assert_called_once_with(
-        kcl_code=None,
-        kcl_path=None,
-        input_file=None,
         session_id="session-id",
         views=None,
         max_image_dimension=256,
@@ -548,9 +566,17 @@ async def test_snapshot_tool_returns_image_when_output_path_omitted(
 @pytest.mark.asyncio
 async def test_kcl_execution_tools_forward_session_id(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ):
-    execute = AsyncMock(return_value=(True, "KCL code executed successfully"))
-    exec_project = MagicMock(return_value={"item_count": 1})
+    artifact_graph_path = tmp_path / "artifact-graph.json"
+    execute = AsyncMock(
+        return_value=ResultZooExecuteKclRemote(
+            ok=True,
+            message="KCL code executed successfully",
+            path_artifact_graph=artifact_graph_path,
+        )
+    )
+    exec_project = MagicMock(return_value=artifact_graph_path)
     monkeypatch.setattr(server, "zoo_execute_kcl", execute)
     monkeypatch.setattr(server, "zoo_exec_kcl_project", exec_project)
 
@@ -563,8 +589,12 @@ async def test_kcl_execution_tools_forward_session_id(
         arguments={"kcl_code": "code", "session_id": "session-id"},
     )
 
-    assert _result(execute_response) == [True, "KCL code executed successfully"]
-    assert _structured_result(project_response) == {"item_count": 1}
+    assert _result(execute_response) == {
+        "ok": True,
+        "message": "KCL code executed successfully",
+        "path_artifact_graph": str(artifact_graph_path),
+    }
+    assert _result(project_response) == str(artifact_graph_path)
     execute.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,
@@ -590,6 +620,8 @@ async def test_query_tools_document_their_arguments():
         "entity_get_sketch_paths",
         "curve_get_end_points",
         "entity_distance",
+        "engine_util_evaluate_path",
+        "get_face_info",
     ):
         description = tools[tool_name].description or ""
         assert "Args:" in description, tool_name

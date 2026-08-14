@@ -5,9 +5,10 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from threading import Lock
 from time import monotonic
-from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from uuid import uuid4
 
 import aiofiles
@@ -28,9 +29,6 @@ if TYPE_CHECKING:
 
 from kittycad.exceptions import KittyCADClientError
 from kittycad.models import (
-    Axis,
-    AxisDirectionPair,
-    Direction,
     FaceGetCenter,
     FaceGetGradient,
     FaceGetPosition,
@@ -42,29 +40,17 @@ from kittycad.models import (
     FileSurfaceArea,
     FileVolume,
     ImageFormat,
-    ImportFile,
-    InputFormat3d,
     ModelingCmd,
     ModelingCmdId,
     Point2d,
     Point3d,
     PostEffectType,
-    System,
     UnitArea,
     UnitDensity,
     UnitLength,
     UnitMass,
     UnitVolume,
     WebSocketRequest,
-)
-from kittycad.models.input_format3d import (
-    OptionFbx,
-    OptionGltf,
-    OptionObj,
-    OptionPly,
-    OptionSldprt,
-    OptionStep,
-    OptionStl,
 )
 from kittycad.models.modeling_cmd import (
     OptionDefaultCameraLookAt,
@@ -73,7 +59,6 @@ from kittycad.models.modeling_cmd import (
     OptionFaceGetCenter,
     OptionFaceGetGradient,
     OptionFaceGetPosition,
-    OptionImportFiles,
     OptionTakeSnapshot,
     OptionViewIsometric,
     OptionZoomToFit,
@@ -95,9 +80,6 @@ from kittycad.models.ok_modeling_cmd_response import (
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionFaceGetPosition as ResponseFaceGetPosition,
-)
-from kittycad.models.ok_modeling_cmd_response import (
-    OptionImportFiles as ResponseImportFiles,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionTakeSnapshot as ResponseTakeSnapshot,
@@ -437,55 +419,6 @@ class CameraView(Enum):
                 z=view["center"][2],
             ),
         )
-
-
-def _get_input_format(ext: str) -> InputFormat3d | None:
-    match ext.lower():
-        case "fbx":
-            return InputFormat3d(OptionFbx())
-        case "gltf":
-            return InputFormat3d(OptionGltf())
-        case "obj":
-            return InputFormat3d(
-                OptionObj(
-                    coords=System(
-                        forward=AxisDirectionPair(
-                            axis=Axis.Y, direction=Direction.NEGATIVE
-                        ),
-                        up=AxisDirectionPair(axis=Axis.Z, direction=Direction.POSITIVE),
-                    ),
-                    units=UnitLength.MM,
-                )
-            )
-        case "ply":
-            return InputFormat3d(
-                OptionPly(
-                    coords=System(
-                        forward=AxisDirectionPair(
-                            axis=Axis.Y, direction=Direction.NEGATIVE
-                        ),
-                        up=AxisDirectionPair(axis=Axis.Z, direction=Direction.POSITIVE),
-                    ),
-                    units=UnitLength.MM,
-                )
-            )
-        case "sldprt":
-            return InputFormat3d(OptionSldprt(split_closed_faces=True))
-        case "step" | "stp":
-            return InputFormat3d(OptionStep(split_closed_faces=True))
-        case "stl":
-            return InputFormat3d(
-                OptionStl(
-                    coords=System(
-                        forward=AxisDirectionPair(
-                            axis=Axis.Y, direction=Direction.NEGATIVE
-                        ),
-                        up=AxisDirectionPair(axis=Axis.Z, direction=Direction.POSITIVE),
-                    ),
-                    units=UnitLength.MM,
-                )
-            )
-    return None
 
 
 async def zoo_calculate_center_of_mass(
@@ -1069,19 +1002,39 @@ async def zoo_convert_cad_file(
     return export_path
 
 
+@dataclass
+class ResultZooExecuteKclLocal:
+    ok: bool
+    message: str
+
+
+@dataclass
+class ResultZooExecuteKclRemote:
+    ok: bool
+    message: str
+    path_artifact_graph: Path
+
+
+ResultZooExecuteKcl: TypeAlias = ResultZooExecuteKclLocal | ResultZooExecuteKclRemote
+
+
 async def zoo_execute_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
     session_id: str | None = None,
-) -> tuple[bool, str]:
+) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
     Args:
         kcl_code (str | None): KCL code
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
+        session_id (str | None): An open modeling session in which to execute the KCL.
 
     Returns:
-        tuple(bool, str): Returns True if the KCL code ran to completion and a result message, False otherwise and the error message. When the run completes, it may still report compilation issues (warnings, errors, and fatal issues, e.g. a CSG operation with no overlap); these are appended to the message rather than treated as a hard failure. Note that session_id runs are executed by the engine, whose response carries no non-fatal diagnostics, so the message says so instead of implying the code is clean.
+        ResultZooExecuteKcl: The execution status and message. Session executions
+        also include the artifact graph's temporary JSON file path. When a local
+        run completes, compilation issues are appended to the message rather than
+        treated as a hard failure. Session runs cannot report non-fatal diagnostics.
     """
     logger.info("Executing KCL code")
 
@@ -1089,7 +1042,7 @@ async def zoo_execute_kcl(
 
     try:
         if session_id is not None:
-            zoo_exec_kcl_project(
+            path_artifact_graph = zoo_exec_kcl_project(
                 kcl_code=kcl_code,
                 kcl_path=kcl_path,
                 session_id=session_id,
@@ -1098,11 +1051,15 @@ async def zoo_execute_kcl(
             # The engine's exec_kcl_project response carries only an artifact
             # graph, so warnings the local compiler would surface are not
             # available here. Say so rather than report an unqualified success.
-            return True, (
-                "KCL code executed successfully in the modeling session. "
-                "Non-fatal diagnostics (warnings and non-fatal errors) are not "
-                "reported for session runs; re-run without session_id to check "
-                "them."
+            return ResultZooExecuteKclRemote(
+                ok=True,
+                message=(
+                    "KCL code executed successfully in the modeling session. "
+                    "Non-fatal diagnostics (warnings and non-fatal errors) are not "
+                    "reported for session runs; re-run without session_id to check "
+                    "them."
+                ),
+                path_artifact_graph=path_artifact_graph,
             )
 
         if kcl_code:
@@ -1127,13 +1084,17 @@ async def zoo_execute_kcl(
                 "KCL code execution completed with the following issues:\n\n"
                 + "\n\n".join(sections)
             )
-            return True, message
+            return ResultZooExecuteKclLocal(ok=True, message=message)
 
         logger.info("KCL code executed successfully")
-        return True, "KCL code executed successfully"
+        return ResultZooExecuteKclLocal(
+            ok=True, message="KCL code executed successfully"
+        )
     except Exception as e:
         logger.info("Failed to execute KCL code: %s", e)
-        return False, f"Failed to execute KCL code: {e}"
+        return ResultZooExecuteKclLocal(
+            ok=False, message=f"Failed to execute KCL code: {e}"
+        )
 
 
 async def zoo_export_kcl(
@@ -1455,7 +1416,7 @@ def _exec_kcl_project(
     ws: WebSocketModelingCommandsWs,
     entrypoint: str,
     files: list[dict[str, str | list[int]]],
-) -> dict[str, object]:
+) -> Path:
     """Execute a KCL project through the server-side websocket protocol."""
     request_id = ModelingCmdId(uuid4())
     request = {
@@ -1501,7 +1462,12 @@ def _exec_kcl_project(
         artifact_graph = success.get("artifact_graph")
         if not isinstance(artifact_graph, dict):
             raise ZooMCPException("KCL project execution returned no artifact graph")
-        return artifact_graph
+
+        with NamedTemporaryFile(
+            mode="w", delete=False, suffix=".json", encoding="utf-8"
+        ) as artifact_graph_file:
+            json.dump(artifact_graph, artifact_graph_file)
+            return Path(artifact_graph_file.name)
 
 
 @dataclass
@@ -1627,61 +1593,44 @@ def _evict_modeling_session(session_id: str) -> None:
 
 
 @contextmanager
-def _modeling_websocket(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-    session_id: str | None,
-) -> Iterator[WebSocketModelingCommandsWs]:
-    if session_id is not None:
-        with _modeling_sessions_lock:
-            session = _modeling_sessions.get(session_id)
-            if session is None:
-                raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+def _modeling_websocket(session_id: str) -> Iterator[WebSocketModelingCommandsWs]:
+    with _modeling_sessions_lock:
+        session = _modeling_sessions.get(session_id)
+        if session is None:
+            raise ZooMCPException(f"Unknown modeling session '{session_id}'")
 
-        # Acquired outside the registry lock: blocking on a busy session while
-        # holding it would stall every other session's management calls.
-        session.lock.acquire()
-        try:
-            yield session.websocket
-        except (WebSocketException, OSError) as error:
-            _evict_modeling_session(session_id)
-            raise ZooMCPException(
-                f"Modeling session '{session_id}' is no longer connected "
-                f"({error}); start a new session"
-            ) from error
-        finally:
-            session.last_used = monotonic()
-            session.lock.release()
-        return
-
-    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
-    with _modeling_websocket_context() as websocket:
-        _exec_kcl_project(websocket, entrypoint, files)
-        yield websocket
+    # Acquired outside the registry lock: blocking on a busy session while
+    # holding it would stall every other session's management calls.
+    session.lock.acquire()
+    try:
+        yield session.websocket
+    except (WebSocketException, OSError) as error:
+        _evict_modeling_session(session_id)
+        raise ZooMCPException(
+            f"Modeling session '{session_id}' is no longer connected "
+            f"({error}); start a new session"
+        ) from error
+    finally:
+        session.last_used = monotonic()
+        session.lock.release()
 
 
 def zoo_exec_kcl_project(
+    session_id: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
-    session_id: str | None = None,
-) -> dict[str, object]:
+) -> Path:
     entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
 
-    if session_id is not None:
-        with _modeling_websocket(None, None, session_id) as ws:
-            return _exec_kcl_project(ws, entrypoint, files)
-
-    with _modeling_websocket_context() as ws:
+    with _modeling_websocket(session_id) as ws:
         return _exec_kcl_project(ws, entrypoint, files)
 
 
 def zoo_face_info(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
     face_id: Uuid,
-    session_id: str | None = None,
+    session_id: str,
 ) -> FaceInfo:
-    with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
+    with _modeling_websocket(session_id) as ws:
         cmd_id_face_get_position = ModelingCmdId(uuid4())
         ws.send(
             WebSocketRequest(
@@ -1857,82 +1806,14 @@ def _send_modeling_command(
     )
 
 
-def _import_cad_file(ws: WebSocketModelingCommandsWs, input_path: Path | str) -> str:
-    """Import a CAD file into the scene and return the imported object's id.
-
-    Sent as a binary frame rather than through ``_send_modeling_command``
-    because the file contents are arbitrary bytes.
-    """
-    input_path = Path(input_path)
-
-    input_ext = input_path.suffix.split(".")[-1].lower()
-    if input_ext not in SUPPORTED_EXTS:
-        raise ZooMCPException(
-            f"'{input_path.name}' does not have a supported CAD extension; "
-            f"expected one of {sorted(SUPPORTED_EXTS)}"
-        )
-
-    input_format = _get_input_format(input_ext)
-    if input_format is None:
-        raise ZooMCPException(f"'{input_ext}' files cannot be imported")
-
-    command_id = ModelingCmdId(uuid4())
-    with open(input_path, "rb") as data:
-        ws.send_binary(
-            WebSocketRequest(
-                OptionModelingCmdReq(
-                    cmd=ModelingCmd(
-                        OptionImportFiles(
-                            files=[ImportFile(data=data.read(), path=input_path.name)],
-                            format=input_format,
-                        )
-                    ),
-                    cmd_id=command_id,
-                )
-            )
-        )
-
-    response = _await_modeling_response(
-        ws,
-        command_id,
-        ResponseImportFiles,
-        "CAD file import",
-    )
-    return response.data.object_id
-
-
-@contextmanager
-def _snapshot_scene(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-    input_file: Path | str | None,
-    session_id: str | None,
-) -> Iterator[tuple[WebSocketModelingCommandsWs, str | None]]:
-    """Open a websocket holding the scene to be captured.
-
-    Yields the socket together with the imported object's id, which is only
-    set for a CAD file. KCL and session scenes zoom to fit the whole scene
-    instead, so they have no single object to target.
-    """
-    if input_file is not None:
-        with _modeling_websocket_context() as websocket:
-            yield websocket, _import_cad_file(websocket, input_file)
-        return
-
-    with _modeling_websocket(kcl_code, kcl_path, session_id) as websocket:
-        yield websocket, None
-
-
 def zoo_execute_modeling_command(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
     command: ModelingCmd,
     expected_response: type[_ModelingResponseT],
     response_description: str,
-    session_id: str | None = None,
+    session_id: str,
 ) -> _ModelingResponseT:
-    """Execute a KCL project, then run one modeling command in its session."""
-    with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
+    """Run one modeling command in an existing session."""
+    with _modeling_websocket(session_id) as ws:
         return _send_modeling_command(
             ws,
             command,
@@ -1942,21 +1823,14 @@ def zoo_execute_modeling_command(
 
 
 def zoo_snapshot(
-    kcl_code: str | None = None,
-    kcl_path: Path | str | None = None,
-    input_file: Path | str | None = None,
-    session_id: str | None = None,
+    session_id: str,
     views: list[OptionDefaultCameraLookAt] | None = None,
     max_image_dimension: int = 512,
     padding: float = 0.1,
     zoom: bool = True,
     highlight_edges: bool = False,
 ) -> bytes:
-    """Capture a scene as a JPEG, from one camera or several.
-
-    The scene comes from exactly one of: ``kcl_code``/``kcl_path`` executed in
-    a temporary scene, a CAD ``input_file`` imported into one, or an existing
-    ``session_id``.
+    """Capture an existing modeling session as a JPEG, from one camera or several.
 
     The camera is always switched to an orthographic projection, since
     perspective distorts measurements read off the image. ``views`` gives the
@@ -1974,7 +1848,7 @@ def zoo_snapshot(
     highlighted via highlight_set_entities stand out instead of competing with
     the outline drawn on every edge in the scene.
     """
-    with _snapshot_scene(kcl_code, kcl_path, input_file, session_id) as (ws, object_id):
+    with _modeling_websocket(session_id) as ws:
         _send_modeling_command(
             ws,
             ModelingCmd(OptionDefaultCameraSetOrthographic()),
@@ -1990,12 +1864,7 @@ def zoo_snapshot(
             "edge line visibility",
         )
 
-        # An imported CAD file is framed on the object itself; a KCL or session
-        # scene has no single object id, so zoom to fit covers everything.
-        zoom_to_fit = OptionZoomToFit(
-            object_ids=[object_id] if object_id is not None else [],
-            padding=padding,
-        )
+        zoom_to_fit = OptionZoomToFit(object_ids=[], padding=padding)
 
         jpeg_contents_list: list[bytes] = []
         for view in views or [None]:

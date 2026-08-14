@@ -69,13 +69,13 @@ runtime. It has the additional benefit of preventing shared state.
 
 ```python
 from mcp.server.fastmcp import FastMCP
-from zoo_mcp.zoo_tools import zoo_execute_kcl
+from zoo_mcp.zoo_tools import ResultZooExecuteKcl, zoo_execute_kcl
 
 mcp = FastMCP(name="My Example Server")
 
 
 @mcp.tool()
-async def my_execute_kcl(kcl_code: str) -> tuple[bool, str]:
+async def my_execute_kcl(kcl_code: str) -> ResultZooExecuteKcl:
     """
     Example tool that uses the zoo_execute_kcl function from zoo_mcp.zoo_tools
     """
@@ -120,10 +120,10 @@ Tools are defined in `src/zoo_mcp/*.py`, where they are then imported into
 engine facilities. This source file houses other utilities like `parse_unit` or
 `normalize_ext` (normalizing file extensions).
 
-For example, running KCL and taking a snapshot is defined in that source file.
-
-Right now the MCP is structured such that one engine connection is used per
-tool call. MCP's stateless nature is what more or less influenced this.
+Modeling scenes use explicit persistent sessions. Call `start_modeling_session`,
+populate the returned session with `execute_kcl` or `exec_kcl_project`, pass the
+same `session_id` to snapshot and modeling tools, then call
+`stop_modeling_session` when finished.
 
 ## Contributing
 
