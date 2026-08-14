@@ -3,6 +3,7 @@ import atexit
 import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import FrameType
 
 from kittycad.models import (
@@ -512,7 +513,7 @@ async def exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
-) -> str:
+) -> Path:
     """Run a KCL project on the server side and save its artifact graph.
 
     Args:
@@ -521,16 +522,14 @@ async def exec_kcl_project(
         session_id: The modeling session in which to execute the project.
 
     Returns:
-        str: The path to the JSON file containing the artifact graph.
+        Path: The JSON file containing the artifact graph.
     """
     logger.info("exec_kcl_project tool called")
 
-    return str(
-        zoo_exec_kcl_project(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            session_id=session_id,
-        )
+    return zoo_exec_kcl_project(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        session_id=session_id,
     )
 
 

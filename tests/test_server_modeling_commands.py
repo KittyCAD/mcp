@@ -38,7 +38,7 @@ from kittycad.models.modeling_cmd import (
     OptionSetSelectionFilter,
 )
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent
+from mcp.types import ImageContent, TextContent
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
@@ -594,7 +594,10 @@ async def test_kcl_execution_tools_forward_session_id(
         "message": "KCL code executed successfully",
         "path_artifact_graph": str(artifact_graph_path),
     }
-    assert _result(project_response) == str(artifact_graph_path)
+    assert isinstance(project_response, Sequence)
+    project_content = project_response[0]
+    assert isinstance(project_content, TextContent)
+    assert project_content.text == f'"{artifact_graph_path}"'
     execute.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,
