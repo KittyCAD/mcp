@@ -542,10 +542,7 @@ async def test_exec_kcl_project_tool(monkeypatch, tmp_path):
         },
     )
 
-    assert isinstance(response, Sequence)
-    content = response[0]
-    assert isinstance(content, TextContent)
-    assert json.loads(content.text) == str(artifact_graph_path)
+    assert _meta_result(response) == str(artifact_graph_path)
     mock.assert_called_once_with(
         kcl_code="sketch = startSketchOn(XY)",
         kcl_path=None,

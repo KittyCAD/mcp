@@ -3,7 +3,6 @@ import atexit
 import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from types import FrameType
 
 from kittycad.models import (
@@ -127,6 +126,7 @@ from zoo_mcp.zoo_tools import (
     zoo_format_kcl,
     zoo_get_modeling_sessions,
     zoo_get_sketch_constraint_status,
+    zoo_import_cad_file,
     zoo_lint_and_fix_kcl,
     zoo_list_org_datasets,
     zoo_list_org_skills,
@@ -514,7 +514,7 @@ async def exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
-) -> Path:
+) -> str:
     """Run a KCL project on the server side and save its artifact graph.
 
     Args:
@@ -523,20 +523,25 @@ async def exec_kcl_project(
         session_id: The modeling session in which to execute the project.
 
     Returns:
-        Path: The JSON file containing the artifact graph.
+        str: The path to the JSON file containing the artifact graph.
     """
     logger.info("exec_kcl_project tool called")
 
-    return zoo_exec_kcl_project(
-        kcl_code=kcl_code,
-        kcl_path=kcl_path,
-        session_id=session_id,
+    return str(
+        zoo_exec_kcl_project(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            session_id=session_id,
+        )
     )
 
 
 @mcp.tool()
 async def start_modeling_session() -> str:
     """Open an empty modeling websocket for subsequent tools.
+
+    Only one modeling session can be open at a time. Stop the current session
+    before starting another.
 
     Pass the returned session_id to execute_kcl or exec_kcl_project to populate
     the scene, then reuse it with modeling query, selection, and highlight tools.
@@ -550,7 +555,7 @@ async def start_modeling_session() -> str:
 
 
 @mcp.tool()
-async def get_sessions() -> list[str]:
+async def get_modeling_sessions() -> list[str]:
     """List modeling sessions owned by the current MCP server process.
 
     Use this to recover the active session ID after reconnecting to a server
@@ -561,8 +566,24 @@ async def get_sessions() -> list[str]:
     Returns:
         list[str]: Active modeling session IDs, currently empty or one item.
     """
-    logger.info("get_sessions tool called")
+    logger.info("get_modeling_sessions tool called")
     return zoo_get_modeling_sessions()
+
+
+@mcp.tool()
+async def import_cad_file(session_id: str, input_path: str) -> str:
+    """Import a CAD file into an existing modeling session.
+
+    Args:
+        session_id: The ID returned by start_modeling_session.
+        input_path: Path to a .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp,
+                    or .stl file.
+
+    Returns:
+        str: The modeling engine ID of the imported object.
+    """
+    logger.info("import_cad_file tool called for file: %s", input_path)
+    return zoo_import_cad_file(session_id=session_id, input_path=input_path)
 
 
 @mcp.tool()

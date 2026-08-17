@@ -38,7 +38,7 @@ from kittycad.models.modeling_cmd import (
     OptionSetSelectionFilter,
 )
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent, TextContent
+from mcp.types import ImageContent
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
@@ -78,20 +78,38 @@ async def test_modeling_tools_are_registered():
         "highlight_set_entities",
         "snapshot",
         "start_modeling_session",
-        "get_sessions",
+        "get_modeling_sessions",
+        "import_cad_file",
         "stop_modeling_session",
     } <= names
 
 
 @pytest.mark.asyncio
-async def test_get_sessions_tool(monkeypatch: pytest.MonkeyPatch):
-    get_sessions = MagicMock(return_value=["session-id"])
-    monkeypatch.setattr(server, "zoo_get_modeling_sessions", get_sessions)
+async def test_get_modeling_sessions_tool(monkeypatch: pytest.MonkeyPatch):
+    get_modeling_sessions = MagicMock(return_value=["session-id"])
+    monkeypatch.setattr(server, "zoo_get_modeling_sessions", get_modeling_sessions)
 
-    response = await mcp.call_tool("get_sessions", arguments={})
+    response = await mcp.call_tool("get_modeling_sessions", arguments={})
 
     assert _result(response) == ["session-id"]
-    get_sessions.assert_called_once_with()
+    get_modeling_sessions.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_import_cad_file_tool(monkeypatch: pytest.MonkeyPatch):
+    import_cad_file = MagicMock(return_value="object-id")
+    monkeypatch.setattr(server, "zoo_import_cad_file", import_cad_file)
+
+    response = await mcp.call_tool(
+        "import_cad_file",
+        arguments={"session_id": "session-id", "input_path": "part.step"},
+    )
+
+    assert _result(response) == "object-id"
+    import_cad_file.assert_called_once_with(
+        session_id="session-id",
+        input_path="part.step",
+    )
 
 
 @pytest.mark.asyncio
@@ -606,10 +624,7 @@ async def test_kcl_execution_tools_forward_session_id(
         "message": "KCL code executed successfully",
         "path_artifact_graph": str(artifact_graph_path),
     }
-    assert isinstance(project_response, Sequence)
-    project_content = project_response[0]
-    assert isinstance(project_content, TextContent)
-    assert project_content.text == f'"{artifact_graph_path}"'
+    assert _result(project_response) == str(artifact_graph_path)
     execute.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,
