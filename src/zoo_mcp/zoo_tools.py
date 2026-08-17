@@ -1592,8 +1592,14 @@ class _ModelingSession:
 
 @dataclass
 class _StartingModelingSession:
+    """A claim on the single session slot while its websocket is connecting.
+
+    A starter owns the slot only for as long as the slot still holds its own
+    sentinel. Whoever removes it has canceled the start, so the starter closes
+    the socket it opened instead of publishing it.
+    """
+
     session_id: str
-    cancelled: bool = False
 
 
 _modeling_session: _ModelingSession | _StartingModelingSession | None = None
@@ -1636,8 +1642,11 @@ def zoo_start_modeling_session() -> str:
     starting = _StartingModelingSession(session_id=session_id)
     with _modeling_session_lock:
         if _modeling_session is not None:
+            # Name the blocker so a caller that lost track of it, or that is
+            # blocked by a start whose handshake is hung, can stop it.
             raise ZooMCPException(
-                "A modeling session is already open or starting; "
+                f"A modeling session is already open or starting "
+                f"('{_modeling_session.session_id}'); "
                 "stop it before starting another"
             )
         _modeling_session = starting
@@ -1658,11 +1667,9 @@ def zoo_start_modeling_session() -> str:
         lock=Lock(),
     )
     with _modeling_session_lock:
-        if _modeling_session is starting and not starting.cancelled:
+        if _modeling_session is starting:
             _modeling_session = session
             return session_id
-        if _modeling_session is starting:
-            _modeling_session = None
 
     context.__exit__(None, None, None)
     raise ZooMCPException("Modeling session start was cancelled")
@@ -1680,13 +1687,14 @@ def zoo_stop_modeling_session(session_id: str) -> None:
     global _modeling_session
 
     with _modeling_session_lock:
-        if (
-            not isinstance(_modeling_session, _ModelingSession)
-            or _modeling_session.session_id != session_id
-        ):
+        if _modeling_session is None or _modeling_session.session_id != session_id:
             raise ZooMCPException(f"Unknown modeling session '{session_id}'")
         session = _modeling_session
         _modeling_session = None
+
+    if isinstance(session, _StartingModelingSession):
+        logger.info("Cancelled starting modeling session %s", session_id)
+        return
 
     _close_modeling_session(session)
 
@@ -1696,13 +1704,13 @@ def zoo_stop_all_modeling_sessions() -> None:
     global _modeling_session
 
     with _modeling_session_lock:
-        if isinstance(_modeling_session, _StartingModelingSession):
-            _modeling_session.cancelled = True
-            return
         session = _modeling_session
         _modeling_session = None
 
     if session is None:
+        return
+    if isinstance(session, _StartingModelingSession):
+        # Its own starter closes the half-open socket; see zoo_start_modeling_session.
         return
     try:
         _close_modeling_session(session)

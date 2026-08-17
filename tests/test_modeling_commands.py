@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 from contextlib import nullcontext
@@ -301,6 +302,86 @@ def test_start_handshake_does_not_hold_state_lock_and_shutdown_cancels_it(
     assert "start was cancelled" in str(errors[0])
     assert zoo_tools._modeling_session is None
     context.__exit__.assert_called_once_with(None, None, None)
+
+
+def test_stop_recovers_the_slot_from_a_start_whose_handshake_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The whole recovery loop: the rejection names the pending start, stopping
+    it frees the slot immediately, and a new session opens while the hung
+    handshake is still outstanding."""
+    hung_context = MagicMock()
+    live_context = MagicMock()
+    live_websocket = MagicMock()
+    live_context.__enter__.return_value = live_websocket
+    contexts = iter([hung_context, live_context])
+    handshake_started = threading.Event()
+    release_handshake = threading.Event()
+    errors: list[Exception] = []
+
+    def enter_hung_websocket() -> MagicMock:
+        handshake_started.set()
+        release_handshake.wait(timeout=5)
+        return MagicMock()
+
+    def start_session() -> None:
+        try:
+            zoo_tools.zoo_start_modeling_session()
+        except Exception as error:
+            errors.append(error)
+
+    hung_context.__enter__.side_effect = enter_hung_websocket
+    monkeypatch.setattr(
+        zoo_tools, "_modeling_websocket_context", lambda: next(contexts)
+    )
+
+    starter = threading.Thread(target=start_session)
+    starter.start()
+    assert handshake_started.wait(timeout=5)
+
+    # A blocked caller learns the pending session's ID from the rejection, which
+    # is its only way to name something get_modeling_sessions does not list.
+    assert zoo_tools.zoo_get_modeling_sessions() == []
+    with pytest.raises(ZooMCPException, match="already open or starting") as rejection:
+        zoo_tools.zoo_start_modeling_session()
+    pending_id = re.search(r"'([^']+)'", str(rejection.value))
+    assert pending_id is not None
+
+    zoo_tools.zoo_stop_modeling_session(pending_id.group(1))
+
+    # Still hung, but the slot is free, so the next start no longer waits on it.
+    assert not release_handshake.is_set()
+    recovered_id = zoo_tools.zoo_start_modeling_session()
+    assert zoo_tools.zoo_get_modeling_sessions() == [recovered_id]
+
+    release_handshake.set()
+    starter.join(timeout=5)
+
+    # The cancelled starter closes the socket it opened and leaves the
+    # recovered session alone.
+    assert len(errors) == 1
+    assert "start was cancelled" in str(errors[0])
+    hung_context.__exit__.assert_called_once_with(None, None, None)
+    live_context.__exit__.assert_not_called()
+    assert zoo_tools.zoo_get_modeling_sessions() == [recovered_id]
+
+    zoo_tools.zoo_stop_modeling_session(recovered_id)
+
+
+def test_stop_rejects_an_id_that_is_neither_open_nor_starting(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = MagicMock()
+    context.__enter__.return_value = MagicMock()
+    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+
+    session_id = zoo_tools.zoo_start_modeling_session()
+    with pytest.raises(ZooMCPException, match="Unknown modeling session"):
+        zoo_tools.zoo_stop_modeling_session("some-other-id")
+
+    # The real session survives a mismatched stop.
+    assert zoo_tools.zoo_get_modeling_sessions() == [session_id]
+    zoo_tools.zoo_stop_modeling_session(session_id)
 
 
 def test_busy_session_does_not_block_rejection_of_another_session(

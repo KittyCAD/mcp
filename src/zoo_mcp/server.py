@@ -541,7 +541,8 @@ async def start_modeling_session() -> str:
     """Open an empty modeling websocket for subsequent tools.
 
     Only one modeling session can be open at a time. Stop the current session
-    before starting another.
+    before starting another. If one is already open, or is still connecting,
+    this fails with an error naming that session's ID so it can be stopped.
 
     The server does not expire sessions after an idle or lifetime timeout.
     Callers are responsible for tracking and enforcing their desired timeout.
@@ -593,8 +594,12 @@ async def import_cad_file(session_id: str, input_file: str) -> str:
 async def stop_modeling_session(session_id: str) -> None:
     """Close a persistent modeling websocket session.
 
+    Also accepts the ID of a session that is still connecting, which cancels
+    that start and frees the slot for a new start_modeling_session call.
+
     Args:
-        session_id: The ID returned by start_modeling_session.
+        session_id: The ID returned by start_modeling_session, or the one named
+                    by a "already open or starting" error.
 
     Returns:
         None
