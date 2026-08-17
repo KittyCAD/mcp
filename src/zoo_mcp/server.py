@@ -447,14 +447,14 @@ async def calculate_bounding_box_cad(
 
 @mcp.tool()
 async def convert_cad_file(
-    input_path: str,
+    input_file: str,
     export_path: str | None,
     export_format: str | None,
 ) -> str:
     """Convert a CAD file from one format to another CAD file format.
 
     Args:
-        input_path (str): The input cad file to convert. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
+        input_file (str): The input cad file to convert. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
         export_path (str | None): The path to save the converted CAD file to. If the path is a directory, a temporary file will be created in the directory. If the path is a file, it will be overwritten if the extension is valid.
         export_format (str | None): The format of the exported CAD file. This should be one of 'fbx', 'glb', 'gltf', 'obj', 'ply', 'step', 'stl'. If no format is provided, the default is 'step'.
 
@@ -466,7 +466,7 @@ async def convert_cad_file(
 
     try:
         step_path = await zoo_convert_cad_file(
-            input_path=input_path, export_path=export_path, export_format=export_format
+            input_file=input_file, export_path=export_path, export_format=export_format
         )
         return str(step_path)
     except Exception as e:
@@ -586,7 +586,7 @@ async def import_cad_file(session_id: str, input_file: str) -> str:
         str: The modeling engine ID of the imported object.
     """
     logger.info("import_cad_file tool called for file: %s", input_file)
-    return zoo_import_cad_file(session_id=session_id, input_path=input_file)
+    return zoo_import_cad_file(session_id=session_id, input_file=input_file)
 
 
 @mcp.tool()

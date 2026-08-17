@@ -672,18 +672,18 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
     return None
 
 
-def zoo_import_cad_file(session_id: str, input_path: Path | str) -> str:
+def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
     """Import a CAD file into the scene and return the imported object's id.
 
     Sent as a binary frame rather than through ``_send_modeling_command``
     because the file contents are binary in MsgPack encoding.
     """
-    input_path = Path(input_path)
+    input_file = Path(input_file)
 
-    input_ext = input_path.suffix.split(".")[-1].lower()
+    input_ext = input_file.suffix.split(".")[-1].lower()
     if input_ext not in SUPPORTED_EXTS:
         raise ZooMCPException(
-            f"'{input_path.name}' does not have a supported CAD extension; "
+            f"'{input_file.name}' does not have a supported CAD extension; "
             f"expected one of {sorted(SUPPORTED_EXTS)}"
         )
 
@@ -692,13 +692,13 @@ def zoo_import_cad_file(session_id: str, input_path: Path | str) -> str:
         raise ZooMCPException(f"'{input_ext}' files cannot be imported")
 
     command_id = ModelingCmdId(uuid4())
-    with open(input_path, "rb") as data, _modeling_websocket(session_id) as ws:
+    with open(input_file, "rb") as data, _modeling_websocket(session_id) as ws:
         ws.send_binary(
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(
                         OptionImportFiles(
-                            files=[ImportFile(data=data.read(), path=input_path.name)],
+                            files=[ImportFile(data=data.read(), path=input_file.name)],
                             format=input_format,
                         )
                     ),
@@ -1019,14 +1019,14 @@ async def zoo_calculate_bounding_box_cad(
 
 
 async def zoo_convert_cad_file(
-    input_path: Path | str,
+    input_file: Path | str,
     export_path: Path | str | None = None,
     export_format: FileExportFormat | str | None = FileExportFormat.STEP,
 ) -> Path:
     """Convert a cad file to another cad file
 
     Args:
-        input_path (Path | str): path to the CAD file to convert. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
+        input_file (Path | str): path to the CAD file to convert. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
         export_path (Path | str | None): The path to save the cad file. If no path is provided, a temporary file will be created. If the path is a directory, a temporary file will be created in the directory. If the path is a file, it will be overwritten if the extension is valid.
         export_format (FileExportFormat | str | None): format to export the KCL code to. This should be one of 'fbx', 'glb', 'gltf', 'obj', 'ply', 'step', 'stl'. If no format is provided, the default is 'step'.
 
@@ -1034,12 +1034,12 @@ async def zoo_convert_cad_file(
         Path: Return the path to the exported model if successful
     """
 
-    input_path = Path(input_path)
-    input_ext = input_path.suffix.split(".")[1].lower()
+    input_file = Path(input_file)
+    input_ext = input_file.suffix.split(".")[1].lower()
     if input_ext not in SUPPORTED_EXTS:
         logger.error("The provided input path does not have a valid extension")
         raise ZooMCPException("The provided input path does not have a valid extension")
-    logger.info("Converting the cad file %s", str(input_path.resolve()))
+    logger.info("Converting the cad file %s", str(input_file.resolve()))
 
     # check the export format
     if not export_format:
@@ -1083,7 +1083,7 @@ async def zoo_convert_cad_file(
             )
             logger.info("Using provided export path: %s", str(export_path.name))
 
-    async with aiofiles.open(input_path, "rb") as inp:
+    async with aiofiles.open(input_file, "rb") as inp:
         data = await inp.read()
 
     export_response = kittycad_client.file.create_file_conversion(

@@ -424,7 +424,7 @@ async def test_convert_cad_file(cube_stl: str):
     response = await mcp.call_tool(
         "convert_cad_file",
         arguments={
-            "input_path": cube_stl,
+            "input_file": cube_stl,
             "export_path": None,
             "export_format": "obj",
         },
@@ -439,7 +439,7 @@ async def test_convert_cad_file_error(empty_step: str):
     response = await mcp.call_tool(
         "convert_cad_file",
         arguments={
-            "input_path": empty_step,
+            "input_file": empty_step,
             "export_path": None,
             "export_format": "asdf",
         },
