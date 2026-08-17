@@ -195,11 +195,13 @@ def test_send_modeling_command_raises_readable_message_for_own_failure():
 
 def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ):
     context = MagicMock()
     websocket = MagicMock()
     context.__enter__.return_value = websocket
-    artifact_graph_path = Path("artifact-graph.json")
+    artifact_graph_path = tmp_path / "artifact-graph.json"
+    artifact_graph_path.write_text("{}")
     execute_project = MagicMock(return_value=artifact_graph_path)
     expected_response = ResponseEntityGetIndex(data=EntityGetIndex(entity_index=4))
     send_command = MagicMock(return_value=expected_response)
@@ -223,11 +225,13 @@ def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
 
     assert result == expected_response
     assert artifact_graph == artifact_graph_path
+    assert artifact_graph_path.exists()
     execute_project.assert_called_once()
     assert execute_project.call_args.args[0] is websocket
     assert send_command.call_args.args[0] is websocket
 
     zoo_tools.zoo_stop_modeling_session(session_id)
+    assert not artifact_graph_path.exists()
     context.__exit__.assert_called_once_with(None, None, None)
     with pytest.raises(ZooMCPException, match="Unknown modeling session"):
         zoo_tools.zoo_execute_modeling_command(
@@ -249,6 +253,53 @@ def test_modeling_session_start_does_not_execute_kcl(monkeypatch: pytest.MonkeyP
 
     execute_project.assert_not_called()
     zoo_tools.zoo_stop_modeling_session(session_id)
+    context.__exit__.assert_called_once_with(None, None, None)
+
+
+def test_start_handshake_does_not_hold_state_lock_and_shutdown_cancels_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    context = MagicMock()
+    websocket = MagicMock()
+    handshake_started = threading.Event()
+    release_handshake = threading.Event()
+    results: list[str] = []
+    errors: list[Exception] = []
+
+    def enter_websocket() -> MagicMock:
+        handshake_started.set()
+        release_handshake.wait(timeout=5)
+        return websocket
+
+    def start_session() -> None:
+        try:
+            results.append(zoo_tools.zoo_start_modeling_session())
+        except Exception as error:
+            errors.append(error)
+
+    context.__enter__.side_effect = enter_websocket
+    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+
+    starter = threading.Thread(target=start_session)
+    starter.start()
+    assert handshake_started.wait(timeout=5)
+
+    started = time.monotonic()
+    assert zoo_tools.zoo_get_modeling_sessions() == []
+    with pytest.raises(ZooMCPException, match="already open or starting"):
+        zoo_tools.zoo_start_modeling_session()
+    zoo_tools.zoo_stop_all_modeling_sessions()
+    elapsed = time.monotonic() - started
+
+    release_handshake.set()
+    starter.join(timeout=5)
+
+    assert elapsed < 0.5
+    assert results == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], ZooMCPException)
+    assert "start was cancelled" in str(errors[0])
+    assert zoo_tools._modeling_session is None
     context.__exit__.assert_called_once_with(None, None, None)
 
 
@@ -287,12 +338,19 @@ def test_busy_session_does_not_block_rejection_of_another_session(
     )
 
 
-def test_session_is_evicted_when_its_websocket_dies(monkeypatch: pytest.MonkeyPatch):
+def test_session_is_evicted_when_its_websocket_dies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     context = MagicMock()
     context.__enter__.return_value = MagicMock()
     monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
 
     session_id = zoo_tools.zoo_start_modeling_session()
+    artifact_graph_path = tmp_path / "artifact-graph.json"
+    artifact_graph_path.write_text("{}")
+    assert isinstance(zoo_tools._modeling_session, zoo_tools._ModelingSession)
+    zoo_tools._modeling_session.artifact_graph_paths.add(artifact_graph_path)
 
     with (
         pytest.raises(ZooMCPException, match="no longer connected"),
@@ -301,6 +359,7 @@ def test_session_is_evicted_when_its_websocket_dies(monkeypatch: pytest.MonkeyPa
         raise ConnectionClosedError(None, None)
 
     assert zoo_tools._modeling_session is None
+    assert not artifact_graph_path.exists()
     with (
         pytest.raises(ZooMCPException, match="Unknown modeling session"),
         zoo_tools._modeling_websocket(session_id),

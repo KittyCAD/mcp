@@ -120,9 +120,11 @@ Tools are defined in `src/zoo_mcp/*.py`, where they are then imported into
 engine facilities. This source file houses other utilities like `parse_unit` or
 `normalize_ext` (normalizing file extensions).
 
-Modeling scenes use explicit persistent sessions. Call `start_modeling_session`,
-populate the returned session with `execute_kcl` or `exec_kcl_project`, pass the
-same `session_id` to snapshot and modeling tools, then call
+Modeling scenes use explicit persistent sessions, with at most one session open
+per server process. Call `get_modeling_sessions` to recover its ID after a client
+reconnect, or call `start_modeling_session` when none exists. Populate the
+session with `execute_kcl`, `exec_kcl_project`, or `import_cad_file`; pass the
+same `session_id` to `snapshot` and modeling tools; then call
 `stop_modeling_session` when finished.
 
 ## Contributing

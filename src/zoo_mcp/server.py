@@ -543,6 +543,9 @@ async def start_modeling_session() -> str:
     Only one modeling session can be open at a time. Stop the current session
     before starting another.
 
+    The server does not expire sessions after an idle or lifetime timeout.
+    Callers are responsible for tracking and enforcing their desired timeout.
+
     Pass the returned session_id to execute_kcl or exec_kcl_project to populate
     the scene, then reuse it with modeling query, selection, and highlight tools.
     Stop the session explicitly with stop_modeling_session when finished.

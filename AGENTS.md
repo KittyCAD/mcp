@@ -46,7 +46,7 @@ This is a Model Context Protocol (MCP) server that exposes Zoo CAD and KCL utili
 ### API Integration
 The server connects to Zoo's KCL execution APIs using the KittyCAD client, and to `zoo.dev` markdown pages via `httpx` for the docs/samples indexes. All KittyCAD requests require a valid `ZOO_API_TOKEN` environment variable. Notable flows:
 - KCL execution / export tools (in `zoo_tools.py`) use the `kcl` bindings and the KittyCAD client's modeling/execution endpoints.
-- Modeling tools operate on persistent sessions. Callers create a session, populate it through `execute_kcl` or `exec_kcl_project`, and pass its `session_id` to `snapshot` and query tools. `zoo_snapshot` then loops camera → zoom-to-fit → take-snapshot on that session and tiles the results.
+- Modeling tools operate on persistent sessions, with at most one session open per server process. Callers use `get_modeling_sessions` to recover the active ID after reconnecting or `start_modeling_session` when none exists, then populate the session through `execute_kcl`, `exec_kcl_project`, or `import_cad_file`. They pass its `session_id` to `snapshot` and query tools and call `stop_modeling_session` when finished. `zoo_snapshot` then loops camera → zoom-to-fit → take-snapshot on that session and tiles the results.
 - Org datasets (`list_org_datasets`, `search_org_dataset_semantic`) call KittyCAD's org-datasets endpoints, with a raw-HTTP fallback when the SDK's pydantic models reject newly-added backend fields.
 - KCL docs/samples (`list_kcl_docs`, `search_kcl_docs`, `get_kcl_doc`, `list_kcl_samples`, `search_kcl_samples`, `get_kcl_sample`) read from the in-memory indexes populated lazily from `zoo.dev` (sitemap-driven for docs, `/aquarium` index for samples).
 

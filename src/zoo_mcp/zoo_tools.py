@@ -2,7 +2,7 @@ import io
 import json
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -1587,9 +1587,16 @@ class _ModelingSession:
     context: AbstractContextManager[WebSocketModelingCommandsWs]
     websocket: WebSocketModelingCommandsWs
     lock: Lock
+    artifact_graph_paths: set[Path] = field(default_factory=set)
 
 
-_modeling_session: _ModelingSession | None = None
+@dataclass
+class _StartingModelingSession:
+    session_id: str
+    cancelled: bool = False
+
+
+_modeling_session: _ModelingSession | _StartingModelingSession | None = None
 _modeling_session_lock = Lock()
 
 
@@ -1609,37 +1616,62 @@ def _modeling_websocket_context() -> AbstractContextManager[
 
 def _close_modeling_session(session: _ModelingSession) -> None:
     """Close one session's websocket, waiting for any in-flight command."""
-    with session.lock:
-        session.context.__exit__(None, None, None)
+    try:
+        with session.lock:
+            session.context.__exit__(None, None, None)
+    finally:
+        _unlink_modeling_session_artifact_graphs(session)
+
+
+def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
+    for path in session.artifact_graph_paths:
+        path.unlink(missing_ok=True)
+    session.artifact_graph_paths.clear()
 
 
 def zoo_start_modeling_session() -> str:
     global _modeling_session
 
-    # Keep the exclusivity check and registration atomic. Opening the socket
-    # under this lock prevents concurrent callers from both claiming the slot.
+    session_id = str(uuid4())
+    starting = _StartingModelingSession(session_id=session_id)
     with _modeling_session_lock:
         if _modeling_session is not None:
             raise ZooMCPException(
-                "A modeling session is already open; stop it before starting another"
+                "A modeling session is already open or starting; "
+                "stop it before starting another"
             )
+        _modeling_session = starting
 
+    try:
         context = _modeling_websocket_context()
         websocket = context.__enter__()
-        session_id = str(uuid4())
-        _modeling_session = _ModelingSession(
-            session_id=session_id,
-            context=context,
-            websocket=websocket,
-            lock=Lock(),
-        )
-    return session_id
+    except BaseException:
+        with _modeling_session_lock:
+            if _modeling_session is starting:
+                _modeling_session = None
+        raise
+
+    session = _ModelingSession(
+        session_id=session_id,
+        context=context,
+        websocket=websocket,
+        lock=Lock(),
+    )
+    with _modeling_session_lock:
+        if _modeling_session is starting and not starting.cancelled:
+            _modeling_session = session
+            return session_id
+        if _modeling_session is starting:
+            _modeling_session = None
+
+    context.__exit__(None, None, None)
+    raise ZooMCPException("Modeling session start was cancelled")
 
 
 def zoo_get_modeling_sessions() -> list[str]:
     """Return the IDs of modeling sessions owned by this server process."""
     with _modeling_session_lock:
-        if _modeling_session is None:
+        if not isinstance(_modeling_session, _ModelingSession):
             return []
         return [_modeling_session.session_id]
 
@@ -1648,7 +1680,10 @@ def zoo_stop_modeling_session(session_id: str) -> None:
     global _modeling_session
 
     with _modeling_session_lock:
-        if _modeling_session is None or _modeling_session.session_id != session_id:
+        if (
+            not isinstance(_modeling_session, _ModelingSession)
+            or _modeling_session.session_id != session_id
+        ):
             raise ZooMCPException(f"Unknown modeling session '{session_id}'")
         session = _modeling_session
         _modeling_session = None
@@ -1661,6 +1696,9 @@ def zoo_stop_all_modeling_sessions() -> None:
     global _modeling_session
 
     with _modeling_session_lock:
+        if isinstance(_modeling_session, _StartingModelingSession):
+            _modeling_session.cancelled = True
+            return
         session = _modeling_session
         _modeling_session = None
 
@@ -1677,8 +1715,17 @@ def _evict_modeling_session(session_id: str) -> None:
     global _modeling_session
 
     with _modeling_session_lock:
-        if _modeling_session is not None and _modeling_session.session_id == session_id:
+        if (
+            isinstance(_modeling_session, _ModelingSession)
+            and _modeling_session.session_id == session_id
+        ):
+            session = _modeling_session
             _modeling_session = None
+        else:
+            session = None
+
+    if session is not None:
+        _unlink_modeling_session_artifact_graphs(session)
 
 
 # Allows external agents to reuse engine connections so the Zoo infrastructure
@@ -1690,7 +1737,10 @@ def _evict_modeling_session(session_id: str) -> None:
 def _modeling_websocket(session_id: str) -> Iterator[WebSocketModelingCommandsWs]:
     with _modeling_session_lock:
         active_session = _modeling_session
-        if active_session is None or active_session.session_id != session_id:
+        if (
+            not isinstance(active_session, _ModelingSession)
+            or active_session.session_id != session_id
+        ):
             raise ZooMCPException(f"Unknown modeling session '{session_id}'")
         session = active_session
 
@@ -1717,7 +1767,16 @@ def zoo_exec_kcl_project(
     entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
 
     with _modeling_websocket(session_id) as ws:
-        return _exec_kcl_project(ws, entrypoint, files)
+        path = _exec_kcl_project(ws, entrypoint, files)
+        with _modeling_session_lock:
+            if (
+                not isinstance(_modeling_session, _ModelingSession)
+                or _modeling_session.session_id != session_id
+            ):
+                path.unlink(missing_ok=True)
+                raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+            _modeling_session.artifact_graph_paths.add(path)
+        return path
 
 
 def zoo_face_info(
