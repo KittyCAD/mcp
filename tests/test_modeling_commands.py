@@ -252,10 +252,10 @@ def test_modeling_session_start_does_not_execute_kcl(monkeypatch: pytest.MonkeyP
     context.__exit__.assert_called_once_with(None, None, None)
 
 
-def test_session_registry_lock_is_not_held_while_waiting_for_a_busy_session(
+def test_busy_session_does_not_block_rejection_of_another_session(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A queued caller must not block unrelated session management."""
+    """Starting another session must not wait for the active session's lock."""
     context = MagicMock()
     context.__enter__.return_value = MagicMock()
     monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
@@ -269,29 +269,21 @@ def test_session_registry_lock_is_not_held_while_waiting_for_a_busy_session(
             holding.set()
             release.wait(timeout=5)
 
-    def queue_behind() -> None:
-        with zoo_tools._modeling_websocket(session_id):
-            pass
-
     holder = threading.Thread(target=hold)
     holder.start()
     assert holding.wait(timeout=5)
-    queued = threading.Thread(target=queue_behind)
-    queued.start()
-    time.sleep(0.2)
 
     started = time.monotonic()
-    other_session_id = zoo_tools.zoo_start_modeling_session()
+    with pytest.raises(ZooMCPException, match="already open"):
+        zoo_tools.zoo_start_modeling_session()
     elapsed = time.monotonic() - started
 
     release.set()
     holder.join(timeout=5)
-    queued.join(timeout=5)
-    zoo_tools.zoo_stop_modeling_session(other_session_id)
     zoo_tools.zoo_stop_modeling_session(session_id)
 
     assert elapsed < 0.5, (
-        f"starting an unrelated session blocked for {elapsed:.2f}s behind a busy one"
+        f"rejecting another session blocked for {elapsed:.2f}s behind a busy one"
     )
 
 
@@ -308,7 +300,7 @@ def test_session_is_evicted_when_its_websocket_dies(monkeypatch: pytest.MonkeyPa
     ):
         raise ConnectionClosedError(None, None)
 
-    assert session_id not in zoo_tools._modeling_sessions
+    assert zoo_tools._modeling_session is None
     with (
         pytest.raises(ZooMCPException, match="Unknown modeling session"),
         zoo_tools._modeling_websocket(session_id),
@@ -316,39 +308,33 @@ def test_session_is_evicted_when_its_websocket_dies(monkeypatch: pytest.MonkeyPa
         pass
 
 
-def test_idle_sessions_are_reaped_on_start(monkeypatch: pytest.MonkeyPatch):
+def test_only_one_session_can_be_open(monkeypatch: pytest.MonkeyPatch):
     context = MagicMock()
     context.__enter__.return_value = MagicMock()
     monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
-
-    stale_id = zoo_tools.zoo_start_modeling_session()
-    zoo_tools._modeling_sessions[stale_id].last_used -= (
-        zoo_tools._MODELING_SESSION_IDLE_TIMEOUT + 1
-    )
-
-    fresh_id = zoo_tools.zoo_start_modeling_session()
-
-    assert stale_id not in zoo_tools._modeling_sessions
-    assert fresh_id in zoo_tools._modeling_sessions
-    zoo_tools.zoo_stop_modeling_session(fresh_id)
-
-
-def test_session_count_is_capped(monkeypatch: pytest.MonkeyPatch):
-    context = MagicMock()
-    context.__enter__.return_value = MagicMock()
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
-    monkeypatch.setattr(zoo_tools, "_MAX_MODELING_SESSIONS", 2)
 
     first = zoo_tools.zoo_start_modeling_session()
-    second = zoo_tools.zoo_start_modeling_session()
 
-    with pytest.raises(ZooMCPException, match="Too many open modeling sessions"):
+    with pytest.raises(ZooMCPException, match="already open"):
         zoo_tools.zoo_start_modeling_session()
 
     zoo_tools.zoo_stop_modeling_session(first)
-    third = zoo_tools.zoo_start_modeling_session()
+    second = zoo_tools.zoo_start_modeling_session()
     zoo_tools.zoo_stop_modeling_session(second)
-    zoo_tools.zoo_stop_modeling_session(third)
+
+
+def test_get_modeling_sessions(monkeypatch: pytest.MonkeyPatch):
+    context = MagicMock()
+    context.__enter__.return_value = MagicMock()
+    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+
+    assert zoo_tools.zoo_get_modeling_sessions() == []
+
+    session_id = zoo_tools.zoo_start_modeling_session()
+    assert zoo_tools.zoo_get_modeling_sessions() == [session_id]
+
+    zoo_tools.zoo_stop_modeling_session(session_id)
+    assert zoo_tools.zoo_get_modeling_sessions() == []
 
 
 @pytest.mark.asyncio

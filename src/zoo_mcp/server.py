@@ -125,6 +125,7 @@ from zoo_mcp.zoo_tools import (
     zoo_export_kcl,
     zoo_face_info,
     zoo_format_kcl,
+    zoo_get_modeling_sessions,
     zoo_get_sketch_constraint_status,
     zoo_lint_and_fix_kcl,
     zoo_list_org_datasets,
@@ -546,6 +547,22 @@ async def start_modeling_session() -> str:
     """
     logger.info("start_modeling_session tool called")
     return zoo_start_modeling_session()
+
+
+@mcp.tool()
+async def get_sessions() -> list[str]:
+    """List modeling sessions owned by the current MCP server process.
+
+    Use this to recover the active session ID after reconnecting to a server
+    process. A restarted server has no sessions. The current implementation
+    supports at most one session, but the list return type allows future
+    support for multiple sessions.
+
+    Returns:
+        list[str]: Active modeling session IDs, currently empty or one item.
+    """
+    logger.info("get_sessions tool called")
+    return zoo_get_modeling_sessions()
 
 
 @mcp.tool()

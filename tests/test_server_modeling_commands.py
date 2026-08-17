@@ -78,8 +78,20 @@ async def test_modeling_tools_are_registered():
         "highlight_set_entities",
         "snapshot",
         "start_modeling_session",
+        "get_sessions",
         "stop_modeling_session",
     } <= names
+
+
+@pytest.mark.asyncio
+async def test_get_sessions_tool(monkeypatch: pytest.MonkeyPatch):
+    get_sessions = MagicMock(return_value=["session-id"])
+    monkeypatch.setattr(server, "zoo_get_modeling_sessions", get_sessions)
+
+    response = await mcp.call_tool("get_sessions", arguments={})
+
+    assert _result(response) == ["session-id"]
+    get_sessions.assert_called_once_with()
 
 
 @pytest.mark.asyncio
