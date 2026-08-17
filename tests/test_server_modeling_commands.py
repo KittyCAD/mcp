@@ -102,7 +102,7 @@ async def test_import_cad_file_tool(monkeypatch: pytest.MonkeyPatch):
 
     response = await mcp.call_tool(
         "import_cad_file",
-        arguments={"session_id": "session-id", "input_path": "part.step"},
+        arguments={"session_id": "session-id", "input_file": "part.step"},
     )
 
     assert _result(response) == "object-id"
