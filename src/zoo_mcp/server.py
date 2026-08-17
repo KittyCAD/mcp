@@ -574,19 +574,19 @@ async def get_modeling_sessions() -> list[str]:
 
 
 @mcp.tool()
-async def import_cad_file(session_id: str, input_path: str) -> str:
+async def import_cad_file(session_id: str, input_file: str) -> str:
     """Import a CAD file into an existing modeling session.
 
     Args:
         session_id: The ID returned by start_modeling_session.
-        input_path: Path to a .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp,
+        input_file: Path to a .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp,
                     or .stl file.
 
     Returns:
         str: The modeling engine ID of the imported object.
     """
-    logger.info("import_cad_file tool called for file: %s", input_path)
-    return zoo_import_cad_file(session_id=session_id, input_path=input_path)
+    logger.info("import_cad_file tool called for file: %s", input_file)
+    return zoo_import_cad_file(session_id=session_id, input_path=input_file)
 
 
 @mcp.tool()
