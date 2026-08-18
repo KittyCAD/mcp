@@ -1377,6 +1377,10 @@ async def save_image(
 async def list_org_datasets() -> list[dict] | str:
     """List the datasets available to the user's organization.
 
+    Only datasets the organization has enabled for lookup are listed; datasets
+    excluded from lookup (for example while their conversions are still being
+    worked on) are omitted and should not be searched.
+
     Each dataset has a UUID `id`, a human-readable `name`, and an optional
     `description`. Use the `id` as the `dataset_id` argument to
     `search_org_dataset_semantic`.
