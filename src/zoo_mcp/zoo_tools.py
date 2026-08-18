@@ -1672,7 +1672,7 @@ def zoo_start_modeling_session() -> str:
             return session_id
 
     context.__exit__(None, None, None)
-    raise ZooMCPException("Modeling session start was cancelled")
+    raise ZooMCPException("Modeling session start was canceled")
 
 
 def zoo_get_modeling_sessions() -> list[str]:
@@ -1693,7 +1693,7 @@ def zoo_stop_modeling_session(session_id: str) -> None:
         _modeling_session = None
 
     if isinstance(session, _StartingModelingSession):
-        logger.info("Cancelled starting modeling session %s", session_id)
+        logger.info("Canceled starting modeling session %s", session_id)
         return
 
     _close_modeling_session(session)

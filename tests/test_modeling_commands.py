@@ -299,7 +299,7 @@ def test_start_handshake_does_not_hold_state_lock_and_shutdown_cancels_it(
     assert results == []
     assert len(errors) == 1
     assert isinstance(errors[0], ZooMCPException)
-    assert "start was cancelled" in str(errors[0])
+    assert "start was canceled" in str(errors[0])
     assert zoo_tools._modeling_session is None
     context.__exit__.assert_called_once_with(None, None, None)
 
@@ -357,10 +357,10 @@ def test_stop_recovers_the_slot_from_a_start_whose_handshake_hangs(
     release_handshake.set()
     starter.join(timeout=5)
 
-    # The cancelled starter closes the socket it opened and leaves the
+    # The canceled starter closes the socket it opened and leaves the
     # recovered session alone.
     assert len(errors) == 1
-    assert "start was cancelled" in str(errors[0])
+    assert "start was canceled" in str(errors[0])
     hung_context.__exit__.assert_called_once_with(None, None, None)
     live_context.__exit__.assert_not_called()
     assert zoo_tools.zoo_get_modeling_sessions() == [recovered_id]
