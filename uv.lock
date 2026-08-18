@@ -285,7 +285,7 @@ wheels = [
 
 [[package]]
 name = "kittycad"
-version = "1.4.0"
+version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -298,9 +298,9 @@ dependencies = [
     { name = "truststore" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/58/d9/2c4701024d4cdfcaffaf7c2eb4792d9d9cc5d852c405fc72bf2948cb20e7/kittycad-1.4.0.tar.gz", hash = "sha256:2e2b1691d2520843974593dad6cfda67642c7c19142b53e8df87a42b951f2eba", size = 219690, upload-time = "2026-06-25T13:35:18.626Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4c/e7/f13acbf2a87781093ab919d725e86402272bdee1de7e80e97aca9592899a/kittycad-1.5.0.tar.gz", hash = "sha256:e186d55e50bb22e4554ef42ee71defda3b47dbb4da4412d9b45e5661337396cb", size = 220636, upload-time = "2026-08-18T20:13:48.299Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/95/b6/126719b32e015b1cca6991281ad4c3a02e417a68e622401206633cd012ff/kittycad-1.4.0-py3-none-any.whl", hash = "sha256:11ed5ef5187438a570f14d138bf32f67174a0366b3083e91f2f09ad116623a82", size = 386744, upload-time = "2026-06-25T13:35:16.992Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/a2/3807226c6dd2ef2424873fa2885f7b4f1cd9279f43bd5c3d6f90cf984206/kittycad-1.5.0-py3-none-any.whl", hash = "sha256:b051d09cba476ca6c331abcc3fb53c39dbffb4428e497063ad7fd44fbb1846eb", size = 388252, upload-time = "2026-08-18T20:13:47.163Z" },
 ]
 
 [[package]]
@@ -1141,7 +1141,7 @@ wheels = [
 
 [[package]]
 name = "zoo-mcp"
-version = "0.22.0"
+version = "0.23.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -1168,7 +1168,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = "<26.0" },
-    { name = "kittycad", specifier = ">=1.4.0,<2.0" },
+    { name = "kittycad", specifier = ">=1.5.0,<2.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.27.1,<2.0" },
     { name = "pillow", specifier = "<13.0" },
     { name = "trimesh", specifier = "<6.0" },

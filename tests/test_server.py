@@ -1722,10 +1722,11 @@ async def test_list_org_datasets_success(monkeypatch: pytest.MonkeyPatch):
         SimpleNamespace(id="uuid-1", name="alpha", description="first dataset"),
         SimpleNamespace(id="uuid-2", name="beta", description=None),
     ]
+    mock = MagicMock(return_value=iter(fake_datasets))
     monkeypatch.setattr(
         zoo_mcp.kittycad_client.orgs,
         "list_org_datasets",
-        MagicMock(return_value=iter(fake_datasets)),
+        mock,
     )
 
     response = await mcp.call_tool("list_org_datasets", arguments={})
@@ -1734,6 +1735,8 @@ async def test_list_org_datasets_success(monkeypatch: pytest.MonkeyPatch):
         {"id": "uuid-1", "name": "alpha", "description": "first dataset"},
         {"id": "uuid-2", "name": "beta", "description": None},
     ]
+    # Datasets an org excluded from lookup must be filtered out server-side.
+    mock.assert_called_once_with(limit=None, page_token=None, lookup_enabled=True)
 
 
 @pytest.mark.asyncio
@@ -1781,6 +1784,8 @@ async def test_list_org_datasets_falls_back_for_unknown_status(
             "description": "temporarily paused",
         }
     ]
+    # The raw fallback has to filter on lookup too, not just the SDK path.
+    assert http_client.get.call_args.kwargs["params"] == {"lookup_enabled": "true"}
 
 
 @pytest.mark.asyncio

@@ -2066,7 +2066,7 @@ def zoo_snapshot(
     )
 
 
-def _list_org_datasets_raw() -> list[dict[str, str | None]]:
+def _list_org_datasets_raw(lookup_enabled: bool | None) -> list[dict[str, str | None]]:
     """List datasets without validating fields unrelated to this tool's output."""
     client = kittycad_client.get_http_client()
     url = f"{kittycad_client.base_url}/org/datasets"
@@ -2075,7 +2075,13 @@ def _list_org_datasets_raw() -> list[dict[str, str | None]]:
     datasets: list[dict[str, str | None]] = []
 
     while True:
-        params = {"page_token": page_token} if page_token is not None else None
+        # A page token carries the filter forward, so only the first request has
+        # to spell it out; sending both is harmless.
+        params: dict[str, str] = {}
+        if lookup_enabled is not None:
+            params["lookup_enabled"] = "true" if lookup_enabled else "false"
+        if page_token is not None:
+            params["page_token"] = page_token
         response = client.get(
             url=url,
             headers=kittycad_client.get_headers(),
@@ -2128,19 +2134,28 @@ def _org_datasets_empty_or_raise(
     raise ZooMCPException(f"Failed to list org datasets: {exc}") from exc
 
 
-def zoo_list_org_datasets() -> list[dict[str, str | None]]:
+def zoo_list_org_datasets(
+    lookup_enabled: bool | None = True,
+) -> list[dict[str, str | None]]:
     """List all datasets visible to the org tied to the current ZOO_API_TOKEN.
+
+    Args:
+        lookup_enabled: When True (the default), only datasets an org has left
+            enabled for lookup are returned. Pass None to list every dataset
+            regardless of its lookup setting, or False for only the excluded ones.
 
     Returns:
         A list of {"id": <uuid str>, "name": <str>, "description": <str | None>}
         entries, possibly empty.
     """
-    logger.info("Listing org datasets")
+    logger.info("Listing org datasets (lookup_enabled=%s)", lookup_enabled)
     use_raw_fallback = False
     datasets = []
     try:
         datasets = list(
-            kittycad_client.orgs.list_org_datasets(limit=None, page_token=None)
+            kittycad_client.orgs.list_org_datasets(
+                limit=None, page_token=None, lookup_enabled=lookup_enabled
+            )
         )
     except ValueError as exc:
         logger.warning(
@@ -2155,7 +2170,7 @@ def zoo_list_org_datasets() -> list[dict[str, str | None]]:
     # get the 404-means-empty treatment instead of escaping uncaught.
     if use_raw_fallback:
         try:
-            return _list_org_datasets_raw()
+            return _list_org_datasets_raw(lookup_enabled)
         except KittyCADClientError as exc:
             return _org_datasets_empty_or_raise(exc)
 
