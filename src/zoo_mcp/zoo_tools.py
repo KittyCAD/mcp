@@ -2,12 +2,12 @@ import io
 import json
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from threading import Lock
-from time import monotonic
-from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from uuid import uuid4
 
 import aiofiles
@@ -439,55 +439,6 @@ class CameraView(Enum):
         )
 
 
-def _get_input_format(ext: str) -> InputFormat3d | None:
-    match ext.lower():
-        case "fbx":
-            return InputFormat3d(OptionFbx())
-        case "gltf":
-            return InputFormat3d(OptionGltf())
-        case "obj":
-            return InputFormat3d(
-                OptionObj(
-                    coords=System(
-                        forward=AxisDirectionPair(
-                            axis=Axis.Y, direction=Direction.NEGATIVE
-                        ),
-                        up=AxisDirectionPair(axis=Axis.Z, direction=Direction.POSITIVE),
-                    ),
-                    units=UnitLength.MM,
-                )
-            )
-        case "ply":
-            return InputFormat3d(
-                OptionPly(
-                    coords=System(
-                        forward=AxisDirectionPair(
-                            axis=Axis.Y, direction=Direction.NEGATIVE
-                        ),
-                        up=AxisDirectionPair(axis=Axis.Z, direction=Direction.POSITIVE),
-                    ),
-                    units=UnitLength.MM,
-                )
-            )
-        case "sldprt":
-            return InputFormat3d(OptionSldprt(split_closed_faces=True))
-        case "step" | "stp":
-            return InputFormat3d(OptionStep(split_closed_faces=True))
-        case "stl":
-            return InputFormat3d(
-                OptionStl(
-                    coords=System(
-                        forward=AxisDirectionPair(
-                            axis=Axis.Y, direction=Direction.NEGATIVE
-                        ),
-                        up=AxisDirectionPair(axis=Axis.Z, direction=Direction.POSITIVE),
-                    ),
-                    units=UnitLength.MM,
-                )
-            )
-    return None
-
-
 async def zoo_calculate_center_of_mass(
     file_path: Path | str,
     unit_length: str,
@@ -670,6 +621,99 @@ async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
         raise ZooMCPException("Failed to calculate volume, no volume returned")
 
     return volume
+
+
+def _get_input_format(ext: str) -> InputFormat3d | None:
+    match ext.lower():
+        case "fbx":
+            return InputFormat3d(OptionFbx())
+        case "gltf":
+            return InputFormat3d(OptionGltf())
+        case "obj":
+            return InputFormat3d(
+                OptionObj(
+                    coords=System(
+                        forward=AxisDirectionPair(
+                            axis=Axis.Y, direction=Direction.NEGATIVE
+                        ),
+                        up=AxisDirectionPair(axis=Axis.Z, direction=Direction.POSITIVE),
+                    ),
+                    units=UnitLength.MM,
+                )
+            )
+        case "ply":
+            return InputFormat3d(
+                OptionPly(
+                    coords=System(
+                        forward=AxisDirectionPair(
+                            axis=Axis.Y, direction=Direction.NEGATIVE
+                        ),
+                        up=AxisDirectionPair(axis=Axis.Z, direction=Direction.POSITIVE),
+                    ),
+                    units=UnitLength.MM,
+                )
+            )
+        case "sldprt":
+            return InputFormat3d(OptionSldprt(split_closed_faces=True))
+        case "step" | "stp":
+            return InputFormat3d(OptionStep(split_closed_faces=True))
+        case "stl":
+            return InputFormat3d(
+                OptionStl(
+                    coords=System(
+                        forward=AxisDirectionPair(
+                            axis=Axis.Y, direction=Direction.NEGATIVE
+                        ),
+                        up=AxisDirectionPair(axis=Axis.Z, direction=Direction.POSITIVE),
+                    ),
+                    units=UnitLength.MM,
+                )
+            )
+    return None
+
+
+def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
+    """Import a CAD file into the scene and return the imported object's id.
+
+    Sent as a binary frame rather than through ``_send_modeling_command``
+    because the file contents are binary in MsgPack encoding.
+    """
+    input_file = Path(input_file)
+
+    input_ext = input_file.suffix.split(".")[-1].lower()
+    if input_ext not in SUPPORTED_EXTS:
+        raise ZooMCPException(
+            f"'{input_file.name}' does not have a supported CAD extension; "
+            f"expected one of {sorted(SUPPORTED_EXTS)}"
+        )
+
+    input_format = _get_input_format(input_ext)
+    if input_format is None:
+        raise ZooMCPException(f"'{input_ext}' files cannot be imported")
+
+    command_id = ModelingCmdId(uuid4())
+    with open(input_file, "rb") as data, _modeling_websocket(session_id) as ws:
+        ws.send_binary(
+            WebSocketRequest(
+                OptionModelingCmdReq(
+                    cmd=ModelingCmd(
+                        OptionImportFiles(
+                            files=[ImportFile(data=data.read(), path=input_file.name)],
+                            format=input_format,
+                        )
+                    ),
+                    cmd_id=command_id,
+                )
+            )
+        )
+
+        response = _await_modeling_response(
+            ws,
+            command_id,
+            ResponseImportFiles,
+            "CAD file import",
+        )
+        return response.data.object_id
 
 
 async def zoo_calculate_cad_physical_properties(
@@ -975,14 +1019,14 @@ async def zoo_calculate_bounding_box_cad(
 
 
 async def zoo_convert_cad_file(
-    input_path: Path | str,
+    input_file: Path | str,
     export_path: Path | str | None = None,
     export_format: FileExportFormat | str | None = FileExportFormat.STEP,
 ) -> Path:
     """Convert a cad file to another cad file
 
     Args:
-        input_path (Path | str): path to the CAD file to convert. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
+        input_file (Path | str): path to the CAD file to convert. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
         export_path (Path | str | None): The path to save the cad file. If no path is provided, a temporary file will be created. If the path is a directory, a temporary file will be created in the directory. If the path is a file, it will be overwritten if the extension is valid.
         export_format (FileExportFormat | str | None): format to export the KCL code to. This should be one of 'fbx', 'glb', 'gltf', 'obj', 'ply', 'step', 'stl'. If no format is provided, the default is 'step'.
 
@@ -990,12 +1034,12 @@ async def zoo_convert_cad_file(
         Path: Return the path to the exported model if successful
     """
 
-    input_path = Path(input_path)
-    input_ext = input_path.suffix.split(".")[1].lower()
+    input_file = Path(input_file)
+    input_ext = input_file.suffix.split(".")[1].lower()
     if input_ext not in SUPPORTED_EXTS:
         logger.error("The provided input path does not have a valid extension")
         raise ZooMCPException("The provided input path does not have a valid extension")
-    logger.info("Converting the cad file %s", str(input_path.resolve()))
+    logger.info("Converting the cad file %s", str(input_file.resolve()))
 
     # check the export format
     if not export_format:
@@ -1039,7 +1083,7 @@ async def zoo_convert_cad_file(
             )
             logger.info("Using provided export path: %s", str(export_path.name))
 
-    async with aiofiles.open(input_path, "rb") as inp:
+    async with aiofiles.open(input_file, "rb") as inp:
         data = await inp.read()
 
     export_response = kittycad_client.file.create_file_conversion(
@@ -1069,19 +1113,39 @@ async def zoo_convert_cad_file(
     return export_path
 
 
+@dataclass
+class ResultZooExecuteKclLocal:
+    ok: bool
+    message: str
+
+
+@dataclass
+class ResultZooExecuteKclRemote:
+    ok: bool
+    message: str
+    path_artifact_graph: Path
+
+
+ResultZooExecuteKcl: TypeAlias = ResultZooExecuteKclLocal | ResultZooExecuteKclRemote
+
+
 async def zoo_execute_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
     session_id: str | None = None,
-) -> tuple[bool, str]:
+) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
     Args:
         kcl_code (str | None): KCL code
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
+        session_id (str | None): An open modeling session in which to execute the KCL.
 
     Returns:
-        tuple(bool, str): Returns True if the KCL code ran to completion and a result message, False otherwise and the error message. When the run completes, it may still report compilation issues (warnings, errors, and fatal issues, e.g. a CSG operation with no overlap); these are appended to the message rather than treated as a hard failure. Note that session_id runs are executed by the engine, whose response carries no non-fatal diagnostics, so the message says so instead of implying the code is clean.
+        ResultZooExecuteKcl: The execution status and message. Session executions
+        also include the artifact graph's temporary JSON file path. When a local
+        run completes, compilation issues are appended to the message rather than
+        treated as a hard failure. Session runs cannot report non-fatal diagnostics.
     """
     logger.info("Executing KCL code")
 
@@ -1089,7 +1153,7 @@ async def zoo_execute_kcl(
 
     try:
         if session_id is not None:
-            zoo_exec_kcl_project(
+            path_artifact_graph = zoo_exec_kcl_project(
                 kcl_code=kcl_code,
                 kcl_path=kcl_path,
                 session_id=session_id,
@@ -1098,11 +1162,15 @@ async def zoo_execute_kcl(
             # The engine's exec_kcl_project response carries only an artifact
             # graph, so warnings the local compiler would surface are not
             # available here. Say so rather than report an unqualified success.
-            return True, (
-                "KCL code executed successfully in the modeling session. "
-                "Non-fatal diagnostics (warnings and non-fatal errors) are not "
-                "reported for session runs; re-run without session_id to check "
-                "them."
+            return ResultZooExecuteKclRemote(
+                ok=True,
+                message=(
+                    "KCL code executed successfully in the modeling session. "
+                    "Non-fatal diagnostics (warnings and non-fatal errors) are not "
+                    "reported for session runs; re-run without session_id to check "
+                    "them."
+                ),
+                path_artifact_graph=path_artifact_graph,
             )
 
         if kcl_code:
@@ -1127,13 +1195,17 @@ async def zoo_execute_kcl(
                 "KCL code execution completed with the following issues:\n\n"
                 + "\n\n".join(sections)
             )
-            return True, message
+            return ResultZooExecuteKclLocal(ok=True, message=message)
 
         logger.info("KCL code executed successfully")
-        return True, "KCL code executed successfully"
+        return ResultZooExecuteKclLocal(
+            ok=True, message="KCL code executed successfully"
+        )
     except Exception as e:
         logger.info("Failed to execute KCL code: %s", e)
-        return False, f"Failed to execute KCL code: {e}"
+        return ResultZooExecuteKclLocal(
+            ok=False, message=f"Failed to execute KCL code: {e}"
+        )
 
 
 async def zoo_export_kcl(
@@ -1455,7 +1527,7 @@ def _exec_kcl_project(
     ws: WebSocketModelingCommandsWs,
     entrypoint: str,
     files: list[dict[str, str | list[int]]],
-) -> dict[str, object]:
+) -> Path:
     """Execute a KCL project through the server-side websocket protocol."""
     request_id = ModelingCmdId(uuid4())
     request = {
@@ -1501,27 +1573,37 @@ def _exec_kcl_project(
         artifact_graph = success.get("artifact_graph")
         if not isinstance(artifact_graph, dict):
             raise ZooMCPException("KCL project execution returned no artifact graph")
-        return artifact_graph
+
+        with NamedTemporaryFile(
+            mode="w", delete=False, suffix=".json", encoding="utf-8"
+        ) as artifact_graph_file:
+            json.dump(artifact_graph, artifact_graph_file)
+            return Path(artifact_graph_file.name)
 
 
 @dataclass
 class _ModelingSession:
+    session_id: str
     context: AbstractContextManager[WebSocketModelingCommandsWs]
     websocket: WebSocketModelingCommandsWs
     lock: Lock
-    last_used: float
+    artifact_graph_paths: set[Path] = field(default_factory=set)
 
 
-_modeling_sessions: dict[str, _ModelingSession] = {}
-_modeling_sessions_lock = Lock()
+@dataclass
+class _StartingModelingSession:
+    """A claim on the single session slot while its websocket is connecting.
 
-# The engine drops idle connections on its own, so an entry older than this is
-# assumed dead and is reaped rather than handed back to a caller.
-_MODELING_SESSION_IDLE_TIMEOUT = 600.0
+    A starter owns the slot only for as long as the slot still holds its own
+    sentinel. Whoever removes it has canceled the start, so the starter closes
+    the socket it opened instead of publishing it.
+    """
 
-# A cap so a client that never calls stop_modeling_session cannot pin an
-# unbounded number of engine instances.
-_MAX_MODELING_SESSIONS = 8
+    session_id: str
+
+
+_modeling_session: _ModelingSession | _StartingModelingSession | None = None
+_modeling_session_lock = Lock()
 
 
 def _modeling_websocket_context() -> AbstractContextManager[
@@ -1540,85 +1622,118 @@ def _modeling_websocket_context() -> AbstractContextManager[
 
 def _close_modeling_session(session: _ModelingSession) -> None:
     """Close one session's websocket, waiting for any in-flight command."""
-    with session.lock:
-        session.context.__exit__(None, None, None)
+    try:
+        with session.lock:
+            session.context.__exit__(None, None, None)
+    finally:
+        _unlink_modeling_session_artifact_graphs(session)
 
 
-def _reap_idle_modeling_sessions() -> list[_ModelingSession]:
-    """Remove sessions idle long enough that the engine has likely dropped them.
-
-    The caller must hold ``_modeling_sessions_lock``. Returns the evicted
-    sessions so they can be closed without holding the registry lock.
-    """
-    cutoff = monotonic() - _MODELING_SESSION_IDLE_TIMEOUT
-    expired = [
-        session_id
-        for session_id, session in _modeling_sessions.items()
-        if session.last_used < cutoff
-    ]
-    evicted = []
-    for session_id in expired:
-        logger.info("Reaping idle modeling session %s", session_id)
-        evicted.append(_modeling_sessions.pop(session_id))
-    return evicted
+def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
+    for path in session.artifact_graph_paths:
+        path.unlink(missing_ok=True)
+    session.artifact_graph_paths.clear()
 
 
 def zoo_start_modeling_session() -> str:
-    with _modeling_sessions_lock:
-        evicted = _reap_idle_modeling_sessions()
-        active = len(_modeling_sessions)
-    for session in evicted:
-        try:
-            _close_modeling_session(session)
-        except Exception as error:
-            logger.warning("Failed to close idle modeling session: %s", error)
-
-    if active >= _MAX_MODELING_SESSIONS:
-        raise ZooMCPException(
-            f"Too many open modeling sessions ({active}); "
-            "call stop_modeling_session on a session you no longer need"
-        )
-
-    context = _modeling_websocket_context()
-    websocket = context.__enter__()
+    global _modeling_session
 
     session_id = str(uuid4())
-    with _modeling_sessions_lock:
-        _modeling_sessions[session_id] = _ModelingSession(
-            context=context,
-            websocket=websocket,
-            lock=Lock(),
-            last_used=monotonic(),
-        )
-    return session_id
+    starting = _StartingModelingSession(session_id=session_id)
+    with _modeling_session_lock:
+        if _modeling_session is not None:
+            # Name the blocker so a caller that lost track of it, or that is
+            # blocked by a start whose handshake is hung, can stop it.
+            raise ZooMCPException(
+                f"A modeling session is already open or starting "
+                f"('{_modeling_session.session_id}'); "
+                "stop it before starting another"
+            )
+        _modeling_session = starting
+
+    try:
+        context = _modeling_websocket_context()
+        websocket = context.__enter__()
+    except BaseException:
+        with _modeling_session_lock:
+            if _modeling_session is starting:
+                _modeling_session = None
+        raise
+
+    session = _ModelingSession(
+        session_id=session_id,
+        context=context,
+        websocket=websocket,
+        lock=Lock(),
+    )
+    with _modeling_session_lock:
+        if _modeling_session is starting:
+            _modeling_session = session
+            return session_id
+
+    context.__exit__(None, None, None)
+    raise ZooMCPException("Modeling session start was canceled")
+
+
+def zoo_get_modeling_sessions() -> list[str]:
+    """Return the IDs of modeling sessions owned by this server process."""
+    with _modeling_session_lock:
+        if not isinstance(_modeling_session, _ModelingSession):
+            return []
+        return [_modeling_session.session_id]
 
 
 def zoo_stop_modeling_session(session_id: str) -> None:
-    with _modeling_sessions_lock:
-        session = _modeling_sessions.pop(session_id, None)
-    if session is None:
-        raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+    global _modeling_session
+
+    with _modeling_session_lock:
+        if _modeling_session is None or _modeling_session.session_id != session_id:
+            raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+        session = _modeling_session
+        _modeling_session = None
+
+    if isinstance(session, _StartingModelingSession):
+        logger.info("Canceled starting modeling session %s", session_id)
+        return
 
     _close_modeling_session(session)
 
 
 def zoo_stop_all_modeling_sessions() -> None:
-    """Close all persistent modeling sessions, normally during server shutdown."""
-    with _modeling_sessions_lock:
-        sessions = list(_modeling_sessions.values())
-        _modeling_sessions.clear()
+    """Close the persistent modeling session, normally during server shutdown."""
+    global _modeling_session
 
-    for session in sessions:
-        try:
-            _close_modeling_session(session)
-        except Exception as error:
-            logger.warning("Failed to close modeling session: %s", error)
+    with _modeling_session_lock:
+        session = _modeling_session
+        _modeling_session = None
+
+    if session is None:
+        return
+    if isinstance(session, _StartingModelingSession):
+        # Its own starter closes the half-open socket; see zoo_start_modeling_session.
+        return
+    try:
+        _close_modeling_session(session)
+    except Exception as error:
+        logger.warning("Failed to close modeling session: %s", error)
 
 
 def _evict_modeling_session(session_id: str) -> None:
     """Drop a session whose websocket is no longer usable."""
-    with _modeling_sessions_lock:
-        _modeling_sessions.pop(session_id, None)
+    global _modeling_session
+
+    with _modeling_session_lock:
+        if (
+            isinstance(_modeling_session, _ModelingSession)
+            and _modeling_session.session_id == session_id
+        ):
+            session = _modeling_session
+            _modeling_session = None
+        else:
+            session = None
+
+    if session is not None:
+        _unlink_modeling_session_artifact_graphs(session)
 
 
 # Allows external agents to reuse engine connections so the Zoo infrastructure
@@ -1627,61 +1742,56 @@ def _evict_modeling_session(session_id: str) -> None:
 
 
 @contextmanager
-def _modeling_websocket(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-    session_id: str | None,
-) -> Iterator[WebSocketModelingCommandsWs]:
-    if session_id is not None:
-        with _modeling_sessions_lock:
-            session = _modeling_sessions.get(session_id)
-            if session is None:
-                raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+def _modeling_websocket(session_id: str) -> Iterator[WebSocketModelingCommandsWs]:
+    with _modeling_session_lock:
+        active_session = _modeling_session
+        if (
+            not isinstance(active_session, _ModelingSession)
+            or active_session.session_id != session_id
+        ):
+            raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+        session = active_session
 
-        # Acquired outside the registry lock: blocking on a busy session while
-        # holding it would stall every other session's management calls.
-        session.lock.acquire()
-        try:
-            yield session.websocket
-        except (WebSocketException, OSError) as error:
-            _evict_modeling_session(session_id)
-            raise ZooMCPException(
-                f"Modeling session '{session_id}' is no longer connected "
-                f"({error}); start a new session"
-            ) from error
-        finally:
-            session.last_used = monotonic()
-            session.lock.release()
-        return
-
-    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
-    with _modeling_websocket_context() as websocket:
-        _exec_kcl_project(websocket, entrypoint, files)
-        yield websocket
+    # Acquired outside the state lock so waiting on an in-flight command does
+    # not block session cleanup from removing the session from active state.
+    session.lock.acquire()
+    try:
+        yield session.websocket
+    except (WebSocketException, OSError) as error:
+        _evict_modeling_session(session_id)
+        raise ZooMCPException(
+            f"Modeling session '{session_id}' is no longer connected "
+            f"({error}); start a new session"
+        ) from error
+    finally:
+        session.lock.release()
 
 
 def zoo_exec_kcl_project(
+    session_id: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
-    session_id: str | None = None,
-) -> dict[str, object]:
+) -> Path:
     entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
 
-    if session_id is not None:
-        with _modeling_websocket(None, None, session_id) as ws:
-            return _exec_kcl_project(ws, entrypoint, files)
-
-    with _modeling_websocket_context() as ws:
-        return _exec_kcl_project(ws, entrypoint, files)
+    with _modeling_websocket(session_id) as ws:
+        path = _exec_kcl_project(ws, entrypoint, files)
+        with _modeling_session_lock:
+            if (
+                not isinstance(_modeling_session, _ModelingSession)
+                or _modeling_session.session_id != session_id
+            ):
+                path.unlink(missing_ok=True)
+                raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+            _modeling_session.artifact_graph_paths.add(path)
+        return path
 
 
 def zoo_face_info(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
     face_id: Uuid,
-    session_id: str | None = None,
+    session_id: str,
 ) -> FaceInfo:
-    with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
+    with _modeling_websocket(session_id) as ws:
         cmd_id_face_get_position = ModelingCmdId(uuid4())
         ws.send(
             WebSocketRequest(
@@ -1857,82 +1967,14 @@ def _send_modeling_command(
     )
 
 
-def _import_cad_file(ws: WebSocketModelingCommandsWs, input_path: Path | str) -> str:
-    """Import a CAD file into the scene and return the imported object's id.
-
-    Sent as a binary frame rather than through ``_send_modeling_command``
-    because the file contents are arbitrary bytes.
-    """
-    input_path = Path(input_path)
-
-    input_ext = input_path.suffix.split(".")[-1].lower()
-    if input_ext not in SUPPORTED_EXTS:
-        raise ZooMCPException(
-            f"'{input_path.name}' does not have a supported CAD extension; "
-            f"expected one of {sorted(SUPPORTED_EXTS)}"
-        )
-
-    input_format = _get_input_format(input_ext)
-    if input_format is None:
-        raise ZooMCPException(f"'{input_ext}' files cannot be imported")
-
-    command_id = ModelingCmdId(uuid4())
-    with open(input_path, "rb") as data:
-        ws.send_binary(
-            WebSocketRequest(
-                OptionModelingCmdReq(
-                    cmd=ModelingCmd(
-                        OptionImportFiles(
-                            files=[ImportFile(data=data.read(), path=input_path.name)],
-                            format=input_format,
-                        )
-                    ),
-                    cmd_id=command_id,
-                )
-            )
-        )
-
-    response = _await_modeling_response(
-        ws,
-        command_id,
-        ResponseImportFiles,
-        "CAD file import",
-    )
-    return response.data.object_id
-
-
-@contextmanager
-def _snapshot_scene(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-    input_file: Path | str | None,
-    session_id: str | None,
-) -> Iterator[tuple[WebSocketModelingCommandsWs, str | None]]:
-    """Open a websocket holding the scene to be captured.
-
-    Yields the socket together with the imported object's id, which is only
-    set for a CAD file. KCL and session scenes zoom to fit the whole scene
-    instead, so they have no single object to target.
-    """
-    if input_file is not None:
-        with _modeling_websocket_context() as websocket:
-            yield websocket, _import_cad_file(websocket, input_file)
-        return
-
-    with _modeling_websocket(kcl_code, kcl_path, session_id) as websocket:
-        yield websocket, None
-
-
 def zoo_execute_modeling_command(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
     command: ModelingCmd,
     expected_response: type[_ModelingResponseT],
     response_description: str,
-    session_id: str | None = None,
+    session_id: str,
 ) -> _ModelingResponseT:
-    """Execute a KCL project, then run one modeling command in its session."""
-    with _modeling_websocket(kcl_code, kcl_path, session_id) as ws:
+    """Run one modeling command in an existing session."""
+    with _modeling_websocket(session_id) as ws:
         return _send_modeling_command(
             ws,
             command,
@@ -1942,21 +1984,14 @@ def zoo_execute_modeling_command(
 
 
 def zoo_snapshot(
-    kcl_code: str | None = None,
-    kcl_path: Path | str | None = None,
-    input_file: Path | str | None = None,
-    session_id: str | None = None,
+    session_id: str,
     views: list[OptionDefaultCameraLookAt] | None = None,
     max_image_dimension: int = 512,
     padding: float = 0.1,
     zoom: bool = True,
     highlight_edges: bool = False,
 ) -> bytes:
-    """Capture a scene as a JPEG, from one camera or several.
-
-    The scene comes from exactly one of: ``kcl_code``/``kcl_path`` executed in
-    a temporary scene, a CAD ``input_file`` imported into one, or an existing
-    ``session_id``.
+    """Capture an existing modeling session as a JPEG, from one camera or several.
 
     The camera is always switched to an orthographic projection, since
     perspective distorts measurements read off the image. ``views`` gives the
@@ -1974,7 +2009,7 @@ def zoo_snapshot(
     highlighted via highlight_set_entities stand out instead of competing with
     the outline drawn on every edge in the scene.
     """
-    with _snapshot_scene(kcl_code, kcl_path, input_file, session_id) as (ws, object_id):
+    with _modeling_websocket(session_id) as ws:
         _send_modeling_command(
             ws,
             ModelingCmd(OptionDefaultCameraSetOrthographic()),
@@ -1990,12 +2025,7 @@ def zoo_snapshot(
             "edge line visibility",
         )
 
-        # An imported CAD file is framed on the object itself; a KCL or session
-        # scene has no single object id, so zoom to fit covers everything.
-        zoom_to_fit = OptionZoomToFit(
-            object_ids=[object_id] if object_id is not None else [],
-            padding=padding,
-        )
+        zoom_to_fit = OptionZoomToFit(object_ids=[], padding=padding)
 
         jpeg_contents_list: list[bytes] = []
         for view in views or [None]:

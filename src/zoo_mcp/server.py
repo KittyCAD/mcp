@@ -107,6 +107,8 @@ from zoo_mcp.utils.image_utils import (
 from zoo_mcp.zoo_tools import (
     CameraView,
     FaceInfo,
+    ResultZooExecuteKcl,
+    ResultZooExecuteKclLocal,
     zoo_calculate_bounding_box_cad,
     zoo_calculate_bounding_box_kcl,
     zoo_calculate_cad_physical_properties,
@@ -122,7 +124,9 @@ from zoo_mcp.zoo_tools import (
     zoo_export_kcl,
     zoo_face_info,
     zoo_format_kcl,
+    zoo_get_modeling_sessions,
     zoo_get_sketch_constraint_status,
+    zoo_import_cad_file,
     zoo_lint_and_fix_kcl,
     zoo_list_org_datasets,
     zoo_list_org_skills,
@@ -443,14 +447,14 @@ async def calculate_bounding_box_cad(
 
 @mcp.tool()
 async def convert_cad_file(
-    input_path: str,
+    input_file: str,
     export_path: str | None,
     export_format: str | None,
 ) -> str:
     """Convert a CAD file from one format to another CAD file format.
 
     Args:
-        input_path (str): The input cad file to convert. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
+        input_file (str): The input cad file to convert. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
         export_path (str | None): The path to save the converted CAD file to. If the path is a directory, a temporary file will be created in the directory. If the path is a file, it will be overwritten if the extension is valid.
         export_format (str | None): The format of the exported CAD file. This should be one of 'fbx', 'glb', 'gltf', 'obj', 'ply', 'step', 'stl'. If no format is provided, the default is 'step'.
 
@@ -462,7 +466,7 @@ async def convert_cad_file(
 
     try:
         step_path = await zoo_convert_cad_file(
-            input_path=input_path, export_path=export_path, export_format=export_format
+            input_file=input_file, export_path=export_path, export_format=export_format
         )
         return str(step_path)
     except Exception as e:
@@ -474,10 +478,12 @@ async def execute_kcl(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     session_id: str | None = None,
-) -> tuple[bool, str]:
+) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
-      Does NOT return an artifact graph and can have large network overhead depending on the model.
+      Session executions save the artifact graph to a temporary JSON file and
+      return its path. Local executions do not produce an artifact graph and can
+      have large network overhead depending on the model.
 
     Args:
         kcl_code (str | None): The KCL code to execute.
@@ -485,7 +491,8 @@ async def execute_kcl(
         session_id: An open modeling session in which to execute the KCL.
 
     Returns:
-        tuple(bool, str): Returns True if the KCL code executed successfully and a success message, False otherwise and the error message.
+        ResultZooExecuteKcl: The execution status and message. Session executions
+                            also include the artifact graph's JSON file path.
     """
 
     logger.info("execute_kcl tool called")
@@ -497,39 +504,48 @@ async def execute_kcl(
             session_id=session_id,
         )
     except Exception as e:
-        return False, f"Failed to execute KCL code: {e}"
+        return ResultZooExecuteKclLocal(
+            ok=False, message=f"Failed to execute KCL code: {e}"
+        )
 
 
 @mcp.tool()
 async def exec_kcl_project(
+    session_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
-    session_id: str | None = None,
-) -> dict[str, object]:
-    """Run a KCL project on the server side and return its artifact graph.
+) -> str:
+    """Run a KCL project on the server side and save its artifact graph.
 
     Args:
         kcl_code (str | None): KCL code to run as a single-file project.
         kcl_path (str | None): A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session in which to execute the project.
+        session_id: The modeling session in which to execute the project.
 
     Returns:
-        dict[str, object]: The artifact graph produced by execution. Contains UUID
-                           mappings to source code and a somewhat structured
-                           understanding of the model.
+        str: The path to the JSON file containing the artifact graph.
     """
     logger.info("exec_kcl_project tool called")
 
-    return zoo_exec_kcl_project(
-        kcl_code=kcl_code,
-        kcl_path=kcl_path,
-        session_id=session_id,
+    return str(
+        zoo_exec_kcl_project(
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+            session_id=session_id,
+        )
     )
 
 
 @mcp.tool()
 async def start_modeling_session() -> str:
     """Open an empty modeling websocket for subsequent tools.
+
+    Only one modeling session can be open at a time. Stop the current session
+    before starting another. If one is already open, or is still connecting,
+    this fails with an error naming that session's ID so it can be stopped.
+
+    The server does not expire sessions after an idle or lifetime timeout.
+    Callers are responsible for tracking and enforcing their desired timeout.
 
     Pass the returned session_id to execute_kcl or exec_kcl_project to populate
     the scene, then reuse it with modeling query, selection, and highlight tools.
@@ -543,11 +559,47 @@ async def start_modeling_session() -> str:
 
 
 @mcp.tool()
-async def stop_modeling_session(session_id: str) -> None:
-    """Close a persistent modeling websocket session.
+async def get_modeling_sessions() -> list[str]:
+    """List modeling sessions owned by the current MCP server process.
+
+    Use this to recover the active session ID after reconnecting to a server
+    process. A restarted server has no sessions. The current implementation
+    supports at most one session, but the list return type allows future
+    support for multiple sessions.
+
+    Returns:
+        list[str]: Active modeling session IDs, currently empty or one item.
+    """
+    logger.info("get_modeling_sessions tool called")
+    return zoo_get_modeling_sessions()
+
+
+@mcp.tool()
+async def import_cad_file(session_id: str, input_file: str) -> str:
+    """Import a CAD file into an existing modeling session.
 
     Args:
         session_id: The ID returned by start_modeling_session.
+        input_file: Path to a .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp,
+                    or .stl file.
+
+    Returns:
+        str: The modeling engine ID of the imported object.
+    """
+    logger.info("import_cad_file tool called for file: %s", input_file)
+    return zoo_import_cad_file(session_id=session_id, input_file=input_file)
+
+
+@mcp.tool()
+async def stop_modeling_session(session_id: str) -> None:
+    """Close a persistent modeling websocket session.
+
+    Also accepts the ID of a session that is still connecting, which cancels
+    that start and frees the slot for a new start_modeling_session call.
+
+    Args:
+        session_id: The ID returned by start_modeling_session, or the one named
+                    by a "already open or starting" error.
 
     Returns:
         None
@@ -649,17 +701,13 @@ async def get_sketch_constraint_status(
 @mcp.tool()
 async def get_face_info(
     face_id: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
 ) -> FaceInfo:
-    """Get the position, gradient, normal, and center of a face in a KCL model.
+    """Get the position, gradient, normal, and center of a face in a modeling session.
 
     Args:
         face_id (str): Usually a user or LLM-selected face id.
-        kcl_code (str | None): The KCL code defining the model.
-        kcl_path (str | None): A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
 
     Returns:
         FaceInfo: The face position, gradient, normal, and center. The position is
@@ -670,8 +718,6 @@ async def get_face_info(
     logger.info("get_face_info tool called for face_id=%s", face_id)
 
     return zoo_face_info(
-        kcl_code=kcl_code,
-        kcl_path=kcl_path,
         face_id=Uuid(face_id),
         session_id=session_id,
     )
@@ -681,28 +727,22 @@ async def get_face_info(
 async def entity_distance(
     entity_id1: str,
     entity_id2: str,
+    session_id: str,
     on_axis: GlobalAxis | None = None,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
 ) -> EntityGetDistance:
     """Get the minimum and maximum distance between two model entities.
 
     Args:
         entity_id1: The first entity UUID, typically obtained from an artifact graph.
         entity_id2: The second entity UUID.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
         on_axis: Optional global axis for projected distance; omit for Euclidean distance.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
 
     Returns:
         EntityGetDistance: The minimum and maximum distance between the entities.
     """
     logger.info("entity_distance tool called")
     return zoo_execute_modeling_command(
-        kcl_code,
-        kcl_path,
         ModelingCmd(
             OptionEntityGetDistance(
                 entity_id1=Uuid(entity_id1),
@@ -737,8 +777,6 @@ async def set_selection_filter(
     """
     logger.info("set_selection_filter tool called")
     return zoo_execute_modeling_command(
-        None,
-        None,
         ModelingCmd(OptionSetSelectionFilter(filter=entity_types)),
         ResponseSetSelectionFilter,
         "selection filter",
@@ -780,8 +818,6 @@ async def select_entities(
     """
     logger.info("select_entities tool called")
     return zoo_execute_modeling_command(
-        None,
-        None,
         ModelingCmd(OptionSelectReplace(entities=entity_ids)),
         ResponseSelectReplace,
         "select entities",
@@ -816,8 +852,6 @@ async def center_camera_on_selection(
     """
     logger.info("center_camera_on_selection tool called")
     return zoo_execute_modeling_command(
-        None,
-        None,
         ModelingCmd(
             OptionDefaultCameraCenterToSelection(
                 camera_movement=CameraMovement.VANTAGE
@@ -864,8 +898,6 @@ async def highlight_set_entities(
     """
     logger.info("highlight_set_entities tool called")
     return zoo_execute_modeling_command(
-        None,
-        None,
         ModelingCmd(OptionHighlightSetEntities(entities=entity_ids)),
         ResponseHighlightSetEntities,
         "highlight entities",
@@ -876,25 +908,19 @@ async def highlight_set_entities(
 @mcp.tool()
 async def curve_get_end_points(
     curve_id: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
 ) -> CurveGetEndPoints:
     """Get the start and end points of a curve entity.
 
     Args:
         curve_id: Curve UUID, typically obtained from an artifact graph.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
 
     Returns:
         CurveGetEndPoints: The curve's start and end points.
     """
     logger.info("curve_get_end_points tool called")
     return zoo_execute_modeling_command(
-        kcl_code,
-        kcl_path,
         ModelingCmd(OptionCurveGetEndPoints(curve_id=Uuid(curve_id))),
         ResponseCurveGetEndPoints,
         "curve endpoints",
@@ -906,9 +932,7 @@ async def curve_get_end_points(
 async def engine_util_evaluate_path(
     path_json: str,
     t: float,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
 ) -> EngineUtilEvaluatePath:
     """Evaluate a serialized KCL path at parameter t.
 
@@ -951,17 +975,13 @@ async def engine_util_evaluate_path(
     Args:
         path_json: The serialized JSON representation of the KCL sketch or path.
         t: Normalized path parameter, conventionally between 0 and 1.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
 
     Returns:
         EngineUtilEvaluatePath: The position on the path at parameter t.
     """
     logger.info("engine_util_evaluate_path tool called")
     return zoo_execute_modeling_command(
-        kcl_code,
-        kcl_path,
         ModelingCmd(OptionEngineUtilEvaluatePath(path_json=path_json, t=t)),
         ResponseEngineUtilEvaluatePath,
         "path evaluation",
@@ -972,25 +992,19 @@ async def engine_util_evaluate_path(
 @mcp.tool()
 async def curve_get_type(
     curve_id: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
 ) -> CurveGetType:
     """Get whether a curve is a line, arc, or NURBS curve.
 
     Args:
         curve_id: Curve UUID, typically obtained from an artifact graph.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
 
     Returns:
         CurveGetType: The curve's geometric type.
     """
     logger.info("curve_get_type tool called")
     return zoo_execute_modeling_command(
-        kcl_code,
-        kcl_path,
         ModelingCmd(OptionCurveGetType(curve_id=Uuid(curve_id))),
         ResponseCurveGetType,
         "curve type",
@@ -1001,25 +1015,19 @@ async def curve_get_type(
 @mcp.tool()
 async def edge_get_length(
     edge_id: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
 ) -> EdgeGetLength:
     """Get the length of an edge entity in the current scene units.
 
     Args:
         edge_id: Edge UUID, typically obtained from an artifact graph.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
 
     Returns:
         EdgeGetLength: The edge length in the current scene units.
     """
     logger.info("edge_get_length tool called")
     return zoo_execute_modeling_command(
-        kcl_code,
-        kcl_path,
         ModelingCmd(OptionEdgeGetLength(edge_id=Uuid(edge_id))),
         ResponseEdgeGetLength,
         "edge length",
@@ -1030,25 +1038,19 @@ async def edge_get_length(
 @mcp.tool()
 async def entity_get_all_child_uuids(
     entity_id: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
 ) -> EntityGetAllChildUuids:
     """Get all child UUIDs belonging to an entity.
 
     Args:
         entity_id: Entity UUID, typically obtained from an artifact graph.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
 
     Returns:
         EntityGetAllChildUuids: All child entity UUIDs.
     """
     logger.info("entity_get_all_child_uuids tool called")
     return zoo_execute_modeling_command(
-        kcl_code,
-        kcl_path,
         ModelingCmd(OptionEntityGetAllChildUuids(entity_id=Uuid(entity_id))),
         ResponseEntityGetAllChildUuids,
         "entity child IDs",
@@ -1059,25 +1061,19 @@ async def entity_get_all_child_uuids(
 @mcp.tool()
 async def entity_get_index(
     entity_id: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
 ) -> EntityGetIndex:
     """Get an entity's index within its parent.
 
     Args:
         entity_id: Entity UUID, typically obtained from an artifact graph.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
 
     Returns:
         EntityGetIndex: The entity's index within its parent.
     """
     logger.info("entity_get_index tool called")
     return zoo_execute_modeling_command(
-        kcl_code,
-        kcl_path,
         ModelingCmd(OptionEntityGetIndex(entity_id=Uuid(entity_id))),
         ResponseEntityGetIndex,
         "entity index",
@@ -1088,25 +1084,19 @@ async def entity_get_index(
 @mcp.tool()
 async def entity_get_parent_id(
     entity_id: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
 ) -> EntityGetParentId:
     """Get the UUID of an entity's parent.
 
     Args:
         entity_id: Entity UUID, typically obtained from an artifact graph.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
 
     Returns:
         EntityGetParentId: The parent entity's UUID.
     """
     logger.info("entity_get_parent_id tool called")
     return zoo_execute_modeling_command(
-        kcl_code,
-        kcl_path,
         ModelingCmd(OptionEntityGetParentId(entity_id=Uuid(entity_id))),
         ResponseEntityGetParentId,
         "entity parent ID",
@@ -1117,25 +1107,19 @@ async def entity_get_parent_id(
 @mcp.tool()
 async def entity_get_sketch_paths(
     entity_id: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
 ) -> EntityGetSketchPaths:
     """Get the sketch path UUIDs belonging to an entity.
 
     Args:
         entity_id: Entity UUID, typically obtained from an artifact graph.
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        session_id: An open modeling session to reuse instead of executing KCL again.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
 
     Returns:
         EntityGetSketchPaths: The sketch path UUIDs belonging to the entity.
     """
     logger.info("entity_get_sketch_paths tool called")
     return zoo_execute_modeling_command(
-        kcl_code,
-        kcl_path,
         ModelingCmd(OptionEntityGetSketchPaths(entity_id=Uuid(entity_id))),
         ResponseEntityGetSketchPaths,
         "entity sketch paths",
@@ -1219,10 +1203,7 @@ def _resolve_camera_views(
 
 @mcp.tool()
 async def snapshot(
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    input_file: str | None = None,
-    session_id: str | None = None,
+    session_id: str,
     camera_view: str
     | dict[str, list[float]]
     | list[str | dict[str, list[float]]]
@@ -1233,20 +1214,14 @@ async def snapshot(
     padding: float = 0.1,
     output_path: str | None = None,
 ) -> ImageContent | str:
-    """Render a KCL model, a CAD file, or an open modeling session as an image.
+    """Render an open modeling session as an image.
 
-    Provide exactly one source: kcl_code or kcl_path to execute a model in a
-    temporary scene, input_file to import an existing CAD file, or session_id
-    to capture a scene already open via start_modeling_session without
-    re-executing anything. The camera always uses an orthographic projection,
-    so measurements read off the image are not distorted by perspective.
+    Populate the scene first by passing this session_id to execute_kcl or
+    exec_kcl_project. The camera always uses an orthographic projection, so
+    measurements read off the image are not distorted by perspective.
 
     Args:
-        kcl_code: KCL code defining the model.
-        kcl_path: A .kcl file or project directory containing main.kcl.
-        input_file: A CAD file to import. One of .fbx, .gltf, .obj, .ply,
-                    .sldprt, .step, .stp, .stl (case-insensitive).
-        session_id: An open modeling session to capture.
+        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
         camera_view: Which view or views to capture. Omit it for a single
                      isometric view. Otherwise one of:
 
@@ -1311,9 +1286,6 @@ async def snapshot(
     logger.info("snapshot tool called")
 
     image = zoo_snapshot(
-        kcl_code=kcl_code,
-        kcl_path=kcl_path,
-        input_file=input_file,
         session_id=session_id,
         views=_resolve_camera_views(camera_view),
         max_image_dimension=max_image_dimension,

@@ -54,6 +54,27 @@ def _content_list(response: Sequence[Any] | dict[str, Any]) -> list[Any]:
     return cast(list[Any], content)
 
 
+@pytest_asyncio.fixture
+async def populated_modeling_session(cube_kcl: str):
+    session_id = _meta_result(
+        await mcp.call_tool("start_modeling_session", arguments={})
+    )
+    artifact_graph_path: Path | None = None
+    try:
+        response = await mcp.call_tool(
+            "exec_kcl_project",
+            arguments={"kcl_path": cube_kcl, "session_id": session_id},
+        )
+        artifact_graph_path = Path(_meta_result(response))
+        yield session_id
+    finally:
+        if artifact_graph_path is not None:
+            artifact_graph_path.unlink(missing_ok=True)
+        await mcp.call_tool(
+            "stop_modeling_session", arguments={"session_id": session_id}
+        )
+
+
 @pytest.mark.asyncio
 async def test_calculate_center_of_mass(cube_stl: str):
     response = await mcp.call_tool(
@@ -403,7 +424,7 @@ async def test_convert_cad_file(cube_stl: str):
     response = await mcp.call_tool(
         "convert_cad_file",
         arguments={
-            "input_path": cube_stl,
+            "input_file": cube_stl,
             "export_path": None,
             "export_format": "obj",
         },
@@ -418,7 +439,7 @@ async def test_convert_cad_file_error(empty_step: str):
     response = await mcp.call_tool(
         "convert_cad_file",
         arguments={
-            "input_path": empty_step,
+            "input_file": empty_step,
             "export_path": None,
             "export_format": "asdf",
         },
@@ -437,9 +458,8 @@ async def test_execute_kcl(cube_kcl: str):
         },
     )
     result = _meta_result(response)
-    assert isinstance(result, (tuple, list))
-    assert result[0] is True
-    assert "KCL code executed successfully" in result[1]
+    assert result["ok"] is True
+    assert "KCL code executed successfully" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -452,9 +472,8 @@ async def test_execute_kcl_error():
         },
     )
     result = _meta_result(response)
-    assert isinstance(result, (tuple, list))
-    assert result[0] is False
-    assert "Failed to execute KCL code" in result[1]
+    assert result["ok"] is False
+    assert "Failed to execute KCL code" in result["message"]
 
 
 def test_exec_kcl_project_extracts_artifact_graph():
@@ -491,31 +510,40 @@ def test_exec_kcl_project_extracts_artifact_graph():
         [{"path": "main.kcl", "contents": list(b"sketch = startSketchOn(XY)")}],
     )
 
-    assert result == {
-        "map": {"artifact-id": {"type": "solid2d"}},
-        "item_count": 1,
-    }
+    try:
+        assert json.loads(result.read_text()) == {
+            "map": {"artifact-id": {"type": "solid2d"}},
+            "item_count": 1,
+        }
+    finally:
+        result.unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio
-async def test_exec_kcl_project_tool(monkeypatch):
+async def test_exec_kcl_project_tool(monkeypatch, tmp_path):
     artifact_graph = {
         "map": {"artifact-id": {"type": "solid2d"}},
         "item_count": 1,
     }
-    mock = MagicMock(return_value=artifact_graph)
+    artifact_graph_path = tmp_path / "artifact-graph.json"
+    artifact_graph_path.write_text(json.dumps(artifact_graph))
+    mock = MagicMock(return_value=artifact_graph_path)
     monkeypatch.setattr("zoo_mcp.server.zoo_exec_kcl_project", mock)
 
     response = await mcp.call_tool(
         "exec_kcl_project",
-        arguments={"kcl_code": "sketch = startSketchOn(XY)", "kcl_path": None},
+        arguments={
+            "kcl_code": "sketch = startSketchOn(XY)",
+            "kcl_path": None,
+            "session_id": "session-id",
+        },
     )
 
-    assert _structured_result(response) == artifact_graph
+    assert _meta_result(response) == str(artifact_graph_path)
     mock.assert_called_once_with(
         kcl_code="sketch = startSketchOn(XY)",
         kcl_path=None,
-        session_id=None,
+        session_id="session-id",
     )
 
 
@@ -527,14 +555,13 @@ async def test_execute_kcl_surfaces_warning_issue(warning_kcl: str):
         arguments={"kcl_code": None, "kcl_path": warning_kcl},
     )
     result = _meta_result(response)
-    assert isinstance(result, (tuple, list))
-    assert result[0] is True
-    assert "KCL code execution completed with the following issues" in result[1]
-    assert "Warnings:" in result[1]
-    assert "no overlap" in result[1]
+    assert result["ok"] is True
+    assert "KCL code execution completed with the following issues" in result["message"]
+    assert "Warnings:" in result["message"]
+    assert "no overlap" in result["message"]
     # A pure warning must not be mislabelled as an error/fatal.
-    assert "Errors:" not in result[1]
-    assert "Fatal issues:" not in result[1]
+    assert "Errors:" not in result["message"]
+    assert "Fatal issues:" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -545,10 +572,9 @@ async def test_execute_kcl_surfaces_error_issues(error_kcl: str):
         arguments={"kcl_code": None, "kcl_path": error_kcl},
     )
     result = _meta_result(response)
-    assert isinstance(result, (tuple, list))
-    assert result[0] is True
-    assert "KCL code execution completed with the following issues" in result[1]
-    assert "Errors:" in result[1]
+    assert result["ok"] is True
+    assert "KCL code execution completed with the following issues" in result["message"]
+    assert "Errors:" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -559,9 +585,8 @@ async def test_execute_kcl_reports_fatal_error(fatal_error_kcl: str):
         arguments={"kcl_code": None, "kcl_path": fatal_error_kcl},
     )
     result = _meta_result(response)
-    assert isinstance(result, (tuple, list))
-    assert result[0] is False
-    assert "Failed to execute KCL code" in result[1]
+    assert result["ok"] is False
+    assert "Failed to execute KCL code" in result["message"]
 
 
 class _FakeIssue:
@@ -630,17 +655,20 @@ async def test_execute_kcl_surfaces_all_issue_severities(monkeypatch):
 
     monkeypatch.setattr(zoo_mcp.zoo_tools.kcl, "execute_code", fake_execute_code)
 
-    ok, message = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="anything")
-    assert ok is True
-    assert message.startswith("KCL code execution completed with the following issues:")
-    assert "Fatal issues:\n\nfatal report" in message
-    assert "Errors:\n\nerror report" in message
-    assert "Warnings:\n\nwarning report" in message
+    result = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="anything")
+    assert isinstance(result, zoo_mcp.zoo_tools.ResultZooExecuteKclLocal)
+    assert result.ok is True
+    assert result.message.startswith(
+        "KCL code execution completed with the following issues:"
+    )
+    assert "Fatal issues:\n\nfatal report" in result.message
+    assert "Errors:\n\nerror report" in result.message
+    assert "Warnings:\n\nwarning report" in result.message
     # Severities are rendered fatal -> error -> warning.
     assert (
-        message.index("Fatal issues:")
-        < message.index("Errors:")
-        < message.index("Warnings:")
+        result.message.index("Fatal issues:")
+        < result.message.index("Errors:")
+        < result.message.index("Warnings:")
     )
 
 
@@ -972,8 +1000,7 @@ async def test_get_face_info(monkeypatch):
         "get_face_info",
         arguments={
             "face_id": "face-id",
-            "kcl_code": "cube = startSketchOn(XY)",
-            "kcl_path": None,
+            "session_id": "session-id",
         },
     )
 
@@ -988,10 +1015,8 @@ async def test_get_face_info(monkeypatch):
         "face_get_center": {"pos": {"x": 0.5, "y": 0.5, "z": 0.0}},
     }
     mock.assert_called_once_with(
-        kcl_code="cube = startSketchOn(XY)",
-        kcl_path=None,
         face_id="face-id",
-        session_id=None,
+        session_id="session-id",
     )
 
 
@@ -1026,40 +1051,11 @@ async def test_mock_execute_kcl_error():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "source",
-    ["kcl_path", "kcl_code", "input_file"],
-)
-async def test_snapshot_from_each_source(source: str, cube_kcl: str, cube_stl: str):
-    """Every way of populating a scene produces an image."""
-    if source == "kcl_code":
-        arguments = {"kcl_code": Path(cube_kcl).read_text()}
-    elif source == "kcl_path":
-        arguments = {"kcl_path": cube_kcl}
-    else:
-        arguments = {"input_file": cube_stl}
-
-    response = await mcp.call_tool("snapshot", arguments=arguments)
-
-    assert isinstance(_content_list(response)[0], ImageContent)
-
-
-@pytest.mark.asyncio
-async def test_snapshot_from_a_modeling_session(cube_kcl: str):
-    session_id = _meta_result(
-        await mcp.call_tool("start_modeling_session", arguments={})
+async def test_snapshot_from_a_modeling_session(populated_modeling_session: str):
+    response = await mcp.call_tool(
+        "snapshot", arguments={"session_id": populated_modeling_session}
     )
-    try:
-        await mcp.call_tool(
-            "exec_kcl_project",
-            arguments={"kcl_path": cube_kcl, "session_id": session_id},
-        )
-        response = await mcp.call_tool("snapshot", arguments={"session_id": session_id})
-        assert isinstance(_content_list(response)[0], ImageContent)
-    finally:
-        await mcp.call_tool(
-            "stop_modeling_session", arguments={"session_id": session_id}
-        )
+    assert isinstance(_content_list(response)[0], ImageContent)
 
 
 @pytest.mark.asyncio
@@ -1075,69 +1071,51 @@ async def test_snapshot_from_a_modeling_session(cube_kcl: str):
     ],
     ids=["named", "isometric", "multiview", "multi_isometric", "list", "explicit"],
 )
-async def test_snapshot_camera_views(camera_view: object, cube_kcl: str):
+async def test_snapshot_camera_views(
+    camera_view: object, populated_modeling_session: str
+):
     response = await mcp.call_tool(
         "snapshot",
-        arguments={"kcl_path": cube_kcl, "camera_view": camera_view},
+        arguments={
+            "session_id": populated_modeling_session,
+            "camera_view": camera_view,
+        },
     )
 
     assert isinstance(_content_list(response)[0], ImageContent)
 
 
 @pytest.mark.asyncio
-async def test_snapshot_of_a_cad_file_with_a_named_view(cube_stl: str):
-    response = await mcp.call_tool(
-        "snapshot",
-        arguments={"input_file": cube_stl, "camera_view": "multiview"},
-    )
-
-    assert isinstance(_content_list(response)[0], ImageContent)
-
-
-@pytest.mark.asyncio
-async def test_snapshot_rejects_an_unknown_camera_view(cube_kcl: str):
+async def test_snapshot_rejects_an_unknown_camera_view():
     with pytest.raises(ToolError, match="Invalid camera view"):
         await mcp.call_tool(
             "snapshot",
-            arguments={"kcl_path": cube_kcl, "camera_view": "asdf"},
+            arguments={"session_id": "session-id", "camera_view": "asdf"},
         )
 
 
 @pytest.mark.asyncio
-async def test_snapshot_rejects_a_malformed_camera_view(cube_kcl: str):
+async def test_snapshot_rejects_a_malformed_camera_view():
     with pytest.raises(ToolError, match="Invalid camera view"):
         await mcp.call_tool(
             "snapshot",
-            arguments={"kcl_path": cube_kcl, "camera_view": {"hello": [0, 0, 0]}},
+            arguments={
+                "session_id": "session-id",
+                "camera_view": {"hello": [0, 0, 0]},
+            },
         )
 
 
 @pytest.mark.asyncio
-async def test_snapshot_rejects_a_non_kcl_path(empty_step: str):
-    """A non-KCL path is rejected before any engine work happens."""
-    with pytest.raises(ToolError):
-        await mcp.call_tool("snapshot", arguments={"kcl_path": empty_step})
-
-
-@pytest.mark.asyncio
-async def test_snapshot_surfaces_a_cad_import_failure(empty_step: str):
-    with pytest.raises(ToolError):
-        await mcp.call_tool("snapshot", arguments={"input_file": empty_step})
-
-
-@pytest.mark.asyncio
-async def test_snapshot_rejects_an_unsupported_input_file(cube_kcl: str):
-    with pytest.raises(ToolError, match="supported CAD extension"):
-        await mcp.call_tool("snapshot", arguments={"input_file": cube_kcl})
-
-
-@pytest.mark.asyncio
-async def test_snapshot_output_path(cube_kcl: str, tmp_path):
+async def test_snapshot_output_path(populated_modeling_session: str, tmp_path):
     """When output_path is provided, the tool writes to disk and returns the path."""
     output_path = tmp_path / "snap.jpg"
     response = await mcp.call_tool(
         "snapshot",
-        arguments={"kcl_path": cube_kcl, "output_path": str(output_path)},
+        arguments={
+            "session_id": populated_modeling_session,
+            "output_path": str(output_path),
+        },
     )
 
     result = _meta_result(response)
@@ -1146,11 +1124,16 @@ async def test_snapshot_output_path(cube_kcl: str, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_snapshot_output_path_directory(cube_stl: str, tmp_path):
+async def test_snapshot_output_path_directory(
+    populated_modeling_session: str, tmp_path
+):
     """A directory output_path writes image.jpg into that directory."""
     response = await mcp.call_tool(
         "snapshot",
-        arguments={"input_file": cube_stl, "output_path": str(tmp_path)},
+        arguments={
+            "session_id": populated_modeling_session,
+            "output_path": str(tmp_path),
+        },
     )
 
     result = _meta_result(response)
@@ -1159,10 +1142,13 @@ async def test_snapshot_output_path_directory(cube_stl: str, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_snapshot_respects_max_image_dimension(cube_kcl: str):
+async def test_snapshot_respects_max_image_dimension(populated_modeling_session: str):
     response = await mcp.call_tool(
         "snapshot",
-        arguments={"kcl_path": cube_kcl, "max_image_dimension": 128},
+        arguments={
+            "session_id": populated_modeling_session,
+            "max_image_dimension": 128,
+        },
     )
 
     image = _content_list(response)[0]
@@ -1618,13 +1604,13 @@ async def test_get_kcl_sample_path_traversal(live_samples_index):
 
 
 @pytest.mark.asyncio
-async def test_save_image(cube_stl: str, tmp_path):
+async def test_save_image(populated_modeling_session: str, tmp_path):
     """Test saving an image to disk."""
     # First get an image from snapshot
     snapshot_response = await mcp.call_tool(
         "snapshot",
         arguments={
-            "input_file": cube_stl,
+            "session_id": populated_modeling_session,
             "camera_view": "isometric",
         },
     )
@@ -1646,13 +1632,13 @@ async def test_save_image(cube_stl: str, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_save_image_to_directory(cube_stl: str, tmp_path):
+async def test_save_image_to_directory(populated_modeling_session: str, tmp_path):
     """Test saving an image to a directory creates image.jpg."""
     # First get an image from snapshot
     snapshot_response = await mcp.call_tool(
         "snapshot",
         arguments={
-            "input_file": cube_stl,
+            "session_id": populated_modeling_session,
             "camera_view": "isometric",
         },
     )
@@ -1674,13 +1660,15 @@ async def test_save_image_to_directory(cube_stl: str, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_save_image_creates_parent_dirs(cube_stl: str, tmp_path):
+async def test_save_image_creates_parent_dirs(
+    populated_modeling_session: str, tmp_path
+):
     """Test that save_image creates parent directories if they don't exist."""
     # First get an image from snapshot
     snapshot_response = await mcp.call_tool(
         "snapshot",
         arguments={
-            "input_file": cube_stl,
+            "session_id": populated_modeling_session,
             "camera_view": "isometric",
         },
     )
@@ -1702,13 +1690,13 @@ async def test_save_image_creates_parent_dirs(cube_stl: str, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_save_image_to_temp_file(cube_stl: str):
+async def test_save_image_to_temp_file(populated_modeling_session: str):
     """Test that save_image creates a temp file when no path is provided."""
     # First get an image from snapshot
     snapshot_response = await mcp.call_tool(
         "snapshot",
         arguments={
-            "input_file": cube_stl,
+            "session_id": populated_modeling_session,
             "camera_view": "isometric",
         },
     )

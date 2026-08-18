@@ -25,13 +25,13 @@ from zoo_mcp import server, zoo_tools
 marker = Path(sys.argv[1])
 
 session = zoo_tools._ModelingSession(
+    session_id="session-id",
     context=MagicMock(),
     websocket=MagicMock(),
     lock=zoo_tools.Lock(),
-    last_used=zoo_tools.monotonic(),
 )
 session.context.__exit__ = lambda *args: marker.write_text("closed")
-zoo_tools._modeling_sessions["session-id"] = session
+zoo_tools._modeling_session = session
 
 server.install_shutdown_handlers()
 
