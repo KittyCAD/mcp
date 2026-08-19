@@ -4,6 +4,7 @@ import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import FrameType
+from typing import TypeVar
 
 from kittycad.models import (
     CameraMovement,
@@ -199,6 +200,36 @@ mcp = FastMCP(
     log_level="INFO",
     lifespan=_lifespan,
 )
+
+
+_ModelingResponseT = TypeVar("_ModelingResponseT")
+
+
+async def _modeling_command(
+    command: ModelingCmd,
+    expected_response: type[_ModelingResponseT],
+    response_description: str,
+    session_id: str,
+) -> _ModelingResponseT:
+    """Run a modeling command without holding the event loop.
+
+    The modeling helpers read their websocket synchronously. Called inline from
+    an async tool they stall the whole server rather than just their own call:
+    MCP dispatches every tool handler onto one event loop, so a blocked read
+    starves the other in-flight tools, the stdin reader, and any cancellation
+    the client sends. Handing the read to a worker thread keeps this call
+    awaitable, so it is the tool's deadline that ends a stalled command.
+    """
+    # Called through a closure so the command's response type is resolved here
+    # rather than lost passing a generic function to to_thread.
+    return await asyncio.to_thread(
+        lambda: zoo_execute_modeling_command(
+            command,
+            expected_response,
+            response_description,
+            session_id,
+        )
+    )
 
 
 @mcp.tool()
@@ -528,7 +559,8 @@ async def exec_kcl_project(
     logger.info("exec_kcl_project tool called")
 
     return str(
-        zoo_exec_kcl_project(
+        await asyncio.to_thread(
+            zoo_exec_kcl_project,
             kcl_code=kcl_code,
             kcl_path=kcl_path,
             session_id=session_id,
@@ -555,7 +587,7 @@ async def start_modeling_session() -> str:
         str: The session ID to pass to session-aware modeling tools.
     """
     logger.info("start_modeling_session tool called")
-    return zoo_start_modeling_session()
+    return await asyncio.to_thread(zoo_start_modeling_session)
 
 
 @mcp.tool()
@@ -587,7 +619,9 @@ async def import_cad_file(session_id: str, input_file: str) -> str:
         str: The modeling engine ID of the imported object.
     """
     logger.info("import_cad_file tool called for file: %s", input_file)
-    return zoo_import_cad_file(session_id=session_id, input_file=input_file)
+    return await asyncio.to_thread(
+        zoo_import_cad_file, session_id=session_id, input_file=input_file
+    )
 
 
 @mcp.tool()
@@ -605,7 +639,7 @@ async def stop_modeling_session(session_id: str) -> None:
         None
     """
     logger.info("stop_modeling_session tool called")
-    zoo_stop_modeling_session(session_id)
+    await asyncio.to_thread(zoo_stop_modeling_session, session_id)
 
 
 @mcp.tool()
@@ -717,7 +751,8 @@ async def get_face_info(
     """
     logger.info("get_face_info tool called for face_id=%s", face_id)
 
-    return zoo_face_info(
+    return await asyncio.to_thread(
+        zoo_face_info,
         face_id=Uuid(face_id),
         session_id=session_id,
     )
@@ -742,21 +777,23 @@ async def entity_distance(
         EntityGetDistance: The minimum and maximum distance between the entities.
     """
     logger.info("entity_distance tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(
-            OptionEntityGetDistance(
-                entity_id1=Uuid(entity_id1),
-                entity_id2=Uuid(entity_id2),
-                distance_type=DistanceType(
-                    OptionOnAxis(axis=on_axis)
-                    if on_axis is not None
-                    else OptionEuclidean()
-                ),
-            )
-        ),
-        ResponseEntityGetDistance,
-        "entity distance",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(
+                OptionEntityGetDistance(
+                    entity_id1=Uuid(entity_id1),
+                    entity_id2=Uuid(entity_id2),
+                    distance_type=DistanceType(
+                        OptionOnAxis(axis=on_axis)
+                        if on_axis is not None
+                        else OptionEuclidean()
+                    ),
+                )
+            ),
+            ResponseEntityGetDistance,
+            "entity distance",
+            session_id,
+        )
     ).data
 
 
@@ -776,11 +813,13 @@ async def set_selection_filter(
         SetSelectionFilter: Confirmation that the filter was set.
     """
     logger.info("set_selection_filter tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionSetSelectionFilter(filter=entity_types)),
-        ResponseSetSelectionFilter,
-        "selection filter",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionSetSelectionFilter(filter=entity_types)),
+            ResponseSetSelectionFilter,
+            "selection filter",
+            session_id,
+        )
     ).data
 
 
@@ -817,11 +856,13 @@ async def select_entities(
         SelectReplace: Confirmation that the selection was replaced.
     """
     logger.info("select_entities tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionSelectReplace(entities=entity_ids)),
-        ResponseSelectReplace,
-        "select entities",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionSelectReplace(entities=entity_ids)),
+            ResponseSelectReplace,
+            "select entities",
+            session_id,
+        )
     ).data
 
 
@@ -851,17 +892,19 @@ async def center_camera_on_selection(
         DefaultCameraCenterToSelection: Confirmation that the camera was centred.
     """
     logger.info("center_camera_on_selection tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(
-            OptionDefaultCameraCenterToSelection(
-                camera_movement=CameraMovement.VANTAGE
-                if move_vantage
-                else CameraMovement.NONE
-            )
-        ),
-        ResponseDefaultCameraCenterToSelection,
-        "camera centering",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(
+                OptionDefaultCameraCenterToSelection(
+                    camera_movement=CameraMovement.VANTAGE
+                    if move_vantage
+                    else CameraMovement.NONE
+                )
+            ),
+            ResponseDefaultCameraCenterToSelection,
+            "camera centering",
+            session_id,
+        )
     ).data
 
 
@@ -897,11 +940,13 @@ async def highlight_set_entities(
         HighlightSetEntities: Confirmation that the highlights were replaced.
     """
     logger.info("highlight_set_entities tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionHighlightSetEntities(entities=entity_ids)),
-        ResponseHighlightSetEntities,
-        "highlight entities",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionHighlightSetEntities(entities=entity_ids)),
+            ResponseHighlightSetEntities,
+            "highlight entities",
+            session_id,
+        )
     ).data
 
 
@@ -920,11 +965,13 @@ async def curve_get_end_points(
         CurveGetEndPoints: The curve's start and end points.
     """
     logger.info("curve_get_end_points tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionCurveGetEndPoints(curve_id=Uuid(curve_id))),
-        ResponseCurveGetEndPoints,
-        "curve endpoints",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionCurveGetEndPoints(curve_id=Uuid(curve_id))),
+            ResponseCurveGetEndPoints,
+            "curve endpoints",
+            session_id,
+        )
     ).data
 
 
@@ -981,11 +1028,13 @@ async def engine_util_evaluate_path(
         EngineUtilEvaluatePath: The position on the path at parameter t.
     """
     logger.info("engine_util_evaluate_path tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionEngineUtilEvaluatePath(path_json=path_json, t=t)),
-        ResponseEngineUtilEvaluatePath,
-        "path evaluation",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionEngineUtilEvaluatePath(path_json=path_json, t=t)),
+            ResponseEngineUtilEvaluatePath,
+            "path evaluation",
+            session_id,
+        )
     ).data
 
 
@@ -1004,11 +1053,13 @@ async def curve_get_type(
         CurveGetType: The curve's geometric type.
     """
     logger.info("curve_get_type tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionCurveGetType(curve_id=Uuid(curve_id))),
-        ResponseCurveGetType,
-        "curve type",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionCurveGetType(curve_id=Uuid(curve_id))),
+            ResponseCurveGetType,
+            "curve type",
+            session_id,
+        )
     ).data
 
 
@@ -1027,11 +1078,13 @@ async def edge_get_length(
         EdgeGetLength: The edge length in the current scene units.
     """
     logger.info("edge_get_length tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionEdgeGetLength(edge_id=Uuid(edge_id))),
-        ResponseEdgeGetLength,
-        "edge length",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionEdgeGetLength(edge_id=Uuid(edge_id))),
+            ResponseEdgeGetLength,
+            "edge length",
+            session_id,
+        )
     ).data
 
 
@@ -1050,11 +1103,13 @@ async def entity_get_all_child_uuids(
         EntityGetAllChildUuids: All child entity UUIDs.
     """
     logger.info("entity_get_all_child_uuids tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionEntityGetAllChildUuids(entity_id=Uuid(entity_id))),
-        ResponseEntityGetAllChildUuids,
-        "entity child IDs",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionEntityGetAllChildUuids(entity_id=Uuid(entity_id))),
+            ResponseEntityGetAllChildUuids,
+            "entity child IDs",
+            session_id,
+        )
     ).data
 
 
@@ -1073,11 +1128,13 @@ async def entity_get_index(
         EntityGetIndex: The entity's index within its parent.
     """
     logger.info("entity_get_index tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionEntityGetIndex(entity_id=Uuid(entity_id))),
-        ResponseEntityGetIndex,
-        "entity index",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionEntityGetIndex(entity_id=Uuid(entity_id))),
+            ResponseEntityGetIndex,
+            "entity index",
+            session_id,
+        )
     ).data
 
 
@@ -1096,11 +1153,13 @@ async def entity_get_parent_id(
         EntityGetParentId: The parent entity's UUID.
     """
     logger.info("entity_get_parent_id tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionEntityGetParentId(entity_id=Uuid(entity_id))),
-        ResponseEntityGetParentId,
-        "entity parent ID",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionEntityGetParentId(entity_id=Uuid(entity_id))),
+            ResponseEntityGetParentId,
+            "entity parent ID",
+            session_id,
+        )
     ).data
 
 
@@ -1119,11 +1178,13 @@ async def entity_get_sketch_paths(
         EntityGetSketchPaths: The sketch path UUIDs belonging to the entity.
     """
     logger.info("entity_get_sketch_paths tool called")
-    return zoo_execute_modeling_command(
-        ModelingCmd(OptionEntityGetSketchPaths(entity_id=Uuid(entity_id))),
-        ResponseEntityGetSketchPaths,
-        "entity sketch paths",
-        session_id,
+    return (
+        await _modeling_command(
+            ModelingCmd(OptionEntityGetSketchPaths(entity_id=Uuid(entity_id))),
+            ResponseEntityGetSketchPaths,
+            "entity sketch paths",
+            session_id,
+        )
     ).data
 
 
@@ -1285,7 +1346,8 @@ async def snapshot(
     """
     logger.info("snapshot tool called")
 
-    image = zoo_snapshot(
+    image = await asyncio.to_thread(
+        zoo_snapshot,
         session_id=session_id,
         views=_resolve_camera_views(camera_view),
         max_image_dimension=max_image_dimension,
