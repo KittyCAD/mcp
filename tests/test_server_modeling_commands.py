@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -656,3 +658,72 @@ async def test_query_tools_document_their_arguments():
         description = tools[tool_name].description or ""
         assert "Args:" in description, tool_name
         assert "session_id:" in description, tool_name
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_modeling_call_does_not_starve_other_tools(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """MCP runs every tool handler on one event loop.
+
+    Calling a synchronous modeling read inline used to block that loop, so one
+    stalled import froze the whole server and left no path for the client's
+    cancellation to arrive. The read has to happen on a worker thread.
+    """
+    release = threading.Event()
+    entered = threading.Event()
+
+    def blocking_import(session_id: str, input_file: str) -> str:
+        entered.set()
+        assert release.wait(timeout=5), "import was never released"
+        return "object-id"
+
+    monkeypatch.setattr(server, "zoo_import_cad_file", blocking_import)
+    monkeypatch.setattr(server, "zoo_get_modeling_sessions", lambda: ["session-id"])
+
+    stalled = asyncio.create_task(
+        mcp.call_tool(
+            "import_cad_file",
+            arguments={"session_id": "session-id", "input_file": "part.step"},
+        )
+    )
+    await asyncio.to_thread(entered.wait, 5)
+
+    # The loop is still live, so an unrelated tool completes while the import hangs.
+    other = await mcp.call_tool("get_modeling_sessions", arguments={})
+    assert _result(other) == ["session-id"]
+
+    # And the stalled call is a real task, so it is cancellable from the loop.
+    assert not stalled.done()
+    release.set()
+    assert _result(await stalled) == "object-id"
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_modeling_call_can_be_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    release = threading.Event()
+    entered = threading.Event()
+
+    def blocking_import(session_id: str, input_file: str) -> str:
+        entered.set()
+        release.wait(timeout=5)
+        return "object-id"
+
+    monkeypatch.setattr(server, "zoo_import_cad_file", blocking_import)
+
+    stalled = asyncio.create_task(
+        mcp.call_tool(
+            "import_cad_file",
+            arguments={"session_id": "session-id", "input_file": "part.step"},
+        )
+    )
+    await asyncio.to_thread(entered.wait, 5)
+    stalled.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stalled
+
+    # The worker thread still finishes on its own; its own deadline bounds it.
+    release.set()

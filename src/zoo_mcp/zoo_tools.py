@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 from collections.abc import Awaitable, Callable, Iterator
@@ -7,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from threading import Lock
+from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from uuid import uuid4
 
@@ -56,6 +58,7 @@ from kittycad.models import (
     UnitMass,
     UnitVolume,
     WebSocketRequest,
+    WebSocketResponse,
 )
 from kittycad.models.input_format3d import (
     OptionFbx,
@@ -114,10 +117,21 @@ from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
 from websockets.exceptions import WebSocketException
 
-from zoo_mcp import ZooMCPException, kittycad_client, logger
+from zoo_mcp import (
+    ZooMCPException,
+    ZooMCPTimeoutError,
+    kittycad_client,
+    logger,
+)
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
 
 SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
+
+# The wall-clock budget for one modeling tool call, measured across every read
+# it makes rather than per read. It has to stay under the reconnect budget of
+# the conversations driving these tools, so a stalled engine surfaces as a
+# retryable error instead of an abandoned request.
+MODELING_COMMAND_TIMEOUT = 300.0
 
 # Map alternative extensions to their canonical FileImportFormat values
 _EXT_ALIASES = {
@@ -692,6 +706,23 @@ def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
         raise ZooMCPException(f"'{input_ext}' files cannot be imported")
 
     command_id = ModelingCmdId(uuid4())
+    # Extension and byte size only; the file contents are customer data.
+    file_size = input_file.stat().st_size
+    deadline = _Deadline()
+
+    def log_stage(stage: str, outcome: str) -> None:
+        logger.info(
+            "CAD import %s: session=%s request_id=%s ext=%s bytes=%d "
+            "elapsed=%.3fs outcome=%s",
+            stage,
+            session_id,
+            command_id,
+            input_ext,
+            file_size,
+            deadline.elapsed,
+            outcome,
+        )
+
     with open(input_file, "rb") as data, _modeling_websocket(session_id) as ws:
         ws.send_binary(
             WebSocketRequest(
@@ -706,13 +737,24 @@ def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
                 )
             )
         )
+        log_stage("sent", "awaiting-engine-response")
 
-        response = _await_modeling_response(
-            ws,
-            command_id,
-            ResponseImportFiles,
-            "CAD file import",
-        )
+        try:
+            response = _await_modeling_response(
+                ws,
+                command_id,
+                ResponseImportFiles,
+                "CAD file import",
+                deadline,
+            )
+        except ZooMCPTimeoutError:
+            log_stage("finished", "timeout")
+            raise
+        except ZooMCPException as error:
+            log_stage("finished", f"failed ({error})")
+            raise
+
+        log_stage("finished", "imported")
         return response.data.object_id
 
 
@@ -1153,7 +1195,10 @@ async def zoo_execute_kcl(
 
     try:
         if session_id is not None:
-            path_artifact_graph = zoo_exec_kcl_project(
+            # Reads the modeling websocket synchronously; see server._modeling_command
+            # for why that cannot happen on the event loop.
+            path_artifact_graph = await asyncio.to_thread(
+                zoo_exec_kcl_project,
                 kcl_code=kcl_code,
                 kcl_path=kcl_path,
                 session_id=session_id,
@@ -1540,13 +1585,19 @@ def _exec_kcl_project(
     }
     ws.ws.send(json.dumps(request))
 
-    # Mirrors the timeout the SDK's own typed recv() applies; reading the raw
-    # socket without one hangs the caller forever if the engine drops the reply.
-    recv_timeout = getattr(ws, "_recv_timeout", 60.0)
+    # Bounded by what is left of the whole call rather than per read, so the
+    # frames skipped below cannot keep the loop alive indefinitely.
+    deadline = _Deadline()
 
     # This response is not represented in the generated SDK yet.
     while True:
-        raw_response = ws.ws.recv(timeout=recv_timeout)
+        remaining = deadline.remaining
+        if remaining <= 0:
+            raise _modeling_timeout(deadline, "KCL project execution")
+        try:
+            raw_response = ws.ws.recv(timeout=remaining)
+        except TimeoutError as error:
+            raise _modeling_timeout(deadline, "KCL project execution") from error
         try:
             response = json.loads(raw_response)
         except (TypeError, json.JSONDecodeError):
@@ -1627,6 +1678,24 @@ def _close_modeling_session(session: _ModelingSession) -> None:
             session.context.__exit__(None, None, None)
     finally:
         _unlink_modeling_session_artifact_graphs(session)
+
+
+def _discard_modeling_websocket(session: _ModelingSession) -> None:
+    """Close a session's websocket from inside its own command.
+
+    Deliberately not _close_modeling_session: that waits on ``session.lock``,
+    which the command calling this still holds, so it would deadlock.
+    """
+    try:
+        session.context.__exit__(None, None, None)
+    except Exception as error:
+        # The socket is being abandoned anyway; a failure closing it must not
+        # replace the timeout the caller is about to see.
+        logger.warning(
+            "Failed to close timed-out modeling session %s: %s",
+            session.session_id,
+            error,
+        )
 
 
 def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
@@ -1757,6 +1826,15 @@ def _modeling_websocket(session_id: str) -> Iterator[WebSocketModelingCommandsWs
     session.lock.acquire()
     try:
         yield session.websocket
+    except ZooMCPTimeoutError:
+        # The engine still owes a response to the command that gave up. Its
+        # request_id no longer matches anything a later command waits for, so
+        # the backlog would silently eat the next command's budget, and the
+        # engine keeps working on the abandoned command either way. Drop the
+        # session rather than hand it back.
+        _evict_modeling_session(session_id)
+        _discard_modeling_websocket(session)
+        raise
     except (WebSocketException, OSError) as error:
         _evict_modeling_session(session_id)
         raise ZooMCPException(
@@ -1836,12 +1914,15 @@ def zoo_face_info(
         face_get_gradient: FaceGetGradient | Literal[False] = False
         face_get_center: FaceGetCenter | Literal[False] = False
 
+        # Shared across all three replies, as for any other single tool call.
+        deadline = _Deadline()
+
         while (
             face_get_position is False
             or face_get_gradient is False
             or face_get_center is False
         ):
-            message = ws.recv().root
+            message = _recv_modeling_frame(ws, deadline, "face info").root
 
             # Match on request_id first; see _send_modeling_command.
             request_id = getattr(message, "request_id", None)
@@ -1891,6 +1972,65 @@ def zoo_face_info(
 _ModelingResponseT = TypeVar("_ModelingResponseT")
 
 
+class _Deadline:
+    """A monotonic wall-clock budget shared by every read in one tool call.
+
+    Monotonic so a clock adjustment mid-import cannot extend or collapse the
+    budget, and shared so that a multi-command call like a multiview snapshot
+    is bounded as a whole rather than per command.
+    """
+
+    __slots__ = ("_started", "timeout")
+
+    def __init__(self, timeout: float | None = None) -> None:
+        # Read at call time, not bound as a default, so a deployment can lower
+        # the budget under its own reconnect window.
+        self.timeout = MODELING_COMMAND_TIMEOUT if timeout is None else timeout
+        self._started = monotonic()
+
+    @property
+    def elapsed(self) -> float:
+        return monotonic() - self._started
+
+    @property
+    def remaining(self) -> float:
+        return self.timeout - self.elapsed
+
+
+def _modeling_timeout(deadline: _Deadline, description: str) -> ZooMCPTimeoutError:
+    return ZooMCPTimeoutError(
+        f"The modeling engine did not return a {description} response within "
+        f"{deadline.timeout:g}s (waited {deadline.elapsed:.1f}s). The modeling "
+        "session was closed; start a new one and retry, and simplify or shrink "
+        "the input if it fails again."
+    )
+
+
+def _recv_modeling_frame(
+    ws: WebSocketModelingCommandsWs,
+    deadline: _Deadline,
+    description: str,
+) -> WebSocketResponse:
+    """Read one frame, bounded by what is left of the whole call's budget.
+
+    The SDK applies its own recv timeout per call, which cannot bound a loop
+    that reads until its command's frame arrives: a live session interleaves
+    unsolicited frames every few seconds, and each one starts a fresh timeout.
+    Passing the remaining budget makes those frames consume it instead.
+    """
+    remaining = deadline.remaining
+    if remaining <= 0:
+        raise _modeling_timeout(deadline, description)
+
+    # Reaching into the SDK's per-read timeout is how the budget gets applied;
+    # recv() takes no timeout argument of its own.
+    ws._recv_timeout = remaining
+    try:
+        return ws.recv()
+    except TimeoutError as error:
+        raise _modeling_timeout(deadline, description) from error
+
+
 def _format_websocket_failure(message: object) -> str:
     """Render an engine failure frame as a readable message, not a model repr."""
     errors = getattr(message, "errors", None)
@@ -1909,10 +2049,11 @@ def _await_modeling_response(
     command_id: ModelingCmdId,
     expected_response: type[_ModelingResponseT],
     response_description: str,
+    deadline: _Deadline,
 ) -> _ModelingResponseT:
-    """Read until the typed response for ``command_id`` arrives."""
+    """Read until the typed response for ``command_id`` arrives or time runs out."""
     while True:
-        message = ws.recv().root
+        message = _recv_modeling_frame(ws, deadline, response_description).root
 
         request_id = getattr(message, "request_id", None)
 
@@ -1947,8 +2088,15 @@ def _send_modeling_command(
     command: ModelingCmd,
     expected_response: type[_ModelingResponseT],
     response_description: str,
+    deadline: _Deadline | None = None,
 ) -> _ModelingResponseT:
-    """Send one modeling command and return its matching typed response."""
+    """Send one modeling command and return its matching typed response.
+
+    Without a ``deadline`` the command gets a budget of its own; callers that
+    send several commands pass one in so the whole sequence is bounded.
+    """
+    if deadline is None:
+        deadline = _Deadline()
     command_id = ModelingCmdId(uuid4())
     ws.send(
         WebSocketRequest(
@@ -1964,6 +2112,7 @@ def _send_modeling_command(
         command_id,
         expected_response,
         response_description,
+        deadline,
     )
 
 
@@ -1980,6 +2129,7 @@ def zoo_execute_modeling_command(
             command,
             expected_response,
             response_description,
+            _Deadline(),
         )
 
 
@@ -2009,12 +2159,17 @@ def zoo_snapshot(
     highlighted via highlight_set_entities stand out instead of competing with
     the outline drawn on every edge in the scene.
     """
+    # One budget for the whole capture. A per-command budget would multiply by
+    # the command count, which for a four-view capture is fourteen commands.
+    deadline = _Deadline()
+
     with _modeling_websocket(session_id) as ws:
         _send_modeling_command(
             ws,
             ModelingCmd(OptionDefaultCameraSetOrthographic()),
             ResponseDefaultCameraSetOrthographic,
             "orthographic camera",
+            deadline,
         )
 
         # Scene-wide, so it is set once rather than per view.
@@ -2023,6 +2178,7 @@ def zoo_snapshot(
             ModelingCmd(OptionEdgeLinesVisible(hidden=not highlight_edges)),
             ResponseEdgeLinesVisible,
             "edge line visibility",
+            deadline,
         )
 
         zoom_to_fit = OptionZoomToFit(object_ids=[], padding=padding)
@@ -2035,6 +2191,7 @@ def zoo_snapshot(
                     ModelingCmd(view),
                     ResponseDefaultCameraLookAt,
                     "camera view",
+                    deadline,
                 )
             elif zoom:
                 _send_modeling_command(
@@ -2042,6 +2199,7 @@ def zoo_snapshot(
                     ModelingCmd(OptionViewIsometric()),
                     ResponseViewIsometric,
                     "isometric view",
+                    deadline,
                 )
 
             if zoom:
@@ -2050,6 +2208,7 @@ def zoo_snapshot(
                     ModelingCmd(zoom_to_fit),
                     ResponseZoomToFit,
                     "zoom to fit",
+                    deadline,
                 )
 
             response = _send_modeling_command(
@@ -2057,6 +2216,7 @@ def zoo_snapshot(
                 ModelingCmd(OptionTakeSnapshot(format=ImageFormat.JPEG)),
                 ResponseTakeSnapshot,
                 "snapshot",
+                deadline,
             )
             jpeg_contents_list.append(response.data.contents)
 
