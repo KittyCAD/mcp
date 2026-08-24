@@ -9,6 +9,7 @@ import pytest
 _ENGINE_TEST_MODULES = frozenset({"test_server"})
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items):
     for item in items:
         module = item.module.__name__.rsplit(".", 1)[-1] if item.module else ""
