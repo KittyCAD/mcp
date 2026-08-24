@@ -60,6 +60,7 @@ async def populated_modeling_session(cube_kcl: str):
         await mcp.call_tool("start_modeling_session", arguments={})
     )
     artifact_graph_path: Path | None = None
+    failure: BaseException | None = None
     try:
         response = await mcp.call_tool(
             "exec_kcl_project",
@@ -67,12 +68,19 @@ async def populated_modeling_session(cube_kcl: str):
         )
         artifact_graph_path = Path(_meta_result(response))
         yield session_id
+    except BaseException as error:
+        failure = error
+        raise
     finally:
         if artifact_graph_path is not None:
             artifact_graph_path.unlink(missing_ok=True)
-        await mcp.call_tool(
-            "stop_modeling_session", arguments={"session_id": session_id}
-        )
+        try:
+            await mcp.call_tool(
+                "stop_modeling_session", arguments={"session_id": session_id}
+            )
+        except ToolError:
+            if failure is None:
+                raise
 
 
 @pytest.mark.asyncio

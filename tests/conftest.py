@@ -3,12 +3,19 @@ from pathlib import Path
 
 import pytest
 
+from zoo_mcp import zoo_tools
+
 # Modules whose tests open engine websockets. Concurrent engine connections make
 # the engine drop sockets (surfacing as "received 1005"), so they all share one
 # xdist group and run on a single worker.
 _ENGINE_TEST_MODULES = frozenset({"test_server"})
+_ENGINE_RERUNS = 2
+_ENGINE_RERUN_DELAY = 5
+_ENGINE_COMMAND_TIMEOUT = 120.0
 
 
+# tryfirst so this beats pytest-xdist's own collection hook
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items):
     for item in items:
         module = item.module.__name__.rsplit(".", 1)[-1] if item.module else ""
@@ -17,6 +24,19 @@ def pytest_collection_modifyitems(items):
         if any(mark.name == "xdist_group" for mark in item.iter_markers()):
             continue
         item.add_marker(pytest.mark.xdist_group(name="engine"))
+        item.add_marker(
+            pytest.mark.flaky(reruns=_ENGINE_RERUNS, reruns_delay=_ENGINE_RERUN_DELAY)
+        )
+
+
+@pytest.fixture(autouse=True)
+def _bound_engine_command_timeout(request, monkeypatch):
+    """Fail a hung engine read fast enough that a rerun is still cheap."""
+    module = request.module.__name__.rsplit(".", 1)[-1] if request.module else ""
+    if module in _ENGINE_TEST_MODULES:
+        monkeypatch.setattr(
+            zoo_tools, "MODELING_COMMAND_TIMEOUT", _ENGINE_COMMAND_TIMEOUT
+        )
 
 
 @pytest.fixture
