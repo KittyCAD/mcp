@@ -361,6 +361,22 @@ def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]
     return issues
 
 
+def _execution_issues_message(issues: dict[str, list[str]]) -> str:
+    """Render grouped KCL execution issues using the public tool message format."""
+    sections = [
+        f"{label}:\n\n" + "\n\n".join(issues[severity])
+        for severity, label in (
+            ("fatal", "Fatal issues"),
+            ("error", "Errors"),
+            ("warning", "Warnings"),
+        )
+        if severity in issues
+    ]
+    return "KCL code execution completed with the following issues:\n\n" + "\n\n".join(
+        sections
+    )
+
+
 class KCLExportFormat(Enum):
     formats = {  # noqa: RUF012
         "fbx": kcl.FileExportFormat.Fbx,
@@ -1227,19 +1243,7 @@ async def zoo_execute_kcl(
         if issues:
             total = sum(len(reports) for reports in issues.values())
             logger.info("KCL code execution reported %d issue(s)", total)
-            sections = [
-                f"{label}:\n\n" + "\n\n".join(issues[severity])
-                for severity, label in (
-                    ("fatal", "Fatal issues"),
-                    ("error", "Errors"),
-                    ("warning", "Warnings"),
-                )
-                if severity in issues
-            ]
-            message = (
-                "KCL code execution completed with the following issues:\n\n"
-                + "\n\n".join(sections)
-            )
+            message = _execution_issues_message(issues)
             return ResultZooExecuteKclLocal(ok=True, message=message)
 
         logger.info("KCL code executed successfully")
@@ -1525,7 +1529,9 @@ async def zoo_mock_execute_kcl(
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
 
     Returns:
-        tuple(bool, str): Returns True if the KCL code executed successfully and a success message, False otherwise and the error message.
+        tuple(bool, str): Returns ``False`` when execution aborts or reports an
+        error/fatal compilation issue. Warning-only outcomes remain successful
+        and include their rendered diagnostics in the message.
     """
     logger.info("Executing KCL code")
 
@@ -1533,9 +1539,17 @@ async def zoo_mock_execute_kcl(
 
     try:
         if kcl_code:
-            await kcl.mock_execute_code(kcl_code)
+            outcome = await kcl.mock_execute_code(kcl_code)
         else:
-            await kcl.mock_execute(str(kcl_path))
+            outcome = await kcl.mock_execute(str(kcl_path))
+
+        issues = _format_execution_issues(outcome)
+        if issues:
+            total = sum(len(reports) for reports in issues.values())
+            logger.info("KCL mock execution reported %d issue(s)", total)
+            has_blocking_issues = "fatal" in issues or "error" in issues
+            return not has_blocking_issues, _execution_issues_message(issues)
+
         logger.info("KCL mock executed successfully")
         return True, "KCL code mock executed successfully"
     except Exception as e:
