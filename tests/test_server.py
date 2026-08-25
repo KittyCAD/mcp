@@ -1059,6 +1059,48 @@ async def test_mock_execute_kcl_error():
 
 
 @pytest.mark.asyncio
+async def test_mock_execute_kcl_rejects_unknown_keyword():
+    response = await mcp.call_tool(
+        "mock_execute_kcl",
+        arguments={
+            "kcl_code": """
+profile = startSketchOn(XY)
+  |> startProfile(at = [0, 0])
+  |> xLine(length = 10)
+  |> yLine(length = 10)
+  |> xLine(length = -10)
+  |> close()
+
+part = extrude(profile, length = 10, symmetry = true)
+""",
+            "kcl_path": None,
+        },
+    )
+    result = _meta_result(response)
+    assert isinstance(result, (tuple, list))
+    assert result[0] is False
+    assert "Errors:" in result[1]
+    assert "`symmetry` is not an argument of `extrude`" in result[1]
+
+
+@pytest.mark.asyncio
+async def test_mock_execute_kcl_preserves_warning_success(monkeypatch):
+    outcome = _FakeOutcome([_FakeIssue(severity="warning")])
+
+    async def fake_mock_execute_code(code: str):
+        return outcome
+
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kcl, "mock_execute_code", fake_mock_execute_code
+    )
+
+    ok, message = await zoo_mcp.zoo_tools.zoo_mock_execute_kcl(kcl_code="anything")
+    assert ok is True
+    assert "Warnings:" in message
+    assert "warning report" in message
+
+
+@pytest.mark.asyncio
 async def test_snapshot_from_a_modeling_session(populated_modeling_session: str):
     response = await mcp.call_tool(
         "snapshot", arguments={"session_id": populated_modeling_session}
