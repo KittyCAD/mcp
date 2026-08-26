@@ -1455,7 +1455,7 @@ async def list_org_datasets() -> list[dict] | str:
     logger.info("list_org_datasets tool called")
 
     try:
-        return zoo_list_org_datasets()
+        return await zoo_list_org_datasets()
     except Exception as e:
         return f"There was an error listing org datasets: {e}"
 
@@ -1475,7 +1475,7 @@ async def list_org_skills() -> list[dict] | str:
     logger.info("list_org_skills tool called")
 
     try:
-        return zoo_list_org_skills()
+        return await zoo_list_org_skills()
     except Exception as e:
         return f"There was an error listing org skills: {e}"
 
@@ -1504,7 +1504,7 @@ async def search_org_dataset_semantic(
     logger.info("search_org_dataset_semantic tool called for dataset_id=%s", dataset_id)
 
     try:
-        return zoo_search_org_dataset_semantic(
+        return await zoo_search_org_dataset_semantic(
             dataset_id=dataset_id, query=query, limit=limit
         )
     except Exception as e:

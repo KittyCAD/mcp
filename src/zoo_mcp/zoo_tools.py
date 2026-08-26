@@ -15,7 +15,7 @@ from uuid import uuid4
 import aiofiles
 import kcl
 import trimesh
-from kittycad import WebSocketModelingCommandsWs
+from kittycad import AsyncKittyCAD, WebSocketModelingCommandsWs
 
 if TYPE_CHECKING:
 
@@ -122,6 +122,7 @@ from zoo_mcp import (
     ZooMCPTimeoutError,
     kittycad_client,
     logger,
+    new_async_kittycad_client,
 )
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
 
@@ -491,11 +492,12 @@ async def zoo_calculate_center_of_mass(
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    result = kittycad_client.file.create_file_center_of_mass(
-        src_format=src_format,
-        body=data,
-        output_unit=UnitLength(unit_length),
-    )
+    async with new_async_kittycad_client() as client:
+        result = await client.file.create_file_center_of_mass(
+            src_format=src_format,
+            body=data,
+            output_unit=UnitLength(unit_length),
+        )
 
     if not isinstance(result, FileCenterOfMass):
         logger.info(
@@ -544,13 +546,14 @@ async def zoo_calculate_mass(
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    result = kittycad_client.file.create_file_mass(
-        output_unit=UnitMass(unit_mass),
-        src_format=src_format,
-        body=data,
-        material_density_unit=UnitDensity(unit_density),
-        material_density=density,
-    )
+    async with new_async_kittycad_client() as client:
+        result = await client.file.create_file_mass(
+            output_unit=UnitMass(unit_mass),
+            src_format=src_format,
+            body=data,
+            material_density_unit=UnitDensity(unit_density),
+            material_density=density,
+        )
 
     if not isinstance(result, FileMass):
         logger.info("Failed to calculate mass, incorrect return type %s", type(result))
@@ -586,11 +589,12 @@ async def zoo_calculate_surface_area(file_path: Path | str, unit_area: str) -> f
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    result = kittycad_client.file.create_file_surface_area(
-        output_unit=UnitArea(unit_area),
-        src_format=src_format,
-        body=data,
-    )
+    async with new_async_kittycad_client() as client:
+        result = await client.file.create_file_surface_area(
+            output_unit=UnitArea(unit_area),
+            src_format=src_format,
+            body=data,
+        )
 
     if not isinstance(result, FileSurfaceArea):
         logger.error(
@@ -631,11 +635,12 @@ async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    result = kittycad_client.file.create_file_volume(
-        output_unit=UnitVolume(unit_vol),
-        src_format=src_format,
-        body=data,
-    )
+    async with new_async_kittycad_client() as client:
+        result = await client.file.create_file_volume(
+            output_unit=UnitVolume(unit_vol),
+            src_format=src_format,
+            body=data,
+        )
 
     if not isinstance(result, FileVolume):
         logger.info(
@@ -809,59 +814,63 @@ async def zoo_calculate_cad_physical_properties(
     normalized_ext = _normalize_ext(file_path.suffix.split(".")[1])
     src_format = FileImportFormat(normalized_ext)
 
-    volume_result = kittycad_client.file.create_file_volume(
-        output_unit=UnitVolume(unit_vol),
-        src_format=src_format,
-        body=data,
-    )
-    if not isinstance(volume_result, FileVolume) or volume_result.volume is None:
-        raise ZooMCPException("Failed to calculate volume")
-
-    mass_result = kittycad_client.file.create_file_mass(
-        output_unit=UnitMass(unit_mass),
-        src_format=src_format,
-        body=data,
-        material_density_unit=UnitDensity(unit_density),
-        material_density=density,
-    )
-    if not isinstance(mass_result, FileMass) or mass_result.mass is None:
-        raise ZooMCPException("Failed to calculate mass")
-
-    sa_result = kittycad_client.file.create_file_surface_area(
-        output_unit=UnitArea(unit_area),
-        src_format=src_format,
-        body=data,
-    )
-    if not isinstance(sa_result, FileSurfaceArea) or sa_result.surface_area is None:
-        raise ZooMCPException("Failed to calculate surface area")
-
-    com_result = kittycad_client.file.create_file_center_of_mass(
-        src_format=src_format,
-        body=data,
-        output_unit=UnitLength(unit_length),
-    )
-    if (
-        not isinstance(com_result, FileCenterOfMass)
-        or com_result.center_of_mass is None
-    ):
-        raise ZooMCPException("Failed to calculate center of mass")
-
-    # Compute bounding box from mesh data
-    if normalized_ext == "stl":
-        bbox = _compute_stl_bounding_box(data)
-    else:
-        stl_result = kittycad_client.file.create_file_conversion(
+    async with new_async_kittycad_client() as client:
+        volume_result = await client.file.create_file_volume(
+            output_unit=UnitVolume(unit_vol),
             src_format=src_format,
-            output_format=FileExportFormat.STL,
             body=data,
         )
-        if not isinstance(stl_result, FileConversion):
-            raise ZooMCPException("Failed to convert file for bounding box calculation")
-        if stl_result.outputs is None or len(stl_result.outputs) == 0:
-            raise ZooMCPException(
-                "Failed to convert file for bounding box calculation, no output"
+        if not isinstance(volume_result, FileVolume) or volume_result.volume is None:
+            raise ZooMCPException("Failed to calculate volume")
+
+        mass_result = await client.file.create_file_mass(
+            output_unit=UnitMass(unit_mass),
+            src_format=src_format,
+            body=data,
+            material_density_unit=UnitDensity(unit_density),
+            material_density=density,
+        )
+        if not isinstance(mass_result, FileMass) or mass_result.mass is None:
+            raise ZooMCPException("Failed to calculate mass")
+
+        sa_result = await client.file.create_file_surface_area(
+            output_unit=UnitArea(unit_area),
+            src_format=src_format,
+            body=data,
+        )
+        if not isinstance(sa_result, FileSurfaceArea) or sa_result.surface_area is None:
+            raise ZooMCPException("Failed to calculate surface area")
+
+        com_result = await client.file.create_file_center_of_mass(
+            src_format=src_format,
+            body=data,
+            output_unit=UnitLength(unit_length),
+        )
+        if (
+            not isinstance(com_result, FileCenterOfMass)
+            or com_result.center_of_mass is None
+        ):
+            raise ZooMCPException("Failed to calculate center of mass")
+
+        if normalized_ext == "stl":
+            stl_data = data
+        else:
+            stl_result = await client.file.create_file_conversion(
+                src_format=src_format,
+                output_format=FileExportFormat.STL,
+                body=data,
             )
-        bbox = _compute_stl_bounding_box(next(iter(stl_result.outputs.values())))
+            if not isinstance(stl_result, FileConversion):
+                raise ZooMCPException(
+                    "Failed to convert file for bounding box calculation"
+                )
+            if stl_result.outputs is None or len(stl_result.outputs) == 0:
+                raise ZooMCPException(
+                    "Failed to convert file for bounding box calculation, no output"
+                )
+            stl_data = next(iter(stl_result.outputs.values()))
+
+    bbox = await asyncio.to_thread(_compute_stl_bounding_box, stl_data)
 
     physical_properties = {
         "volume": volume_result.volume,
@@ -1049,16 +1058,17 @@ async def zoo_calculate_bounding_box_cad(
 
     # If the file is already STL, parse it directly
     if normalized_ext == "stl":
-        return _compute_stl_bounding_box(data)
+        return await asyncio.to_thread(_compute_stl_bounding_box, data)
 
     src_format = FileImportFormat(normalized_ext)
 
     # Convert to STL to get mesh data for bounding box computation
-    stl_result = kittycad_client.file.create_file_conversion(
-        src_format=src_format,
-        output_format=FileExportFormat.STL,
-        body=data,
-    )
+    async with new_async_kittycad_client() as client:
+        stl_result = await client.file.create_file_conversion(
+            src_format=src_format,
+            output_format=FileExportFormat.STL,
+            body=data,
+        )
 
     if not isinstance(stl_result, FileConversion):
         raise ZooMCPException(
@@ -1073,7 +1083,7 @@ async def zoo_calculate_bounding_box_cad(
 
     stl_data = next(iter(stl_result.outputs.values()))
 
-    return _compute_stl_bounding_box(stl_data)
+    return await asyncio.to_thread(_compute_stl_bounding_box, stl_data)
 
 
 async def zoo_convert_cad_file(
@@ -1144,11 +1154,12 @@ async def zoo_convert_cad_file(
     async with aiofiles.open(input_file, "rb") as inp:
         data = await inp.read()
 
-    export_response = kittycad_client.file.create_file_conversion(
-        src_format=FileImportFormat(_normalize_ext(input_ext)),
-        output_format=FileExportFormat(export_format),
-        body=data,
-    )
+    async with new_async_kittycad_client() as client:
+        export_response = await client.file.create_file_conversion(
+            src_format=FileImportFormat(_normalize_ext(input_ext)),
+            output_format=FileExportFormat(export_format),
+            body=data,
+        )
 
     if not isinstance(export_response, FileConversion):
         logger.error(
@@ -2240,10 +2251,13 @@ def zoo_snapshot(
     )
 
 
-def _list_org_datasets_raw(lookup_enabled: bool | None) -> list[dict[str, str | None]]:
+async def _list_org_datasets_raw(
+    client: AsyncKittyCAD,
+    lookup_enabled: bool | None,
+) -> list[dict[str, str | None]]:
     """List datasets without validating fields unrelated to this tool's output."""
-    client = kittycad_client.get_http_client()
-    url = f"{kittycad_client.base_url}/org/datasets"
+    http_client = client.get_http_client()
+    url = f"{client.base_url}/org/datasets"
     page_token: str | None = None
     seen_page_tokens: set[str] = set()
     datasets: list[dict[str, str | None]] = []
@@ -2256,9 +2270,9 @@ def _list_org_datasets_raw(lookup_enabled: bool | None) -> list[dict[str, str | 
             params["lookup_enabled"] = "true" if lookup_enabled else "false"
         if page_token is not None:
             params["page_token"] = page_token
-        response = client.get(
+        response = await http_client.get(
             url=url,
-            headers=kittycad_client.get_headers(),
+            headers=client.get_headers(),
             params=params,
         )
         if not response.is_success:
@@ -2308,7 +2322,7 @@ def _org_datasets_empty_or_raise(
     raise ZooMCPException(f"Failed to list org datasets: {exc}") from exc
 
 
-def zoo_list_org_datasets(
+async def zoo_list_org_datasets(
     lookup_enabled: bool | None = True,
 ) -> list[dict[str, str | None]]:
     """List all datasets visible to the org tied to the current ZOO_API_TOKEN.
@@ -2323,30 +2337,32 @@ def zoo_list_org_datasets(
         entries, possibly empty.
     """
     logger.info("Listing org datasets (lookup_enabled=%s)", lookup_enabled)
-    use_raw_fallback = False
-    datasets = []
-    try:
-        datasets = list(
-            kittycad_client.orgs.list_org_datasets(
-                limit=None, page_token=None, lookup_enabled=lookup_enabled
-            )
-        )
-    except ValueError as exc:
-        logger.warning(
-            "SDK could not validate org datasets; falling back to raw JSON: %s",
-            exc,
-        )
-        use_raw_fallback = True
-    except KittyCADClientError as exc:
-        return _org_datasets_empty_or_raise(exc)
-
-    # Run the fallback outside the handler above so its own client errors still
-    # get the 404-means-empty treatment instead of escaping uncaught.
-    if use_raw_fallback:
+    async with new_async_kittycad_client() as client:
+        use_raw_fallback = False
+        datasets = []
         try:
-            return _list_org_datasets_raw(lookup_enabled)
+            datasets = [
+                dataset
+                async for dataset in client.orgs.list_org_datasets(
+                    limit=None, page_token=None, lookup_enabled=lookup_enabled
+                )
+            ]
+        except ValueError as exc:
+            logger.warning(
+                "SDK could not validate org datasets; falling back to raw JSON: %s",
+                exc,
+            )
+            use_raw_fallback = True
         except KittyCADClientError as exc:
             return _org_datasets_empty_or_raise(exc)
+
+        # Run the fallback outside the handler above so its own client errors still
+        # get the 404-means-empty treatment instead of escaping uncaught.
+        if use_raw_fallback:
+            try:
+                return await _list_org_datasets_raw(client, lookup_enabled)
+            except KittyCADClientError as exc:
+                return _org_datasets_empty_or_raise(exc)
 
     return [
         {"id": str(d.id), "name": d.name, "description": d.description}
@@ -2354,7 +2370,7 @@ def zoo_list_org_datasets(
     ]
 
 
-def zoo_list_org_skills() -> list[dict[str, str]]:
+async def zoo_list_org_skills() -> list[dict[str, str]]:
     """List all skills visible to the org tied to the current ZOO_API_TOKEN.
 
     Returns:
@@ -2362,12 +2378,13 @@ def zoo_list_org_skills() -> list[dict[str, str]]:
         "markdown": <str>} entries, possibly empty.
     """
     logger.info("Listing org skills")
-    try:
-        skills = kittycad_client.orgs.list_org_skills()
-    except KittyCADClientError as exc:
-        if exc.status_code == 404:
-            return []
-        raise ZooMCPException(f"Failed to list org skills: {exc}") from exc
+    async with new_async_kittycad_client() as client:
+        try:
+            skills = await client.orgs.list_org_skills()
+        except KittyCADClientError as exc:
+            if exc.status_code == 404:
+                return []
+            raise ZooMCPException(f"Failed to list org skills: {exc}") from exc
 
     return [
         {
@@ -2380,7 +2397,7 @@ def zoo_list_org_skills() -> list[dict[str, str]]:
     ]
 
 
-def zoo_search_org_dataset_semantic(
+async def zoo_search_org_dataset_semantic(
     dataset_id: str,
     query: str,
     limit: int | None = None,
@@ -2399,12 +2416,15 @@ def zoo_search_org_dataset_semantic(
     logger.info(
         "Semantic search in dataset %s for query of length %d", dataset_id, len(query)
     )
-    try:
-        matches = kittycad_client.orgs.search_org_dataset_semantic(
-            id=Uuid(dataset_id), q=query, limit=limit
-        )
-    except KittyCADClientError as exc:
-        raise ZooMCPException(f"Failed to search dataset {dataset_id}: {exc}") from exc
+    async with new_async_kittycad_client() as client:
+        try:
+            matches = await client.orgs.search_org_dataset_semantic(
+                id=Uuid(dataset_id), q=query, limit=limit
+            )
+        except KittyCADClientError as exc:
+            raise ZooMCPException(
+                f"Failed to search dataset {dataset_id}: {exc}"
+            ) from exc
 
     return [
         {

@@ -1,21 +1,23 @@
+import asyncio
 import base64
 import io
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
-from kittycad import KittyCAD
+from kittycad import AsyncKittyCAD
 from kittycad.exceptions import KittyCADClientError
 from kittycad.models import (
     FaceGetCenter,
     FaceGetGradient,
     FaceGetPosition,
+    FileVolume,
     OrgDataset,
     Point3d,
 )
@@ -28,6 +30,29 @@ import zoo_mcp.zoo_tools
 from zoo_mcp.kcl_docs import KCLDocs
 from zoo_mcp.kcl_samples import KCLSamples, SampleMetadata
 from zoo_mcp.server import mcp
+
+
+def _async_items(items: Sequence[Any]) -> AsyncIterator[Any]:
+    async def iterate() -> AsyncIterator[Any]:
+        for item in items:
+            yield item
+
+    return iterate()
+
+
+def _async_error(error: Exception) -> AsyncIterator[Any]:
+    async def iterate() -> AsyncIterator[Any]:
+        raise error
+        yield  # pragma: no cover - makes this an async iterator
+
+    return iterate()
+
+
+@pytest.fixture
+def async_kittycad_client(monkeypatch: pytest.MonkeyPatch) -> AsyncKittyCAD:
+    client = AsyncKittyCAD(token="test-token")
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "new_async_kittycad_client", lambda: client)
+    return client
 
 
 def _meta_result(response: Sequence[Any] | dict[str, Any]) -> Any:
@@ -175,6 +200,45 @@ async def test_calculate_volume(cube_stl: str):
     result = _meta_result(response)
     assert isinstance(result, float)
     assert result == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_slow_file_request_does_not_starve_other_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    cube_stl: str,
+    async_kittycad_client: AsyncKittyCAD,
+):
+    """A pending REST request must yield instead of freezing MCP dispatch."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_volume(*args: Any, **kwargs: Any) -> FileVolume:
+        entered.set()
+        await release.wait()
+        return FileVolume.model_construct(volume=1.0)
+
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "create_file_volume",
+        slow_volume,
+    )
+
+    stalled = asyncio.create_task(
+        mcp.call_tool(
+            "calculate_volume",
+            arguments={"input_file": cube_stl, "unit_volume": "cm3"},
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    other = await asyncio.wait_for(
+        mcp.call_tool("get_modeling_sessions", arguments={}), timeout=1
+    )
+    assert _meta_result(other) == []
+    assert not stalled.done()
+
+    release.set()
+    assert _meta_result(await stalled) == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio
@@ -1767,14 +1831,16 @@ async def test_save_image_to_temp_file(populated_modeling_session: str):
 
 
 @pytest.mark.asyncio
-async def test_list_org_datasets_success(monkeypatch: pytest.MonkeyPatch):
+async def test_list_org_datasets_success(
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
+):
     fake_datasets = [
         SimpleNamespace(id="uuid-1", name="alpha", description="first dataset"),
         SimpleNamespace(id="uuid-2", name="beta", description=None),
     ]
-    mock = MagicMock(return_value=iter(fake_datasets))
+    mock = MagicMock(return_value=_async_items(fake_datasets))
     monkeypatch.setattr(
-        zoo_mcp.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "list_org_datasets",
         mock,
     )
@@ -1791,15 +1857,15 @@ async def test_list_org_datasets_success(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.asyncio
 async def test_list_org_datasets_falls_back_for_unknown_status(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
 ):
     with pytest.raises(ValueError) as exc_info:
         OrgDataset.model_validate({"status": "paused"})
 
     monkeypatch.setattr(
-        zoo_mcp.zoo_tools.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "list_org_datasets",
-        MagicMock(side_effect=exc_info.value),
+        MagicMock(return_value=_async_error(exc_info.value)),
     )
     raw_response = SimpleNamespace(
         is_success=True,
@@ -1818,9 +1884,9 @@ async def test_list_org_datasets_falls_back_for_unknown_status(
         ),
     )
     http_client = MagicMock()
-    http_client.get.return_value = raw_response
+    http_client.get = AsyncMock(return_value=raw_response)
     monkeypatch.setattr(
-        zoo_mcp.zoo_tools.kittycad_client,
+        async_kittycad_client,
         "get_http_client",
         MagicMock(return_value=http_client),
     )
@@ -1839,14 +1905,17 @@ async def test_list_org_datasets_falls_back_for_unknown_status(
 
 
 @pytest.mark.asyncio
-async def test_list_org_datasets_empty_when_404(monkeypatch: pytest.MonkeyPatch):
-    def raise_404(*args: Any, **kwargs: Any):
-        raise KittyCADClientError(message="No org found", status_code=404)
-
+async def test_list_org_datasets_empty_when_404(
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
+):
     monkeypatch.setattr(
-        zoo_mcp.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "list_org_datasets",
-        raise_404,
+        MagicMock(
+            return_value=_async_error(
+                KittyCADClientError(message="No org found", status_code=404)
+            )
+        ),
     )
 
     response = await mcp.call_tool("list_org_datasets", arguments={})
@@ -1856,21 +1925,21 @@ async def test_list_org_datasets_empty_when_404(monkeypatch: pytest.MonkeyPatch)
 
 @pytest.mark.asyncio
 async def test_list_org_datasets_empty_when_fallback_hits_404(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
 ):
     """Schema drift plus a 404 must still be empty, not an uncaught client error."""
     with pytest.raises(ValueError) as exc_info:
         OrgDataset.model_validate({"status": "paused"})
 
     monkeypatch.setattr(
-        zoo_mcp.zoo_tools.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "list_org_datasets",
-        MagicMock(side_effect=exc_info.value),
+        MagicMock(return_value=_async_error(exc_info.value)),
     )
     http_client = MagicMock()
-    http_client.get.return_value = SimpleNamespace(is_success=False)
+    http_client.get = AsyncMock(return_value=SimpleNamespace(is_success=False))
     monkeypatch.setattr(
-        zoo_mcp.zoo_tools.kittycad_client,
+        async_kittycad_client,
         "get_http_client",
         MagicMock(return_value=http_client),
     )
@@ -1886,7 +1955,9 @@ async def test_list_org_datasets_empty_when_fallback_hits_404(
 
 
 @pytest.mark.asyncio
-async def test_search_org_dataset_semantic_success(monkeypatch: pytest.MonkeyPatch):
+async def test_search_org_dataset_semantic_success(
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
+):
     fake_matches = [
         SimpleNamespace(
             chunk_index=0,
@@ -1903,9 +1974,9 @@ async def test_search_org_dataset_semantic_success(monkeypatch: pytest.MonkeyPat
             source_file_path="path/two.kcl",
         ),
     ]
-    mock = MagicMock(return_value=fake_matches)
+    mock = AsyncMock(return_value=fake_matches)
     monkeypatch.setattr(
-        zoo_mcp.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "search_org_dataset_semantic",
         mock,
     )
@@ -1935,18 +2006,17 @@ async def test_search_org_dataset_semantic_success(monkeypatch: pytest.MonkeyPat
             "conversion_id": "conv-uuid-2",
         },
     ]
-    mock.assert_called_once_with(id="dataset-uuid", q="find the gear", limit=5)
+    mock.assert_awaited_once_with(id="dataset-uuid", q="find the gear", limit=5)
 
 
 @pytest.mark.asyncio
-async def test_search_org_dataset_semantic_error(monkeypatch: pytest.MonkeyPatch):
-    def raise_500(*args: Any, **kwargs: Any):
-        raise RuntimeError("boom")
-
+async def test_search_org_dataset_semantic_error(
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
+):
     monkeypatch.setattr(
-        zoo_mcp.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "search_org_dataset_semantic",
-        raise_500,
+        AsyncMock(side_effect=RuntimeError("boom")),
     )
 
     response = await mcp.call_tool(
@@ -1969,30 +2039,36 @@ async def test_search_org_dataset_semantic_error(monkeypatch: pytest.MonkeyPatch
 )
 async def test_list_and_search_org_dataset_live(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZOO_HOST", "https://api.dev.zoo.dev")
-    dev_client = KittyCAD(token=os.environ["ZOO_DATASET_TOKEN"])
-    monkeypatch.setattr(zoo_mcp, "kittycad_client", dev_client)
-    monkeypatch.setattr(zoo_mcp.zoo_tools, "kittycad_client", dev_client)
-
-    list_response = await mcp.call_tool("list_org_datasets", arguments={})
-    datasets = _meta_result(list_response)
-    assert isinstance(datasets, list)
-    assert len(datasets) >= 1, "expected at least one dataset in the dev org"
-    dataset_id = datasets[0]["id"]
-
-    search_response = await mcp.call_tool(
-        "search_org_dataset_semantic",
-        arguments={
-            "dataset_id": dataset_id,
-            "query": "PVC DWV Straight Reducer",
-        },
+    dev_client = AsyncKittyCAD(token=os.environ["ZOO_DATASET_TOKEN"])
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools, "new_async_kittycad_client", lambda: dev_client
     )
-    matches = _meta_result(search_response)
-    assert isinstance(matches, list)
-    assert len(matches) >= 1, "expected at least one semantic-search match"
+
+    try:
+        list_response = await mcp.call_tool("list_org_datasets", arguments={})
+        datasets = _meta_result(list_response)
+        assert isinstance(datasets, list)
+        assert len(datasets) >= 1, "expected at least one dataset in the dev org"
+        dataset_id = datasets[0]["id"]
+
+        search_response = await mcp.call_tool(
+            "search_org_dataset_semantic",
+            arguments={
+                "dataset_id": dataset_id,
+                "query": "PVC DWV Straight Reducer",
+            },
+        )
+        matches = _meta_result(search_response)
+        assert isinstance(matches, list)
+        assert len(matches) >= 1, "expected at least one semantic-search match"
+    finally:
+        await dev_client.aclose()
 
 
 @pytest.mark.asyncio
-async def test_list_org_skills_success(monkeypatch: pytest.MonkeyPatch):
+async def test_list_org_skills_success(
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
+):
     fake_skills = [
         SimpleNamespace(
             id="uuid-1",
@@ -2008,9 +2084,9 @@ async def test_list_org_skills_success(monkeypatch: pytest.MonkeyPatch):
         ),
     ]
     monkeypatch.setattr(
-        zoo_mcp.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "list_org_skills",
-        MagicMock(return_value=fake_skills),
+        AsyncMock(return_value=fake_skills),
     )
 
     response = await mcp.call_tool("list_org_skills", arguments={})
@@ -2032,14 +2108,15 @@ async def test_list_org_skills_success(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_list_org_skills_empty_when_404(monkeypatch: pytest.MonkeyPatch):
-    def raise_404(*args: Any, **kwargs: Any):
-        raise KittyCADClientError(message="No org found", status_code=404)
-
+async def test_list_org_skills_empty_when_404(
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
+):
     monkeypatch.setattr(
-        zoo_mcp.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "list_org_skills",
-        raise_404,
+        AsyncMock(
+            side_effect=KittyCADClientError(message="No org found", status_code=404)
+        ),
     )
 
     response = await mcp.call_tool("list_org_skills", arguments={})
@@ -2048,11 +2125,13 @@ async def test_list_org_skills_empty_when_404(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_list_org_skills_empty_when_none(monkeypatch: pytest.MonkeyPatch):
+async def test_list_org_skills_empty_when_none(
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
+):
     monkeypatch.setattr(
-        zoo_mcp.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "list_org_skills",
-        MagicMock(return_value=None),
+        AsyncMock(return_value=None),
     )
 
     response = await mcp.call_tool("list_org_skills", arguments={})
@@ -2061,14 +2140,13 @@ async def test_list_org_skills_empty_when_none(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_list_org_skills_error(monkeypatch: pytest.MonkeyPatch):
-    def raise_500(*args: Any, **kwargs: Any):
-        raise RuntimeError("boom")
-
+async def test_list_org_skills_error(
+    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
+):
     monkeypatch.setattr(
-        zoo_mcp.kittycad_client.orgs,
+        async_kittycad_client.orgs,
         "list_org_skills",
-        raise_500,
+        AsyncMock(side_effect=RuntimeError("boom")),
     )
 
     response = await mcp.call_tool("list_org_skills", arguments={})
