@@ -990,6 +990,81 @@ async def test_get_sketch_constraint_status_error():
     assert result["kcl_error"]["text"] != ""
 
 
+SKETCH_VISUALIZER_KCL = """
+@settings(experimentalFeatures = allow)
+
+s1 = sketch(on = YZ) {
+  line1 = line(start = [var 2mm, var 8mm], end = [var 5mm, var 7mm])
+  line1.start.at[0] == 2
+  line1.start.at[1] == 8
+  line1.end.at[0] == 5
+  line1.end.at[1] == 7
+}
+
+s2 = sketch(on = XZ) {
+  line1 = line(start = [var 1mm, var 2mm], end = [var 3mm, var 4mm])
+}
+"""
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_returns_png():
+    response = await mcp.call_tool(
+        "visualize_sketch",
+        arguments={
+            "sketch_name": "s1",
+            "kcl_code": SKETCH_VISUALIZER_KCL,
+            "kcl_path": None,
+        },
+    )
+
+    image = _content_list(response)[0]
+    assert isinstance(image, ImageContent)
+    assert image.mimeType == "image/png"
+    png_bytes = base64.b64decode(image.data)
+    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    with PILImage.open(io.BytesIO(png_bytes)) as png:
+        assert png.format == "PNG"
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_path_writes_png(tmp_path: Path):
+    kcl_path = tmp_path / "main.kcl"
+    kcl_path.write_text(SKETCH_VISUALIZER_KCL)
+    output_dir = tmp_path / "renders"
+    output_dir.mkdir()
+
+    response = await mcp.call_tool(
+        "visualize_sketch",
+        arguments={
+            "sketch_name": "s2",
+            "kcl_code": None,
+            "kcl_path": str(kcl_path),
+            "output_path": str(output_dir),
+        },
+    )
+
+    result = Path(_meta_result(response))
+    assert result == output_dir / "image.png"
+    assert result.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_reports_missing_name():
+    response = await mcp.call_tool(
+        "visualize_sketch",
+        arguments={
+            "sketch_name": "missingSketch",
+            "kcl_code": SKETCH_VISUALIZER_KCL,
+            "kcl_path": None,
+        },
+    )
+
+    result = _meta_result(response)
+    assert isinstance(result, str)
+    assert "no sketch named `missingSketch`" in result
+
+
 @pytest.mark.asyncio
 async def test_get_face_info(monkeypatch):
     face_info = zoo_mcp.zoo_tools.FaceInfo(
@@ -1707,6 +1782,26 @@ async def test_save_image_to_directory(populated_modeling_session: str, tmp_path
     assert Path(result).exists()
     assert Path(result).name == "image.jpg"
     assert Path(result).stat().st_size > 0
+
+
+@pytest.mark.asyncio
+async def test_save_png_image_to_directory(tmp_path: Path):
+    png_buffer = io.BytesIO()
+    PILImage.new("RGB", (2, 2)).save(png_buffer, format="PNG")
+    image = ImageContent(
+        type="image",
+        data=base64.b64encode(png_buffer.getvalue()).decode(),
+        mimeType="image/png",
+    )
+
+    response = await mcp.call_tool(
+        "save_image",
+        arguments={"image": image.model_dump(), "output_path": str(tmp_path)},
+    )
+
+    result = Path(_meta_result(response))
+    assert result == tmp_path / "image.png"
+    assert result.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 @pytest.mark.asyncio

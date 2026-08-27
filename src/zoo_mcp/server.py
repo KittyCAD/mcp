@@ -137,6 +137,7 @@ from zoo_mcp.zoo_tools import (
     zoo_start_modeling_session,
     zoo_stop_all_modeling_sessions,
     zoo_stop_modeling_session,
+    zoo_visualize_sketch,
 )
 
 
@@ -730,6 +731,46 @@ async def get_sketch_constraint_status(
         )
     except Exception as e:
         return f"Failed to get sketch constraint status: {e}"
+
+
+@mcp.tool()
+async def visualize_sketch(
+    sketch_name: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    output_path: str | None = None,
+) -> ImageContent | str:
+    """Render a named 2D KCL sketch as a solver-debug PNG.
+
+    The image shows sketch geometry and solver freedom without opening a
+    modeling session. ``sketch_name`` is the variable assigned to the sketch,
+    such as ``profile`` in ``profile = sketch(on = XY) { ... }``. Use
+    ``get_sketch_constraint_status`` to discover sketch names when needed.
+
+    Args:
+        sketch_name: Variable name of the sketch to render.
+        kcl_code: KCL source code containing the sketch.
+        kcl_path: Path to a KCL file or project containing ``main.kcl``.
+        output_path: If provided, write the PNG to this file or directory and
+            return its absolute path. A directory receives ``image.png``. If
+            omitted, return the PNG inline as ImageContent.
+
+    Returns:
+        The inline PNG, its saved absolute path, or an error message.
+    """
+    logger.info("visualize_sketch tool called for sketch: %s", sketch_name)
+
+    try:
+        image = await zoo_visualize_sketch(
+            sketch_name=sketch_name,
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+        )
+        if output_path is not None:
+            return save_image_bytes_to_disk(image, output_path, image_format="png")
+        return encode_image(image, image_format="png")
+    except Exception as e:
+        return f"There was an error visualizing the sketch: {e}"
 
 
 @mcp.tool()
