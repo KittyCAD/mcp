@@ -110,6 +110,7 @@ from zoo_mcp.zoo_tools import (
     FaceInfo,
     ResultZooExecuteKcl,
     ResultZooExecuteKclLocal,
+    _abort_all_modeling_sessions,
     zoo_calculate_bounding_box_cad,
     zoo_calculate_bounding_box_kcl,
     zoo_calculate_cad_physical_properties,
@@ -1719,9 +1720,9 @@ def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:
     raise KeyboardInterrupt
 
 
-def _close_modeling_sessions_at_exit() -> None:
+def _abort_modeling_sessions_at_exit() -> None:
     """Best-effort fallback for exits outside the FastMCP lifespan."""
-    asyncio.run(zoo_stop_all_modeling_sessions())
+    _abort_all_modeling_sessions()
 
 
 def install_shutdown_handlers() -> None:
@@ -1733,7 +1734,7 @@ def install_shutdown_handlers() -> None:
         # application owns signal disposition.
         logger.debug("Not on the main thread, leaving signal handlers alone")
 
-    atexit.register(_close_modeling_sessions_at_exit)
+    atexit.register(_abort_modeling_sessions_at_exit)
 
 
 def main():

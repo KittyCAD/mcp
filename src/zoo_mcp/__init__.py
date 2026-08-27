@@ -9,7 +9,6 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 
 import truststore
-from kittycad import AsyncKittyCAD
 
 FORMAT = "%(asctime)s | %(levelname)-7s | %(filename)s:%(lineno)d | %(funcName)s | %(message)s"
 
@@ -40,11 +39,6 @@ class ZooMCPTimeoutError(ZooMCPException):
 
 
 ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-
-
-def new_async_kittycad_client() -> AsyncKittyCAD:
-    """Create a loop-local client for asynchronous Zoo API operations."""
-    return AsyncKittyCAD(verify_ssl=ctx)
 
 
 httpx_logger = logging.getLogger("httpx")

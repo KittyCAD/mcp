@@ -51,7 +51,7 @@ def _async_error(error: Exception) -> AsyncIterator[Any]:
 @pytest.fixture
 def async_kittycad_client(monkeypatch: pytest.MonkeyPatch) -> AsyncKittyCAD:
     client = AsyncKittyCAD(token="test-token")
-    monkeypatch.setattr(zoo_mcp.zoo_tools, "new_async_kittycad_client", lambda: client)
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "AsyncKittyCAD", lambda **kwargs: client)
     return client
 
 
@@ -2134,9 +2134,7 @@ async def test_search_org_dataset_semantic_error(
 async def test_list_and_search_org_dataset_live(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ZOO_HOST", "https://api.dev.zoo.dev")
     dev_client = AsyncKittyCAD(token=os.environ["ZOO_DATASET_TOKEN"])
-    monkeypatch.setattr(
-        zoo_mcp.zoo_tools, "new_async_kittycad_client", lambda: dev_client
-    )
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "AsyncKittyCAD", lambda **kwargs: dev_client)
 
     try:
         list_response = await mcp.call_tool("list_org_datasets", arguments={})

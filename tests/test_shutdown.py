@@ -13,7 +13,9 @@ import pytest
 
 from zoo_mcp import server
 
-# Registers a session whose close writes a marker, then blocks until signalled.
+# Registers a session whose transport abort writes a marker, then blocks until
+# signalled. The atexit fallback must remain synchronous because the real socket
+# belongs to the server's event loop, which may already be closed.
 # Run as a subprocess so a real SIGTERM exercises the real handler.
 _SERVER_UNDER_SIGNAL = """
 import asyncio, sys, time
@@ -25,11 +27,17 @@ marker = Path(sys.argv[1])
 
 class Client:
     async def aclose(self):
-        pass
+        raise AssertionError("atexit must not await a loop-bound client")
+
+class Transport:
+    def abort(self):
+        marker.write_text("closed")
 
 class Websocket:
+    transport = Transport()
+
     async def close(self):
-        marker.write_text("closed")
+        raise AssertionError("atexit must not await a loop-bound websocket")
 
 session = zoo_tools._ModelingSession(
     session_id="session-id",

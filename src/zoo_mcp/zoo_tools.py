@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 import aiofiles
@@ -122,15 +122,15 @@ from websockets.exceptions import WebSocketException
 from zoo_mcp import (
     ZooMCPException,
     ZooMCPTimeoutError,
+    ctx,
     logger,
-    new_async_kittycad_client,
 )
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
 
 SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 
-# The wall-clock budget for one modeling tool call, measured across every read
-# it makes rather than per read. It has to stay under the reconnect budget of
+# The wall-clock budget for one modeling tool call, measured across every
+# websocket send and read. It has to stay under the reconnect budget of
 # the conversations driving these tools, so a stalled engine surfaces as a
 # retryable error instead of an abandoned request.
 MODELING_COMMAND_TIMEOUT = 300.0
@@ -493,7 +493,7 @@ async def zoo_calculate_center_of_mass(
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         result = await client.file.create_file_center_of_mass(
             src_format=src_format,
             body=data,
@@ -547,7 +547,7 @@ async def zoo_calculate_mass(
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         result = await client.file.create_file_mass(
             output_unit=UnitMass(unit_mass),
             src_format=src_format,
@@ -590,7 +590,7 @@ async def zoo_calculate_surface_area(file_path: Path | str, unit_area: str) -> f
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         result = await client.file.create_file_surface_area(
             output_unit=UnitArea(unit_area),
             src_format=src_format,
@@ -636,7 +636,7 @@ async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         result = await client.file.create_file_volume(
             output_unit=UnitVolume(unit_vol),
             src_format=src_format,
@@ -760,10 +760,14 @@ async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
                 cmd_id=command_id,
             )
         )
-        await ws.send(bson.encode(request.model_dump(exclude_none=True)))
-        log_stage("sent", "awaiting-engine-response")
-
         try:
+            await _send_modeling_frame(
+                ws,
+                bson.encode(request.model_dump(exclude_none=True)),
+                deadline,
+                "CAD file import",
+            )
+            log_stage("sent", "awaiting-engine-response")
             response = await _await_modeling_response(
                 ws,
                 command_id,
@@ -817,7 +821,7 @@ async def zoo_calculate_cad_physical_properties(
     normalized_ext = _normalize_ext(file_path.suffix.split(".")[1])
     src_format = FileImportFormat(normalized_ext)
 
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         volume_result = await client.file.create_file_volume(
             output_unit=UnitVolume(unit_vol),
             src_format=src_format,
@@ -1066,7 +1070,7 @@ async def zoo_calculate_bounding_box_cad(
     src_format = FileImportFormat(normalized_ext)
 
     # Convert to STL to get mesh data for bounding box computation
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         stl_result = await client.file.create_file_conversion(
             src_format=src_format,
             output_format=FileExportFormat.STL,
@@ -1157,7 +1161,7 @@ async def zoo_convert_cad_file(
     async with aiofiles.open(input_file, "rb") as inp:
         data = await inp.read()
 
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         export_response = await client.file.create_file_conversion(
             src_format=FileImportFormat(_normalize_ext(input_ext)),
             output_format=FileExportFormat(export_format),
@@ -1643,11 +1647,15 @@ async def _exec_kcl_project(
             "files": files,
         },
     }
-    await ws.send(json.dumps(request))
-
     # Bounded by what is left of the whole call rather than per read, so the
     # frames skipped below cannot keep the loop alive indefinitely.
     deadline = _Deadline()
+    await _send_modeling_frame(
+        ws,
+        json.dumps(request),
+        deadline,
+        "KCL project execution",
+    )
 
     # This response is not represented in the generated SDK yet.
     while True:
@@ -1735,12 +1743,22 @@ async def _open_modeling_websocket(client: AsyncKittyCAD) -> ClientConnection:
         }
     )
     url = f"{client.base_url.rstrip('/')}/ws/modeling/commands?{query}"
+    parsed_url = urlsplit(url)
+    if parsed_url.scheme == "https":
+        websocket_scheme = "wss"
+        websocket_ssl = client.verify_ssl
+    elif parsed_url.scheme == "http":
+        websocket_scheme = "ws"
+        websocket_ssl = None
+    else:
+        raise ZooMCPException(f"Unsupported Zoo API URL scheme '{parsed_url.scheme}'")
+    websocket_url = urlunsplit(parsed_url._replace(scheme=websocket_scheme))
     return await connect(
-        url.replace("http", "ws", 1),
+        websocket_url,
         additional_headers=client.get_headers(),
         close_timeout=120,
         max_size=None,
-        ssl=client.verify_ssl,
+        ssl=websocket_ssl,
     )
 
 
@@ -1756,16 +1774,38 @@ async def _close_modeling_session(session: _ModelingSession) -> None:
             _unlink_modeling_session_artifact_graphs(session)
 
 
-async def _discard_modeling_websocket(session: _ModelingSession) -> None:
+def _abort_modeling_websocket(session: _ModelingSession) -> None:
+    """Abort a socket immediately when awaiting its close isn't safe."""
+    try:
+        session.websocket.transport.abort()
+    except Exception as error:
+        logger.warning(
+            "Failed to abort modeling session %s websocket: %s",
+            session.session_id,
+            error,
+        )
+
+
+async def _discard_modeling_websocket(
+    session: _ModelingSession,
+    *,
+    abort: bool = False,
+) -> None:
     """Close a session's websocket from inside its own command.
 
     Deliberately not _close_modeling_session: that waits on ``session.lock``,
     which the command calling this still holds, so it would deadlock.
     """
-    for resource, close in (
-        ("websocket", session.websocket.close),
-        ("async client", session.client.aclose),
-    ):
+    if abort:
+        _abort_modeling_websocket(session)
+        resources = (("async client", session.client.aclose),)
+    else:
+        resources = (
+            ("websocket", session.websocket.close),
+            ("async client", session.client.aclose),
+        )
+
+    for resource, close in resources:
         try:
             await close()
         except Exception as error:
@@ -1800,13 +1840,18 @@ async def zoo_start_modeling_session() -> str:
         )
     _modeling_session = starting
 
-    client = new_async_kittycad_client()
+    client: AsyncKittyCAD | None = None
     try:
+        client = AsyncKittyCAD(verify_ssl=ctx)
         websocket = await _open_modeling_websocket(client)
     except BaseException:
         if _modeling_session is starting:
             _modeling_session = None
-        await client.aclose()
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception as error:
+                logger.warning("Failed to close modeling client: %s", error)
         raise
 
     session = _ModelingSession(
@@ -1864,6 +1909,26 @@ async def zoo_stop_all_modeling_sessions() -> None:
         logger.warning("Failed to close modeling session: %s", error)
 
 
+def _abort_all_modeling_sessions() -> None:
+    """Synchronously abandon a session during interpreter teardown.
+
+    Async websocket and client objects belong to the server's event loop and
+    cannot be awaited from the new loop an ``atexit`` hook would have to create.
+    The normal lifespan shutdown remains responsible for graceful cleanup.
+    """
+    global _modeling_session
+
+    session = _modeling_session
+    _modeling_session = None
+    if not isinstance(session, _ModelingSession):
+        return
+
+    try:
+        _abort_modeling_websocket(session)
+    finally:
+        _unlink_modeling_session_artifact_graphs(session)
+
+
 def _evict_modeling_session(session_id: str) -> None:
     """Drop a session whose websocket is no longer usable."""
     global _modeling_session
@@ -1908,7 +1973,14 @@ async def _modeling_websocket(session_id: str) -> AsyncIterator[ClientConnection
             # engine keeps working on the abandoned command either way. Drop the
             # session rather than hand it back.
             _evict_modeling_session(session_id)
-            await _discard_modeling_websocket(session)
+            await _discard_modeling_websocket(session, abort=True)
+            raise
+        except asyncio.CancelledError:
+            # A canceled send or receive can leave a command outstanding. Do not
+            # hand that transport to a later call whose view of scene state may
+            # no longer match the engine's.
+            _evict_modeling_session(session_id)
+            await _discard_modeling_websocket(session, abort=True)
             raise
         except (WebSocketException, OSError) as error:
             _evict_modeling_session(session_id)
@@ -1945,8 +2017,11 @@ async def zoo_face_info(
     session_id: str,
 ) -> FaceInfo:
     async with _modeling_websocket(session_id) as ws:
+        # One budget covers all three requests and replies.
+        deadline = _Deadline()
         cmd_id_face_get_position = ModelingCmdId(uuid4())
-        await ws.send(
+        await _send_modeling_frame(
+            ws,
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(
@@ -1957,11 +2032,14 @@ async def zoo_face_info(
                     ),
                     cmd_id=cmd_id_face_get_position,
                 )
-            ).model_dump_json(exclude_none=True)
+            ).model_dump_json(exclude_none=True),
+            deadline,
+            "face info",
         )
 
         cmd_id_face_get_gradient = ModelingCmdId(uuid4())
-        await ws.send(
+        await _send_modeling_frame(
+            ws,
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(
@@ -1972,25 +2050,27 @@ async def zoo_face_info(
                     ),
                     cmd_id=cmd_id_face_get_gradient,
                 )
-            ).model_dump_json(exclude_none=True)
+            ).model_dump_json(exclude_none=True),
+            deadline,
+            "face info",
         )
 
         cmd_id_face_get_center = ModelingCmdId(uuid4())
-        await ws.send(
+        await _send_modeling_frame(
+            ws,
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(OptionFaceGetCenter(object_id=face_id)),
                     cmd_id=cmd_id_face_get_center,
                 )
-            ).model_dump_json(exclude_none=True)
+            ).model_dump_json(exclude_none=True),
+            deadline,
+            "face info",
         )
 
         face_get_position: FaceGetPosition | Literal[False] = False
         face_get_gradient: FaceGetGradient | Literal[False] = False
         face_get_center: FaceGetCenter | Literal[False] = False
-
-        # Shared across all three replies, as for any other single tool call.
-        deadline = _Deadline()
 
         while (
             face_get_position is False
@@ -2048,7 +2128,7 @@ _ModelingResponseT = TypeVar("_ModelingResponseT")
 
 
 class _Deadline:
-    """A monotonic wall-clock budget shared by every read in one tool call.
+    """A monotonic wall-clock budget shared by websocket I/O in one tool call.
 
     Monotonic so a clock adjustment mid-import cannot extend or collapse the
     budget, and shared so that a multi-command call like a multiview snapshot
@@ -2074,7 +2154,7 @@ class _Deadline:
 
 def _modeling_timeout(deadline: _Deadline, description: str) -> ZooMCPTimeoutError:
     return ZooMCPTimeoutError(
-        f"The modeling engine did not return a {description} response within "
+        f"The modeling engine did not complete {description} within "
         f"{deadline.timeout:g}s (waited {deadline.elapsed:.1f}s). The modeling "
         "session was closed; start a new one and retry, and simplify or shrink "
         "the input if it fails again."
@@ -2101,6 +2181,23 @@ async def _recv_modeling_frame(
     except TimeoutError as error:
         raise _modeling_timeout(deadline, description) from error
     return WebSocketResponse.model_validate_json(raw_response)
+
+
+async def _send_modeling_frame(
+    ws: ClientConnection,
+    payload: str | bytes,
+    deadline: _Deadline,
+    description: str,
+) -> None:
+    """Send one frame within the same wall-clock budget as its response."""
+    remaining = deadline.remaining
+    if remaining <= 0:
+        raise _modeling_timeout(deadline, description)
+
+    try:
+        await asyncio.wait_for(ws.send(payload), timeout=remaining)
+    except TimeoutError as error:
+        raise _modeling_timeout(deadline, description) from error
 
 
 def _format_websocket_failure(message: object) -> str:
@@ -2170,13 +2267,16 @@ async def _send_modeling_command(
     if deadline is None:
         deadline = _Deadline()
     command_id = ModelingCmdId(uuid4())
-    await ws.send(
+    await _send_modeling_frame(
+        ws,
         WebSocketRequest(
             OptionModelingCmdReq(
                 cmd=command,
                 cmd_id=command_id,
             )
-        ).model_dump_json(exclude_none=True)
+        ).model_dump_json(exclude_none=True),
+        deadline,
+        response_description,
     )
 
     return await _await_modeling_response(
@@ -2386,7 +2486,7 @@ async def zoo_list_org_datasets(
         entries, possibly empty.
     """
     logger.info("Listing org datasets (lookup_enabled=%s)", lookup_enabled)
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         use_raw_fallback = False
         datasets = []
         try:
@@ -2427,7 +2527,7 @@ async def zoo_list_org_skills() -> list[dict[str, str]]:
         "markdown": <str>} entries, possibly empty.
     """
     logger.info("Listing org skills")
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         try:
             skills = await client.orgs.list_org_skills()
         except KittyCADClientError as exc:
@@ -2465,7 +2565,7 @@ async def zoo_search_org_dataset_semantic(
     logger.info(
         "Semantic search in dataset %s for query of length %d", dataset_id, len(query)
     )
-    async with new_async_kittycad_client() as client:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
         try:
             matches = await client.orgs.search_org_dataset_semantic(
                 id=Uuid(dataset_id), q=query, limit=limit
