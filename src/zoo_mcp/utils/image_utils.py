@@ -2,12 +2,19 @@ import base64
 import io
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 from mcp.server.fastmcp.utilities.types import Image
 from mcp.types import ImageContent
 from PIL import Image as PILImage
 
 MAX_COLLAGE_IMAGES = 4
+ImageFormat = Literal["jpeg", "png"]
+
+_IMAGE_SUFFIXES: dict[ImageFormat, str] = {
+    "jpeg": ".jpg",
+    "png": ".png",
+}
 
 
 def create_image_collage(image_byte_list: list[bytes]) -> bytes:
@@ -108,37 +115,42 @@ def resize_image(img_bytes: bytes, max_dimension: int) -> bytes:
     return result
 
 
-def encode_image(img_bytes: bytes) -> ImageContent:
+def encode_image(img_bytes: bytes, image_format: ImageFormat = "jpeg") -> ImageContent:
     """
-    Encodes a PIL Image to a format compatible with ImageContent.
+    Encode image bytes as MCP ImageContent with the correct media type.
     """
-    img_obj = Image(data=img_bytes, format="jpeg")
+    img_obj = Image(data=img_bytes, format=image_format)
     return img_obj.to_image_content()
 
 
-def save_image_bytes_to_disk(img_bytes: bytes, output_path: str | None = None) -> str:
+def save_image_bytes_to_disk(
+    img_bytes: bytes,
+    output_path: str | None = None,
+    image_format: ImageFormat = "jpeg",
+) -> str:
     """
-    Writes raw JPEG image bytes to disk.
+    Write raw image bytes to disk.
 
     Args:
-        img_bytes: The raw JPEG image bytes to write.
+        img_bytes: The raw image bytes to write.
         output_path: The path where the image should be saved. If a directory is
-            provided, a file named 'image.jpg' will be created in that directory.
-            If None, a temporary file will be created.
+            provided, a format-appropriate filename will be created there. If
+            None, a temporary file will be created.
+        image_format: The format of img_bytes. This controls the default suffix.
 
     Returns:
         str: The absolute path to the saved image file.
     """
     if output_path is None:
         # Create a temporary file
-        _, temp_path = tempfile.mkstemp(suffix=".jpg")
+        _, temp_path = tempfile.mkstemp(suffix=_IMAGE_SUFFIXES[image_format])
         path = Path(temp_path)
     else:
         path = Path(output_path)
 
         # If path is a directory, create a default filename
         if path.is_dir():
-            path = path / "image.jpg"
+            path = path / f"image{_IMAGE_SUFFIXES[image_format]}"
 
         # Ensure parent directory exists
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,10 +168,19 @@ def save_image_to_disk(image: ImageContent, output_path: str | None = None) -> s
     Args:
         image: The ImageContent object containing base64-encoded image data.
         output_path: The path where the image should be saved. If a directory is
-            provided, a file named 'image.jpg' will be created in that directory.
-            If None, a temporary file will be created.
+            provided, a filename matching the image media type will be created
+            there. If None, a temporary file will be created.
 
     Returns:
         str: The absolute path to the saved image file.
     """
-    return save_image_bytes_to_disk(base64.b64decode(image.data), output_path)
+    image_formats: dict[str, ImageFormat] = {
+        "image/jpeg": "jpeg",
+        "image/png": "png",
+    }
+    image_format = image_formats.get(image.mimeType)
+    if image_format is None:
+        raise ValueError(f"Unsupported image media type: {image.mimeType}")
+    return save_image_bytes_to_disk(
+        base64.b64decode(image.data), output_path, image_format
+    )

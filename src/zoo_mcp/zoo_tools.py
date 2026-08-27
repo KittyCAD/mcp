@@ -1529,6 +1529,41 @@ async def zoo_get_sketch_constraint_status(
         raise ZooMCPException(f"Failed to get sketch constraint status: {e}")
 
 
+async def zoo_visualize_sketch(
+    sketch_name: str,
+    kcl_code: str | None = None,
+    kcl_path: Path | str | None = None,
+) -> bytes:
+    """Execute KCL and render one named sketch as a PNG.
+
+    The renderer is provided by ``zoo-kcl`` on ``ExecOutcome``. Sketch names
+    are the variable names assigned to sketch expressions and are also exposed
+    by :func:`zoo_get_sketch_constraint_status`.
+
+    Args:
+        sketch_name: Variable name of the sketch to render.
+        kcl_code: KCL source code to execute.
+        kcl_path: Path to a KCL file or project containing ``main.kcl``.
+
+    Returns:
+        Raw PNG bytes for the requested sketch.
+    """
+    logger.info("Visualizing sketch %s", sketch_name)
+
+    _check_kcl_code_or_path(kcl_code, kcl_path)
+
+    try:
+        if kcl_code:
+            outcome = await _execute_with_retries(kcl.execute_code, kcl_code)
+        else:
+            assert kcl_path is not None
+            outcome = await _execute_with_retries(kcl.execute, str(kcl_path))
+        return bytes(outcome.render_sketch_png(sketch_name))
+    except Exception as e:
+        logger.error(e)
+        raise ZooMCPException(f"Failed to visualize sketch: {e}")
+
+
 async def zoo_mock_execute_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
