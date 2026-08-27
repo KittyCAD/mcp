@@ -1,21 +1,22 @@
 import asyncio
 import io
 import json
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from threading import Lock
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import aiofiles
+import bson
 import kcl
 import trimesh
-from kittycad import AsyncKittyCAD, WebSocketModelingCommandsWs
+from kittycad import AsyncKittyCAD
 
 if TYPE_CHECKING:
 
@@ -115,12 +116,12 @@ from kittycad.models.ok_web_socket_response_data import OptionModeling
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
 from zoo_mcp import (
     ZooMCPException,
     ZooMCPTimeoutError,
-    kittycad_client,
     logger,
     new_async_kittycad_client,
 )
@@ -707,7 +708,7 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
     return None
 
 
-def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
+async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
     """Import a CAD file into the scene and return the imported object's id.
 
     Sent as a binary frame rather than through ``_send_modeling_command``
@@ -744,24 +745,26 @@ def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
             outcome,
         )
 
-    with open(input_file, "rb") as data, _modeling_websocket(session_id) as ws:
-        ws.send_binary(
-            WebSocketRequest(
-                OptionModelingCmdReq(
-                    cmd=ModelingCmd(
-                        OptionImportFiles(
-                            files=[ImportFile(data=data.read(), path=input_file.name)],
-                            format=input_format,
-                        )
-                    ),
-                    cmd_id=command_id,
-                )
+    async with aiofiles.open(input_file, "rb") as data:
+        contents = await data.read()
+
+    async with _modeling_websocket(session_id) as ws:
+        request = WebSocketRequest(
+            OptionModelingCmdReq(
+                cmd=ModelingCmd(
+                    OptionImportFiles(
+                        files=[ImportFile(data=contents, path=input_file.name)],
+                        format=input_format,
+                    )
+                ),
+                cmd_id=command_id,
             )
         )
+        await ws.send(bson.encode(request.model_dump(exclude_none=True)))
         log_stage("sent", "awaiting-engine-response")
 
         try:
-            response = _await_modeling_response(
+            response = await _await_modeling_response(
                 ws,
                 command_id,
                 ResponseImportFiles,
@@ -1222,10 +1225,7 @@ async def zoo_execute_kcl(
 
     try:
         if session_id is not None:
-            # Reads the modeling websocket synchronously; see server._modeling_command
-            # for why that cannot happen on the event loop.
-            path_artifact_graph = await asyncio.to_thread(
-                zoo_exec_kcl_project,
+            path_artifact_graph = await zoo_exec_kcl_project(
                 kcl_code=kcl_code,
                 kcl_path=kcl_path,
                 session_id=session_id,
@@ -1628,8 +1628,8 @@ def _prepare_kcl_project(
     return load_kcl_project(kcl_path)
 
 
-def _exec_kcl_project(
-    ws: WebSocketModelingCommandsWs,
+async def _exec_kcl_project(
+    ws: ClientConnection,
     entrypoint: str,
     files: list[dict[str, str | list[int]]],
 ) -> Path:
@@ -1643,7 +1643,7 @@ def _exec_kcl_project(
             "files": files,
         },
     }
-    ws.ws.send(json.dumps(request))
+    await ws.send(json.dumps(request))
 
     # Bounded by what is left of the whole call rather than per read, so the
     # frames skipped below cannot keep the loop alive indefinitely.
@@ -1655,7 +1655,7 @@ def _exec_kcl_project(
         if remaining <= 0:
             raise _modeling_timeout(deadline, "KCL project execution")
         try:
-            raw_response = ws.ws.recv(timeout=remaining)
+            raw_response = await asyncio.wait_for(ws.recv(), timeout=remaining)
         except TimeoutError as error:
             raise _modeling_timeout(deadline, "KCL project execution") from error
         try:
@@ -1695,9 +1695,9 @@ def _exec_kcl_project(
 @dataclass
 class _ModelingSession:
     session_id: str
-    context: AbstractContextManager[WebSocketModelingCommandsWs]
-    websocket: WebSocketModelingCommandsWs
-    lock: Lock
+    client: AsyncKittyCAD
+    websocket: ClientConnection
+    lock: asyncio.Lock
     artifact_graph_paths: set[Path] = field(default_factory=set)
 
 
@@ -1714,48 +1714,69 @@ class _StartingModelingSession:
 
 
 _modeling_session: _ModelingSession | _StartingModelingSession | None = None
-_modeling_session_lock = Lock()
 
 
-def _modeling_websocket_context() -> AbstractContextManager[
-    WebSocketModelingCommandsWs
-]:
-    return kittycad_client.modeling.modeling_commands_ws(
-        fps=30,
-        post_effect=PostEffectType.SSAO,
-        show_grid=False,
-        unlocked_framerate=False,
-        video_res_height=1024,
-        video_res_width=1024,
-        webrtc=False,
+async def _open_modeling_websocket(client: AsyncKittyCAD) -> ClientConnection:
+    """Open the async modeling transport using an async client's credentials.
+
+    KittyCAD 1.5.0's generated ``AsyncModelingAPI.modeling_commands_ws``
+    currently returns ``None`` and constructs a relative websocket URL. Keep
+    connection setup here until that generated method is usable.
+    """
+    query = urlencode(
+        {
+            "fps": 30,
+            "post_effect": PostEffectType.SSAO,
+            "show_grid": "false",
+            "unlocked_framerate": "false",
+            "video_res_height": 1024,
+            "video_res_width": 1024,
+            "webrtc": "false",
+        }
+    )
+    url = f"{client.base_url.rstrip('/')}/ws/modeling/commands?{query}"
+    return await connect(
+        url.replace("http", "ws", 1),
+        additional_headers=client.get_headers(),
+        close_timeout=120,
+        max_size=None,
+        ssl=client.verify_ssl,
     )
 
 
-def _close_modeling_session(session: _ModelingSession) -> None:
+async def _close_modeling_session(session: _ModelingSession) -> None:
     """Close one session's websocket, waiting for any in-flight command."""
     try:
-        with session.lock:
-            session.context.__exit__(None, None, None)
+        async with session.lock:
+            await session.websocket.close()
     finally:
-        _unlink_modeling_session_artifact_graphs(session)
+        try:
+            await session.client.aclose()
+        finally:
+            _unlink_modeling_session_artifact_graphs(session)
 
 
-def _discard_modeling_websocket(session: _ModelingSession) -> None:
+async def _discard_modeling_websocket(session: _ModelingSession) -> None:
     """Close a session's websocket from inside its own command.
 
     Deliberately not _close_modeling_session: that waits on ``session.lock``,
     which the command calling this still holds, so it would deadlock.
     """
-    try:
-        session.context.__exit__(None, None, None)
-    except Exception as error:
-        # The socket is being abandoned anyway; a failure closing it must not
-        # replace the timeout the caller is about to see.
-        logger.warning(
-            "Failed to close timed-out modeling session %s: %s",
-            session.session_id,
-            error,
-        )
+    for resource, close in (
+        ("websocket", session.websocket.close),
+        ("async client", session.client.aclose),
+    ):
+        try:
+            await close()
+        except Exception as error:
+            # The socket is being abandoned anyway; a failure closing it must not
+            # replace the timeout the caller is about to see.
+            logger.warning(
+                "Failed to close modeling session %s %s: %s",
+                session.session_id,
+                resource,
+                error,
+            )
 
 
 def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
@@ -1764,77 +1785,73 @@ def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
     session.artifact_graph_paths.clear()
 
 
-def zoo_start_modeling_session() -> str:
+async def zoo_start_modeling_session() -> str:
     global _modeling_session
 
     session_id = str(uuid4())
     starting = _StartingModelingSession(session_id=session_id)
-    with _modeling_session_lock:
-        if _modeling_session is not None:
-            # Name the blocker so a caller that lost track of it, or that is
-            # blocked by a start whose handshake is hung, can stop it.
-            raise ZooMCPException(
-                f"A modeling session is already open or starting "
-                f"('{_modeling_session.session_id}'); "
-                "stop it before starting another"
-            )
-        _modeling_session = starting
+    if _modeling_session is not None:
+        # Name the blocker so a caller that lost track of it, or that is
+        # blocked by a start whose handshake is hung, can stop it.
+        raise ZooMCPException(
+            f"A modeling session is already open or starting "
+            f"('{_modeling_session.session_id}'); "
+            "stop it before starting another"
+        )
+    _modeling_session = starting
 
+    client = new_async_kittycad_client()
     try:
-        context = _modeling_websocket_context()
-        websocket = context.__enter__()
+        websocket = await _open_modeling_websocket(client)
     except BaseException:
-        with _modeling_session_lock:
-            if _modeling_session is starting:
-                _modeling_session = None
+        if _modeling_session is starting:
+            _modeling_session = None
+        await client.aclose()
         raise
 
     session = _ModelingSession(
         session_id=session_id,
-        context=context,
+        client=client,
         websocket=websocket,
-        lock=Lock(),
+        lock=asyncio.Lock(),
     )
-    with _modeling_session_lock:
-        if _modeling_session is starting:
-            _modeling_session = session
-            return session_id
+    if _modeling_session is starting:
+        _modeling_session = session
+        return session_id
 
-    context.__exit__(None, None, None)
+    await websocket.close()
+    await client.aclose()
     raise ZooMCPException("Modeling session start was canceled")
 
 
 def zoo_get_modeling_sessions() -> list[str]:
     """Return the IDs of modeling sessions owned by this server process."""
-    with _modeling_session_lock:
-        if not isinstance(_modeling_session, _ModelingSession):
-            return []
-        return [_modeling_session.session_id]
+    if not isinstance(_modeling_session, _ModelingSession):
+        return []
+    return [_modeling_session.session_id]
 
 
-def zoo_stop_modeling_session(session_id: str) -> None:
+async def zoo_stop_modeling_session(session_id: str) -> None:
     global _modeling_session
 
-    with _modeling_session_lock:
-        if _modeling_session is None or _modeling_session.session_id != session_id:
-            raise ZooMCPException(f"Unknown modeling session '{session_id}'")
-        session = _modeling_session
-        _modeling_session = None
+    if _modeling_session is None or _modeling_session.session_id != session_id:
+        raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+    session = _modeling_session
+    _modeling_session = None
 
     if isinstance(session, _StartingModelingSession):
         logger.info("Canceled starting modeling session %s", session_id)
         return
 
-    _close_modeling_session(session)
+    await _close_modeling_session(session)
 
 
-def zoo_stop_all_modeling_sessions() -> None:
+async def zoo_stop_all_modeling_sessions() -> None:
     """Close the persistent modeling session, normally during server shutdown."""
     global _modeling_session
 
-    with _modeling_session_lock:
-        session = _modeling_session
-        _modeling_session = None
+    session = _modeling_session
+    _modeling_session = None
 
     if session is None:
         return
@@ -1842,7 +1859,7 @@ def zoo_stop_all_modeling_sessions() -> None:
         # Its own starter closes the half-open socket; see zoo_start_modeling_session.
         return
     try:
-        _close_modeling_session(session)
+        await _close_modeling_session(session)
     except Exception as error:
         logger.warning("Failed to close modeling session: %s", error)
 
@@ -1851,15 +1868,14 @@ def _evict_modeling_session(session_id: str) -> None:
     """Drop a session whose websocket is no longer usable."""
     global _modeling_session
 
-    with _modeling_session_lock:
-        if (
-            isinstance(_modeling_session, _ModelingSession)
-            and _modeling_session.session_id == session_id
-        ):
-            session = _modeling_session
-            _modeling_session = None
-        else:
-            session = None
+    if (
+        isinstance(_modeling_session, _ModelingSession)
+        and _modeling_session.session_id == session_id
+    ):
+        session = _modeling_session
+        _modeling_session = None
+    else:
+        session = None
 
     if session is not None:
         _unlink_modeling_session_artifact_graphs(session)
@@ -1870,68 +1886,67 @@ def _evict_modeling_session(session_id: str) -> None:
 # engine scene has the same model.
 
 
-@contextmanager
-def _modeling_websocket(session_id: str) -> Iterator[WebSocketModelingCommandsWs]:
-    with _modeling_session_lock:
-        active_session = _modeling_session
-        if (
-            not isinstance(active_session, _ModelingSession)
-            or active_session.session_id != session_id
-        ):
-            raise ZooMCPException(f"Unknown modeling session '{session_id}'")
-        session = active_session
+@asynccontextmanager
+async def _modeling_websocket(session_id: str) -> AsyncIterator[ClientConnection]:
+    active_session = _modeling_session
+    if (
+        not isinstance(active_session, _ModelingSession)
+        or active_session.session_id != session_id
+    ):
+        raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+    session = active_session
 
-    # Acquired outside the state lock so waiting on an in-flight command does
-    # not block session cleanup from removing the session from active state.
-    session.lock.acquire()
-    try:
-        yield session.websocket
-    except ZooMCPTimeoutError:
-        # The engine still owes a response to the command that gave up. Its
-        # request_id no longer matches anything a later command waits for, so
-        # the backlog would silently eat the next command's budget, and the
-        # engine keeps working on the abandoned command either way. Drop the
-        # session rather than hand it back.
-        _evict_modeling_session(session_id)
-        _discard_modeling_websocket(session)
-        raise
-    except (WebSocketException, OSError) as error:
-        _evict_modeling_session(session_id)
-        raise ZooMCPException(
-            f"Modeling session '{session_id}' is no longer connected "
-            f"({error}); start a new session"
-        ) from error
-    finally:
-        session.lock.release()
+    # Session state has no awaits around its reads and writes, while this lock
+    # serializes commands that yield during websocket I/O.
+    async with session.lock:
+        try:
+            yield session.websocket
+        except ZooMCPTimeoutError:
+            # The engine still owes a response to the command that gave up. Its
+            # request_id no longer matches anything a later command waits for, so
+            # the backlog would silently eat the next command's budget, and the
+            # engine keeps working on the abandoned command either way. Drop the
+            # session rather than hand it back.
+            _evict_modeling_session(session_id)
+            await _discard_modeling_websocket(session)
+            raise
+        except (WebSocketException, OSError) as error:
+            _evict_modeling_session(session_id)
+            await _discard_modeling_websocket(session)
+            raise ZooMCPException(
+                f"Modeling session '{session_id}' is no longer connected "
+                f"({error}); start a new session"
+            ) from error
 
 
-def zoo_exec_kcl_project(
+async def zoo_exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
 ) -> Path:
-    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+    entrypoint, files = await asyncio.to_thread(
+        _prepare_kcl_project, kcl_code, kcl_path
+    )
 
-    with _modeling_websocket(session_id) as ws:
-        path = _exec_kcl_project(ws, entrypoint, files)
-        with _modeling_session_lock:
-            if (
-                not isinstance(_modeling_session, _ModelingSession)
-                or _modeling_session.session_id != session_id
-            ):
-                path.unlink(missing_ok=True)
-                raise ZooMCPException(f"Unknown modeling session '{session_id}'")
-            _modeling_session.artifact_graph_paths.add(path)
+    async with _modeling_websocket(session_id) as ws:
+        path = await _exec_kcl_project(ws, entrypoint, files)
+        if (
+            not isinstance(_modeling_session, _ModelingSession)
+            or _modeling_session.session_id != session_id
+        ):
+            path.unlink(missing_ok=True)
+            raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+        _modeling_session.artifact_graph_paths.add(path)
         return path
 
 
-def zoo_face_info(
+async def zoo_face_info(
     face_id: Uuid,
     session_id: str,
 ) -> FaceInfo:
-    with _modeling_websocket(session_id) as ws:
+    async with _modeling_websocket(session_id) as ws:
         cmd_id_face_get_position = ModelingCmdId(uuid4())
-        ws.send(
+        await ws.send(
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(
@@ -1942,11 +1957,11 @@ def zoo_face_info(
                     ),
                     cmd_id=cmd_id_face_get_position,
                 )
-            )
+            ).model_dump_json(exclude_none=True)
         )
 
         cmd_id_face_get_gradient = ModelingCmdId(uuid4())
-        ws.send(
+        await ws.send(
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(
@@ -1957,17 +1972,17 @@ def zoo_face_info(
                     ),
                     cmd_id=cmd_id_face_get_gradient,
                 )
-            )
+            ).model_dump_json(exclude_none=True)
         )
 
         cmd_id_face_get_center = ModelingCmdId(uuid4())
-        ws.send(
+        await ws.send(
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(OptionFaceGetCenter(object_id=face_id)),
                     cmd_id=cmd_id_face_get_center,
                 )
-            )
+            ).model_dump_json(exclude_none=True)
         )
 
         face_get_position: FaceGetPosition | Literal[False] = False
@@ -1982,7 +1997,7 @@ def zoo_face_info(
             or face_get_gradient is False
             or face_get_center is False
         ):
-            message = _recv_modeling_frame(ws, deadline, "face info").root
+            message = (await _recv_modeling_frame(ws, deadline, "face info")).root
 
             # Match on request_id first; see _send_modeling_command.
             request_id = getattr(message, "request_id", None)
@@ -2066,29 +2081,26 @@ def _modeling_timeout(deadline: _Deadline, description: str) -> ZooMCPTimeoutErr
     )
 
 
-def _recv_modeling_frame(
-    ws: WebSocketModelingCommandsWs,
+async def _recv_modeling_frame(
+    ws: ClientConnection,
     deadline: _Deadline,
     description: str,
 ) -> WebSocketResponse:
     """Read one frame, bounded by what is left of the whole call's budget.
 
-    The SDK applies its own recv timeout per call, which cannot bound a loop
-    that reads until its command's frame arrives: a live session interleaves
-    unsolicited frames every few seconds, and each one starts a fresh timeout.
-    Passing the remaining budget makes those frames consume it instead.
+    A live session interleaves unsolicited frames every few seconds. Applying
+    the remaining whole-call budget to each read makes those frames consume it
+    instead of restarting a fixed per-read timeout.
     """
     remaining = deadline.remaining
     if remaining <= 0:
         raise _modeling_timeout(deadline, description)
 
-    # Reaching into the SDK's per-read timeout is how the budget gets applied;
-    # recv() takes no timeout argument of its own.
-    ws._recv_timeout = remaining
     try:
-        return ws.recv()
+        raw_response = await asyncio.wait_for(ws.recv(), timeout=remaining)
     except TimeoutError as error:
         raise _modeling_timeout(deadline, description) from error
+    return WebSocketResponse.model_validate_json(raw_response)
 
 
 def _format_websocket_failure(message: object) -> str:
@@ -2104,8 +2116,8 @@ def _format_websocket_failure(message: object) -> str:
     return f"The modeling engine reported a failure: {rendered}"
 
 
-def _await_modeling_response(
-    ws: WebSocketModelingCommandsWs,
+async def _await_modeling_response(
+    ws: ClientConnection,
     command_id: ModelingCmdId,
     expected_response: type[_ModelingResponseT],
     response_description: str,
@@ -2113,7 +2125,7 @@ def _await_modeling_response(
 ) -> _ModelingResponseT:
     """Read until the typed response for ``command_id`` arrives or time runs out."""
     while True:
-        message = _recv_modeling_frame(ws, deadline, response_description).root
+        message = (await _recv_modeling_frame(ws, deadline, response_description)).root
 
         request_id = getattr(message, "request_id", None)
 
@@ -2143,8 +2155,8 @@ def _await_modeling_response(
         return modeling_response
 
 
-def _send_modeling_command(
-    ws: WebSocketModelingCommandsWs,
+async def _send_modeling_command(
+    ws: ClientConnection,
     command: ModelingCmd,
     expected_response: type[_ModelingResponseT],
     response_description: str,
@@ -2158,16 +2170,16 @@ def _send_modeling_command(
     if deadline is None:
         deadline = _Deadline()
     command_id = ModelingCmdId(uuid4())
-    ws.send(
+    await ws.send(
         WebSocketRequest(
             OptionModelingCmdReq(
                 cmd=command,
                 cmd_id=command_id,
             )
-        )
+        ).model_dump_json(exclude_none=True)
     )
 
-    return _await_modeling_response(
+    return await _await_modeling_response(
         ws,
         command_id,
         expected_response,
@@ -2176,15 +2188,15 @@ def _send_modeling_command(
     )
 
 
-def zoo_execute_modeling_command(
+async def zoo_execute_modeling_command(
     command: ModelingCmd,
     expected_response: type[_ModelingResponseT],
     response_description: str,
     session_id: str,
 ) -> _ModelingResponseT:
     """Run one modeling command in an existing session."""
-    with _modeling_websocket(session_id) as ws:
-        return _send_modeling_command(
+    async with _modeling_websocket(session_id) as ws:
+        return await _send_modeling_command(
             ws,
             command,
             expected_response,
@@ -2193,7 +2205,7 @@ def zoo_execute_modeling_command(
         )
 
 
-def zoo_snapshot(
+async def zoo_snapshot(
     session_id: str,
     views: list[OptionDefaultCameraLookAt] | None = None,
     max_image_dimension: int = 512,
@@ -2223,8 +2235,8 @@ def zoo_snapshot(
     # the command count, which for a four-view capture is fourteen commands.
     deadline = _Deadline()
 
-    with _modeling_websocket(session_id) as ws:
-        _send_modeling_command(
+    async with _modeling_websocket(session_id) as ws:
+        await _send_modeling_command(
             ws,
             ModelingCmd(OptionDefaultCameraSetOrthographic()),
             ResponseDefaultCameraSetOrthographic,
@@ -2233,7 +2245,7 @@ def zoo_snapshot(
         )
 
         # Scene-wide, so it is set once rather than per view.
-        _send_modeling_command(
+        await _send_modeling_command(
             ws,
             ModelingCmd(OptionEdgeLinesVisible(hidden=not highlight_edges)),
             ResponseEdgeLinesVisible,
@@ -2246,7 +2258,7 @@ def zoo_snapshot(
         jpeg_contents_list: list[bytes] = []
         for view in views or [None]:
             if view is not None:
-                _send_modeling_command(
+                await _send_modeling_command(
                     ws,
                     ModelingCmd(view),
                     ResponseDefaultCameraLookAt,
@@ -2254,7 +2266,7 @@ def zoo_snapshot(
                     deadline,
                 )
             elif zoom:
-                _send_modeling_command(
+                await _send_modeling_command(
                     ws,
                     ModelingCmd(OptionViewIsometric()),
                     ResponseViewIsometric,
@@ -2263,7 +2275,7 @@ def zoo_snapshot(
                 )
 
             if zoom:
-                _send_modeling_command(
+                await _send_modeling_command(
                     ws,
                     ModelingCmd(zoom_to_fit),
                     ResponseZoomToFit,
@@ -2271,7 +2283,7 @@ def zoo_snapshot(
                     deadline,
                 )
 
-            response = _send_modeling_command(
+            response = await _send_modeling_command(
                 ws,
                 ModelingCmd(OptionTakeSnapshot(format=ImageFormat.JPEG)),
                 ResponseTakeSnapshot,
@@ -2280,9 +2292,11 @@ def zoo_snapshot(
             )
             jpeg_contents_list.append(response.data.contents)
 
-    return resize_image(
-        create_image_collage(jpeg_contents_list),
-        max_image_dimension,
+    return await asyncio.to_thread(
+        lambda: resize_image(
+            create_image_collage(jpeg_contents_list),
+            max_image_dimension,
+        )
     )
 
 
