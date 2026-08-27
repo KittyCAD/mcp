@@ -548,10 +548,11 @@ async def test_execute_kcl_error():
     assert "Failed to execute KCL code" in result["message"]
 
 
-def test_exec_kcl_project_extracts_artifact_graph():
-    raw_socket = MagicMock()
+@pytest.mark.asyncio
+async def test_exec_kcl_project_extracts_artifact_graph():
+    raw_socket = AsyncMock()
 
-    def recv(timeout: float | None = None):
+    async def recv():
         request = json.loads(raw_socket.send.call_args.args[0])
         return json.dumps(
             {
@@ -574,10 +575,8 @@ def test_exec_kcl_project_extracts_artifact_graph():
         )
 
     raw_socket.recv.side_effect = recv
-    websocket = SimpleNamespace(ws=raw_socket)
-
-    result = zoo_mcp.zoo_tools._exec_kcl_project(
-        cast(Any, websocket),
+    result = await zoo_mcp.zoo_tools._exec_kcl_project(
+        cast(Any, raw_socket),
         "main.kcl",
         [{"path": "main.kcl", "contents": list(b"sketch = startSketchOn(XY)")}],
     )
@@ -599,7 +598,7 @@ async def test_exec_kcl_project_tool(monkeypatch, tmp_path):
     }
     artifact_graph_path = tmp_path / "artifact-graph.json"
     artifact_graph_path.write_text(json.dumps(artifact_graph))
-    mock = MagicMock(return_value=artifact_graph_path)
+    mock = AsyncMock(return_value=artifact_graph_path)
     monkeypatch.setattr("zoo_mcp.server.zoo_exec_kcl_project", mock)
 
     response = await mcp.call_tool(
@@ -612,7 +611,7 @@ async def test_exec_kcl_project_tool(monkeypatch, tmp_path):
     )
 
     assert _meta_result(response) == str(artifact_graph_path)
-    mock.assert_called_once_with(
+    mock.assert_awaited_once_with(
         kcl_code="sketch = startSketchOn(XY)",
         kcl_path=None,
         session_id="session-id",
@@ -1140,7 +1139,7 @@ async def test_get_face_info(monkeypatch):
         ),
         face_get_center=FaceGetCenter(pos=Point3d(x=0.5, y=0.5, z=0.0)),
     )
-    mock = MagicMock(return_value=face_info)
+    mock = AsyncMock(return_value=face_info)
     monkeypatch.setattr("zoo_mcp.server.zoo_face_info", mock)
 
     response = await mcp.call_tool(
@@ -1161,7 +1160,7 @@ async def test_get_face_info(monkeypatch):
         },
         "face_get_center": {"pos": {"x": 0.5, "y": 0.5, "z": 0.0}},
     }
-    mock.assert_called_once_with(
+    mock.assert_awaited_once_with(
         face_id="face-id",
         session_id="session-id",
     )

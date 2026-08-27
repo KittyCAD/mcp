@@ -1,5 +1,4 @@
 import asyncio
-import threading
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -99,7 +98,7 @@ async def test_get_modeling_sessions_tool(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.asyncio
 async def test_import_cad_file_tool(monkeypatch: pytest.MonkeyPatch):
-    import_cad_file = MagicMock(return_value="object-id")
+    import_cad_file = AsyncMock(return_value="object-id")
     monkeypatch.setattr(server, "zoo_import_cad_file", import_cad_file)
 
     response = await mcp.call_tool(
@@ -108,7 +107,7 @@ async def test_import_cad_file_tool(monkeypatch: pytest.MonkeyPatch):
     )
 
     assert _result(response) == "object-id"
-    import_cad_file.assert_called_once_with(
+    import_cad_file.assert_awaited_once_with(
         session_id="session-id",
         input_file="part.step",
     )
@@ -246,7 +245,7 @@ async def test_modeling_tool_builds_expected_command(
     request_fields: dict[str, object],
     response_data: object,
 ):
-    mock = MagicMock(return_value=SimpleNamespace(data=response_data))
+    mock = AsyncMock(return_value=SimpleNamespace(data=response_data))
     monkeypatch.setattr(server, "zoo_execute_modeling_command", mock)
     arguments["session_id"] = "session-id"
 
@@ -332,7 +331,7 @@ async def test_only_one_selection_tool_is_exposed():
 
 @pytest.mark.asyncio
 async def test_query_tool_forwards_session(monkeypatch: pytest.MonkeyPatch):
-    mock = MagicMock(
+    mock = AsyncMock(
         return_value=SimpleNamespace(data=EntityGetIndex(entity_index=3)),
     )
     monkeypatch.setattr(server, "zoo_execute_modeling_command", mock)
@@ -349,7 +348,7 @@ async def test_modeling_tool_returns_error(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         server,
         "zoo_execute_modeling_command",
-        MagicMock(side_effect=RuntimeError("boom")),
+        AsyncMock(side_effect=RuntimeError("boom")),
     )
 
     with pytest.raises(ToolError, match="Error executing tool entity_get_index: boom"):
@@ -363,8 +362,8 @@ async def test_modeling_tool_returns_error(monkeypatch: pytest.MonkeyPatch):
 async def test_start_and_stop_modeling_session_tools(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    start = MagicMock(return_value="session-id")
-    stop = MagicMock()
+    start = AsyncMock(return_value="session-id")
+    stop = AsyncMock()
     monkeypatch.setattr(server, "zoo_start_modeling_session", start)
     monkeypatch.setattr(server, "zoo_stop_modeling_session", stop)
 
@@ -376,15 +375,15 @@ async def test_start_and_stop_modeling_session_tools(
 
     assert _result(start_response) == "session-id"
     assert _result(stop_response) is None
-    start.assert_called_once_with()
-    stop.assert_called_once_with("session-id")
+    start.assert_awaited_once_with()
+    stop.assert_awaited_once_with("session-id")
 
 
 @pytest.mark.asyncio
 async def test_snapshot_tool_forwards_session_and_zoom(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    mock = MagicMock(return_value=b"jpeg")
+    mock = AsyncMock(return_value=b"jpeg")
     monkeypatch.setattr(server, "zoo_snapshot", mock)
 
     response = await mcp.call_tool(
@@ -397,7 +396,7 @@ async def test_snapshot_tool_forwards_session_and_zoom(
     assert isinstance(content, list)
     assert len(content) == 1
     assert isinstance(content[0], ImageContent)
-    mock.assert_called_once_with(
+    mock.assert_awaited_once_with(
         session_id="session-id",
         views=None,
         max_image_dimension=256,
@@ -444,7 +443,7 @@ async def test_snapshot_tool_resolves_camera_views(
     camera_view: object,
     expected_views: list[str] | None,
 ):
-    mock = MagicMock(return_value=b"jpeg")
+    mock = AsyncMock(return_value=b"jpeg")
     monkeypatch.setattr(server, "zoo_snapshot", mock)
 
     arguments: dict[str, Any] = {"session_id": "session-id"}
@@ -496,7 +495,7 @@ async def test_snapshot_tool_accepts_an_explicit_camera(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """An explicit camera reaches the engine in the frame the caller gave it."""
-    mock = MagicMock(return_value=b"jpeg")
+    mock = AsyncMock(return_value=b"jpeg")
     monkeypatch.setattr(server, "zoo_snapshot", mock)
 
     await mcp.call_tool(
@@ -552,7 +551,7 @@ async def test_snapshot_tool_writes_to_output_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
     """output_path returns the saved path instead of an inline image."""
-    monkeypatch.setattr(server, "zoo_snapshot", MagicMock(return_value=b"jpeg-bytes"))
+    monkeypatch.setattr(server, "zoo_snapshot", AsyncMock(return_value=b"jpeg-bytes"))
     output_path = tmp_path / "snap.jpg"
 
     response = await mcp.call_tool(
@@ -569,7 +568,7 @@ async def test_snapshot_tool_writes_to_output_path(
 async def test_snapshot_tool_output_path_accepts_a_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
-    monkeypatch.setattr(server, "zoo_snapshot", MagicMock(return_value=b"jpeg-bytes"))
+    monkeypatch.setattr(server, "zoo_snapshot", AsyncMock(return_value=b"jpeg-bytes"))
 
     response = await mcp.call_tool(
         "snapshot",
@@ -585,7 +584,7 @@ async def test_snapshot_tool_output_path_accepts_a_directory(
 async def test_snapshot_tool_returns_image_when_output_path_omitted(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(server, "zoo_snapshot", MagicMock(return_value=b"jpeg-bytes"))
+    monkeypatch.setattr(server, "zoo_snapshot", AsyncMock(return_value=b"jpeg-bytes"))
 
     response = await mcp.call_tool("snapshot", arguments={"session_id": "session-id"})
 
@@ -608,7 +607,7 @@ async def test_kcl_execution_tools_forward_session_id(
             path_artifact_graph=artifact_graph_path,
         )
     )
-    exec_project = MagicMock(return_value=artifact_graph_path)
+    exec_project = AsyncMock(return_value=artifact_graph_path)
     monkeypatch.setattr(server, "zoo_execute_kcl", execute)
     monkeypatch.setattr(server, "zoo_exec_kcl_project", exec_project)
 
@@ -632,7 +631,7 @@ async def test_kcl_execution_tools_forward_session_id(
         kcl_path=None,
         session_id="session-id",
     )
-    exec_project.assert_called_once_with(
+    exec_project.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,
         session_id="session-id",
@@ -664,18 +663,13 @@ async def test_query_tools_document_their_arguments():
 async def test_a_stalled_modeling_call_does_not_starve_other_tools(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """MCP runs every tool handler on one event loop.
+    """A pending async modeling read must leave MCP dispatch responsive."""
+    release = asyncio.Event()
+    entered = asyncio.Event()
 
-    Calling a synchronous modeling read inline used to block that loop, so one
-    stalled import froze the whole server and left no path for the client's
-    cancellation to arrive. The read has to happen on a worker thread.
-    """
-    release = threading.Event()
-    entered = threading.Event()
-
-    def blocking_import(session_id: str, input_file: str) -> str:
+    async def blocking_import(session_id: str, input_file: str) -> str:
         entered.set()
-        assert release.wait(timeout=5), "import was never released"
+        await release.wait()
         return "object-id"
 
     monkeypatch.setattr(server, "zoo_import_cad_file", blocking_import)
@@ -687,7 +681,7 @@ async def test_a_stalled_modeling_call_does_not_starve_other_tools(
             arguments={"session_id": "session-id", "input_file": "part.step"},
         )
     )
-    await asyncio.to_thread(entered.wait, 5)
+    await asyncio.wait_for(entered.wait(), timeout=1)
 
     # The loop is still live, so an unrelated tool completes while the import hangs.
     other = await mcp.call_tool("get_modeling_sessions", arguments={})
@@ -703,12 +697,12 @@ async def test_a_stalled_modeling_call_does_not_starve_other_tools(
 async def test_a_stalled_modeling_call_can_be_cancelled(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    release = threading.Event()
-    entered = threading.Event()
+    release = asyncio.Event()
+    entered = asyncio.Event()
 
-    def blocking_import(session_id: str, input_file: str) -> str:
+    async def blocking_import(session_id: str, input_file: str) -> str:
         entered.set()
-        release.wait(timeout=5)
+        await release.wait()
         return "object-id"
 
     monkeypatch.setattr(server, "zoo_import_cad_file", blocking_import)
@@ -719,11 +713,10 @@ async def test_a_stalled_modeling_call_can_be_cancelled(
             arguments={"session_id": "session-id", "input_file": "part.step"},
         )
     )
-    await asyncio.to_thread(entered.wait, 5)
+    await asyncio.wait_for(entered.wait(), timeout=1)
     stalled.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await stalled
 
-    # The worker thread still finishes on its own; its own deadline bounds it.
-    release.set()
+    assert not release.is_set()
