@@ -138,6 +138,12 @@ _EXT_ALIASES = {
     "stp": "step",
 }
 
+_KITTYCAD_COORDINATE_SYSTEM = {
+    "name": "kittycad",
+    "up_axis": "+z",
+    "forward_axis": "-y",
+}
+
 
 def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[int]]]]:
     """Load a KCL project into the shape expected by exec_kcl_project."""
@@ -786,6 +792,7 @@ async def zoo_calculate_cad_physical_properties(
     """Calculate physical properties (volume, mass, surface area, center of mass, bounding box) of a CAD file.
 
     NOTE: The bounding box will be returned in the same unit length as the original CAD file.
+    Center of mass and bounding box use the KittyCAD coordinate system: Z-up and -Y-forward.
 
     Args:
         file_path (Path | str): The path to the file. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
@@ -797,7 +804,8 @@ async def zoo_calculate_cad_physical_properties(
         unit_vol (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
 
     Returns:
-        dict: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass', and 'bounding_box'.
+        dict: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass',
+            'bounding_box', and 'coordinate_system'.
     """
     file_path = Path(file_path)
 
@@ -863,15 +871,32 @@ async def zoo_calculate_cad_physical_properties(
             )
         bbox = _compute_stl_bounding_box(next(iter(stl_result.outputs.values())))
 
+    # The file center-of-mass endpoint currently returns the point in the format
+    # library's internal OpenGL frame. STL coordinates use the KittyCAD frame,
+    # including STL produced by the conversion endpoint. API issue #4484 tracks
+    # making that endpoint contract explicit; convert the current response here
+    # instead of assuming that API change is already deployed.
+    center_of_mass = _opengl_to_kittycad_point(com_result.center_of_mass)
+
     physical_properties = {
         "volume": volume_result.volume,
         "mass": mass_result.mass,
         "surface_area": sa_result.surface_area,
-        "center_of_mass": com_result.center_of_mass.to_dict(),
+        "center_of_mass": center_of_mass,
         "bounding_box": bbox,
+        "coordinate_system": _KITTYCAD_COORDINATE_SYSTEM.copy(),
     }
 
     return physical_properties
+
+
+def _opengl_to_kittycad_point(point: Point3d) -> dict[str, float]:
+    """Convert an OpenGL-frame point to KittyCAD coordinates.
+
+    OpenGL uses Y-up and +Z-forward. KittyCAD uses Z-up and -Y-forward, so the
+    coordinate mapping is ``(x, y, z) -> (x, -z, y)``.
+    """
+    return {"x": point.x, "y": -point.z, "z": point.y}
 
 
 async def zoo_calculate_kcl_physical_properties(

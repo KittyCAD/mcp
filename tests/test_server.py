@@ -234,12 +234,18 @@ async def test_calculate_cad_physical_properties(cube_stl: str):
     com = result["center_of_mass"]
     assert com["x"] == pytest.approx(5.0)
     assert com["y"] == pytest.approx(5.0)
-    assert com["z"] == pytest.approx(-5.0)
+    assert com["z"] == pytest.approx(5.0)
     bbox = result["bounding_box"]
     assert "center" in bbox and "dimensions" in bbox
+    assert com == pytest.approx(bbox["center"], abs=0.1)
     assert bbox["dimensions"]["x"] == pytest.approx(10.0, abs=0.1)
     assert bbox["dimensions"]["y"] == pytest.approx(10.0, abs=0.1)
     assert bbox["dimensions"]["z"] == pytest.approx(10.0, abs=0.1)
+    assert result["coordinate_system"] == {
+        "name": "kittycad",
+        "up_axis": "+z",
+        "forward_axis": "-y",
+    }
 
 
 @pytest.mark.asyncio
