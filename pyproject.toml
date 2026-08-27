@@ -16,7 +16,7 @@ dependencies = [
     "truststore<1.0",
     "typing-extensions>=4.12",
     "websockets>=14.1,<17.0",
-    "zoo-kcl>=0.3.179",
+    "zoo-kcl>=0.3.180",
 ]
 authors = [
     { name = "Ryan Barton", email = "ryan@zoo.dev" },
