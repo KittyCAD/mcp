@@ -1,17 +1,21 @@
+import asyncio
+import json
 import re
-import threading
-import time
-from contextlib import nullcontext
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 from kittycad.models import (
     EntityGetIndex,
     ModelingCmd,
     TakeSnapshot,
+    WebSocketRequest,
+    WebSocketResponse,
 )
 from kittycad.models.api_error import ApiError
 from kittycad.models.failure_web_socket_response import FailureWebSocketResponse
@@ -45,12 +49,21 @@ from websockets.exceptions import ConnectionClosedError
 from zoo_mcp import ZooMCPException, zoo_tools
 
 
-@pytest.fixture(autouse=True)
-def _clear_modeling_sessions():
+@pytest_asyncio.fixture(autouse=True)
+async def _clear_modeling_sessions():
     """Keep module-level session state from leaking between tests."""
-    zoo_tools.zoo_stop_all_modeling_sessions()
+    await zoo_tools.zoo_stop_all_modeling_sessions()
     yield
-    zoo_tools.zoo_stop_all_modeling_sessions()
+    await zoo_tools.zoo_stop_all_modeling_sessions()
+
+
+@asynccontextmanager
+async def _async_context(value: Any) -> AsyncIterator[Any]:
+    yield value
+
+
+def _sent_request(websocket: AsyncMock) -> Any:
+    return WebSocketRequest.model_validate_json(websocket.send.call_args.args[0]).root
 
 
 class _FakeClock:
@@ -70,10 +83,10 @@ class _FakeClock:
         self.now += seconds
 
 
-def _session_frame() -> SimpleNamespace:
+def _session_frame() -> str:
     """An unsolicited frame of the kind a live session interleaves."""
-    return SimpleNamespace(
-        root=SuccessWebSocketResponse(
+    return WebSocketResponse(
+        SuccessWebSocketResponse(
             request_id=None,
             resp=OkWebSocketResponseData(
                 OptionModelingSessionData(
@@ -84,12 +97,12 @@ def _session_frame() -> SimpleNamespace:
             ),
             success=True,
         )
-    )
+    ).model_dump_json()
 
 
-def _ok_frame(request_id: object, response: object) -> SimpleNamespace:
-    return SimpleNamespace(
-        root=SuccessWebSocketResponse(
+def _ok_frame(request_id: object, response: object) -> str:
+    return WebSocketResponse(
+        SuccessWebSocketResponse(
             request_id=cast(Any, request_id),
             resp=OkWebSocketResponseData(
                 OptionModeling(
@@ -100,30 +113,80 @@ def _ok_frame(request_id: object, response: object) -> SimpleNamespace:
             ),
             success=True,
         )
-    )
+    ).model_dump_json()
 
 
-def _failure_frame(request_id: object, message: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        root=FailureWebSocketResponse(
+def _failure_frame(request_id: object, message: str) -> str:
+    return WebSocketResponse(
+        FailureWebSocketResponse(
             request_id=cast(Any, request_id),
             errors=[ApiError(error_code=cast(Any, "bad_request"), message=message)],
             success=False,
         )
+    ).model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_modeling_websocket_uses_async_client_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    connection = AsyncMock()
+    open_websocket = AsyncMock(return_value=connection)
+    monkeypatch.setattr(zoo_tools, "connect", open_websocket)
+    client = SimpleNamespace(
+        base_url="https://api.example.test",
+        get_headers=MagicMock(return_value={"Authorization": "Bearer token"}),
+        verify_ssl=True,
+    )
+
+    result = await zoo_tools._open_modeling_websocket(cast(Any, client))
+
+    assert result is connection
+    open_websocket.assert_awaited_once_with(
+        "wss://api.example.test/ws/modeling/commands?"
+        "fps=30&post_effect=ssao&show_grid=false&unlocked_framerate=false&"
+        "video_res_height=1024&video_res_width=1024&webrtc=false",
+        additional_headers={"Authorization": "Bearer token"},
+        close_timeout=120,
+        max_size=None,
+        ssl=True,
     )
 
 
-def test_send_modeling_command_returns_matching_typed_response():
-    websocket = MagicMock()
+@pytest.mark.asyncio
+async def test_modeling_websocket_omits_tls_for_an_http_host(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    connection = AsyncMock()
+    open_websocket = AsyncMock(return_value=connection)
+    monkeypatch.setattr(zoo_tools, "connect", open_websocket)
+    client = SimpleNamespace(
+        base_url="http://localhost:8080",
+        get_headers=MagicMock(return_value={"Authorization": "Bearer token"}),
+        verify_ssl=zoo_tools.ctx,
+    )
+
+    result = await zoo_tools._open_modeling_websocket(cast(Any, client))
+
+    assert result is connection
+    await_args = open_websocket.await_args
+    assert await_args is not None
+    assert await_args.kwargs["ssl"] is None
+    assert await_args.args[0].startswith("ws://localhost:8080/")
+
+
+@pytest.mark.asyncio
+async def test_send_modeling_command_returns_matching_typed_response():
+    websocket = AsyncMock()
     response_data = EntityGetIndex(entity_index=4)
     expected_response = ResponseEntityGetIndex(data=response_data)
 
-    def recv() -> SimpleNamespace:
-        request = websocket.send.call_args.args[0].root
+    async def recv() -> str:
+        request = _sent_request(websocket)
         return _ok_frame(request.cmd_id, expected_response)
 
     websocket.recv.side_effect = recv
-    result = zoo_tools._send_modeling_command(
+    result = await zoo_tools._send_modeling_command(
         cast(Any, websocket),
         ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
         ResponseEntityGetIndex,
@@ -131,22 +194,23 @@ def test_send_modeling_command_returns_matching_typed_response():
     )
 
     assert result == expected_response
-    request = websocket.send.call_args.args[0].root
+    request = _sent_request(websocket)
     assert request.cmd.root.model_dump() == {
         "entity_id": "entity-id",
         "type": "entity_get_index",
     }
 
 
-def test_send_modeling_command_skips_another_commands_failure_frame():
+@pytest.mark.asyncio
+async def test_send_modeling_command_skips_another_commands_failure_frame():
     """A stale failure frame must not be reported as this command's error."""
-    websocket = MagicMock()
+    websocket = AsyncMock()
     expected_response = ResponseEntityGetIndex(data=EntityGetIndex(entity_index=7))
-    frames: list[SimpleNamespace] = []
+    frames: list[str] = []
 
-    def recv() -> SimpleNamespace:
+    async def recv() -> str:
         if not frames:
-            request = websocket.send.call_args.args[0].root
+            request = _sent_request(websocket)
             frames.append(
                 _failure_frame("00000000-0000-0000-0000-000000000000", "stale error")
             )
@@ -155,7 +219,7 @@ def test_send_modeling_command_skips_another_commands_failure_frame():
 
     websocket.recv.side_effect = recv
 
-    result = zoo_tools._send_modeling_command(
+    result = await zoo_tools._send_modeling_command(
         cast(Any, websocket),
         ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
         ResponseEntityGetIndex,
@@ -165,38 +229,23 @@ def test_send_modeling_command_skips_another_commands_failure_frame():
     assert result == expected_response
 
 
-def test_send_modeling_command_skips_unsolicited_session_frames():
+@pytest.mark.asyncio
+async def test_send_modeling_command_skips_unsolicited_session_frames():
     """A live session interleaves informational frames that carry no request_id."""
-    websocket = MagicMock()
+    websocket = AsyncMock()
     expected_response = ResponseEntityGetIndex(data=EntityGetIndex(entity_index=9))
-    frames: list[SimpleNamespace] = []
+    frames: list[str] = []
 
-    def recv() -> SimpleNamespace:
+    async def recv() -> str:
         if not frames:
-            request = websocket.send.call_args.args[0].root
-            frames.append(
-                SimpleNamespace(
-                    root=SuccessWebSocketResponse(
-                        request_id=None,
-                        resp=OkWebSocketResponseData(
-                            OptionModelingSessionData(
-                                data=ModelingSessionDataData(
-                                    session=ModelingSessionData(
-                                        api_call_id="api-call-id"
-                                    )
-                                )
-                            )
-                        ),
-                        success=True,
-                    )
-                )
-            )
+            request = _sent_request(websocket)
+            frames.append(_session_frame())
             frames.append(_ok_frame(request.cmd_id, expected_response))
         return frames.pop(0)
 
     websocket.recv.side_effect = recv
 
-    result = zoo_tools._send_modeling_command(
+    result = await zoo_tools._send_modeling_command(
         cast(Any, websocket),
         ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
         ResponseEntityGetIndex,
@@ -206,17 +255,18 @@ def test_send_modeling_command_skips_unsolicited_session_frames():
     assert result == expected_response
 
 
-def test_send_modeling_command_raises_readable_message_for_own_failure():
-    websocket = MagicMock()
+@pytest.mark.asyncio
+async def test_send_modeling_command_raises_readable_message_for_own_failure():
+    websocket = AsyncMock()
 
-    def recv() -> SimpleNamespace:
-        request = websocket.send.call_args.args[0].root
+    async def recv() -> str:
+        request = _sent_request(websocket)
         return _failure_frame(request.cmd_id, "No such entity exists")
 
     websocket.recv.side_effect = recv
 
     with pytest.raises(ZooMCPException) as exc_info:
-        zoo_tools._send_modeling_command(
+        await zoo_tools._send_modeling_command(
             cast(Any, websocket),
             ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
             ResponseEntityGetIndex,
@@ -228,30 +278,31 @@ def test_send_modeling_command_raises_readable_message_for_own_failure():
     assert "errors=" not in message
 
 
-def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
+@pytest.mark.asyncio
+async def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    context = MagicMock()
-    websocket = MagicMock()
-    context.__enter__.return_value = websocket
+    websocket = AsyncMock()
     artifact_graph_path = tmp_path / "artifact-graph.json"
     artifact_graph_path.write_text("{}")
-    execute_project = MagicMock(return_value=artifact_graph_path)
+    execute_project = AsyncMock(return_value=artifact_graph_path)
     expected_response = ResponseEntityGetIndex(data=EntityGetIndex(entity_index=4))
-    send_command = MagicMock(return_value=expected_response)
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+    send_command = AsyncMock(return_value=expected_response)
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
     monkeypatch.setattr(zoo_tools, "_exec_kcl_project", execute_project)
     monkeypatch.setattr(zoo_tools, "_send_modeling_command", send_command)
 
-    session_id = zoo_tools.zoo_start_modeling_session()
+    session_id = await zoo_tools.zoo_start_modeling_session()
     execute_project.assert_not_called()
 
-    artifact_graph = zoo_tools.zoo_exec_kcl_project(
+    artifact_graph = await zoo_tools.zoo_exec_kcl_project(
         kcl_code="code",
         session_id=session_id,
     )
-    result = zoo_tools.zoo_execute_modeling_command(
+    result = await zoo_tools.zoo_execute_modeling_command(
         ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
         ResponseEntityGetIndex,
         "entity index",
@@ -261,15 +312,15 @@ def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
     assert result == expected_response
     assert artifact_graph == artifact_graph_path
     assert artifact_graph_path.exists()
-    execute_project.assert_called_once()
+    execute_project.assert_awaited_once()
     assert execute_project.call_args.args[0] is websocket
     assert send_command.call_args.args[0] is websocket
 
-    zoo_tools.zoo_stop_modeling_session(session_id)
+    await zoo_tools.zoo_stop_modeling_session(session_id)
     assert not artifact_graph_path.exists()
-    context.__exit__.assert_called_once_with(None, None, None)
+    websocket.close.assert_awaited_once_with()
     with pytest.raises(ZooMCPException, match="Unknown modeling session"):
-        zoo_tools.zoo_execute_modeling_command(
+        await zoo_tools.zoo_execute_modeling_command(
             ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
             ResponseEntityGetIndex,
             "entity index",
@@ -277,237 +328,216 @@ def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
         )
 
 
-def test_modeling_session_start_does_not_execute_kcl(monkeypatch: pytest.MonkeyPatch):
-    context = MagicMock()
-    context.__enter__.return_value = MagicMock()
-    execute_project = MagicMock()
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
-    monkeypatch.setattr(zoo_tools, "_exec_kcl_project", execute_project)
-
-    session_id = zoo_tools.zoo_start_modeling_session()
-
-    execute_project.assert_not_called()
-    zoo_tools.zoo_stop_modeling_session(session_id)
-    context.__exit__.assert_called_once_with(None, None, None)
-
-
-def test_start_handshake_does_not_hold_state_lock_and_shutdown_cancels_it(
+@pytest.mark.asyncio
+async def test_modeling_session_start_does_not_execute_kcl(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    context = MagicMock()
-    websocket = MagicMock()
-    handshake_started = threading.Event()
-    release_handshake = threading.Event()
-    results: list[str] = []
-    errors: list[Exception] = []
+    websocket = AsyncMock()
+    execute_project = AsyncMock()
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
+    monkeypatch.setattr(zoo_tools, "_exec_kcl_project", execute_project)
 
-    def enter_websocket() -> MagicMock:
+    session_id = await zoo_tools.zoo_start_modeling_session()
+
+    execute_project.assert_not_called()
+    await zoo_tools.zoo_stop_modeling_session(session_id)
+    websocket.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_modeling_client_construction_failure_releases_the_session_slot(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class BrokenClient:
+        def __init__(self, **kwargs: object) -> None:
+            raise ValueError("missing token")
+
+    monkeypatch.setattr(zoo_tools, "AsyncKittyCAD", BrokenClient)
+
+    with pytest.raises(ValueError, match="missing token"):
+        await zoo_tools.zoo_start_modeling_session()
+
+    assert zoo_tools._modeling_session is None
+
+
+@pytest.mark.asyncio
+async def test_start_handshake_does_not_hold_state_lock_and_shutdown_cancels_it(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    websocket = AsyncMock()
+    handshake_started = asyncio.Event()
+    release_handshake = asyncio.Event()
+
+    async def open_websocket(client: object) -> AsyncMock:
         handshake_started.set()
-        release_handshake.wait(timeout=5)
+        await release_handshake.wait()
         return websocket
 
-    def start_session() -> None:
-        try:
-            results.append(zoo_tools.zoo_start_modeling_session())
-        except Exception as error:
-            errors.append(error)
+    monkeypatch.setattr(zoo_tools, "_open_modeling_websocket", open_websocket)
 
-    context.__enter__.side_effect = enter_websocket
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+    starter = asyncio.create_task(zoo_tools.zoo_start_modeling_session())
+    await asyncio.wait_for(handshake_started.wait(), timeout=1)
 
-    starter = threading.Thread(target=start_session)
-    starter.start()
-    assert handshake_started.wait(timeout=5)
-
-    started = time.monotonic()
     assert zoo_tools.zoo_get_modeling_sessions() == []
     with pytest.raises(ZooMCPException, match="already open or starting"):
-        zoo_tools.zoo_start_modeling_session()
-    zoo_tools.zoo_stop_all_modeling_sessions()
-    elapsed = time.monotonic() - started
+        await zoo_tools.zoo_start_modeling_session()
+    await asyncio.wait_for(zoo_tools.zoo_stop_all_modeling_sessions(), timeout=0.5)
 
     release_handshake.set()
-    starter.join(timeout=5)
+    with pytest.raises(ZooMCPException, match="start was canceled"):
+        await starter
 
-    assert elapsed < 0.5
-    assert results == []
-    assert len(errors) == 1
-    assert isinstance(errors[0], ZooMCPException)
-    assert "start was canceled" in str(errors[0])
     assert zoo_tools._modeling_session is None
-    context.__exit__.assert_called_once_with(None, None, None)
+    websocket.close.assert_awaited_once_with()
 
 
-def test_stop_recovers_the_slot_from_a_start_whose_handshake_hangs(
+@pytest.mark.asyncio
+async def test_stop_recovers_the_slot_from_a_start_whose_handshake_hangs(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The whole recovery loop: the rejection names the pending start, stopping
     it frees the slot immediately, and a new session opens while the hung
     handshake is still outstanding."""
-    hung_context = MagicMock()
-    live_context = MagicMock()
-    live_websocket = MagicMock()
-    live_context.__enter__.return_value = live_websocket
-    contexts = iter([hung_context, live_context])
-    handshake_started = threading.Event()
-    release_handshake = threading.Event()
-    errors: list[Exception] = []
+    hung_websocket = AsyncMock()
+    live_websocket = AsyncMock()
+    handshake_started = asyncio.Event()
+    release_handshake = asyncio.Event()
+    calls = 0
 
-    def enter_hung_websocket() -> MagicMock:
-        handshake_started.set()
-        release_handshake.wait(timeout=5)
-        return MagicMock()
+    async def open_websocket(client: object) -> AsyncMock:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            handshake_started.set()
+            await release_handshake.wait()
+            return hung_websocket
+        return live_websocket
 
-    def start_session() -> None:
-        try:
-            zoo_tools.zoo_start_modeling_session()
-        except Exception as error:
-            errors.append(error)
+    monkeypatch.setattr(zoo_tools, "_open_modeling_websocket", open_websocket)
 
-    hung_context.__enter__.side_effect = enter_hung_websocket
-    monkeypatch.setattr(
-        zoo_tools, "_modeling_websocket_context", lambda: next(contexts)
-    )
-
-    starter = threading.Thread(target=start_session)
-    starter.start()
-    assert handshake_started.wait(timeout=5)
+    starter = asyncio.create_task(zoo_tools.zoo_start_modeling_session())
+    await asyncio.wait_for(handshake_started.wait(), timeout=1)
 
     # A blocked caller learns the pending session's ID from the rejection, which
     # is its only way to name something get_modeling_sessions does not list.
     assert zoo_tools.zoo_get_modeling_sessions() == []
     with pytest.raises(ZooMCPException, match="already open or starting") as rejection:
-        zoo_tools.zoo_start_modeling_session()
+        await zoo_tools.zoo_start_modeling_session()
     pending_id = re.search(r"'([^']+)'", str(rejection.value))
     assert pending_id is not None
 
-    zoo_tools.zoo_stop_modeling_session(pending_id.group(1))
+    await zoo_tools.zoo_stop_modeling_session(pending_id.group(1))
 
     # Still hung, but the slot is free, so the next start no longer waits on it.
     assert not release_handshake.is_set()
-    recovered_id = zoo_tools.zoo_start_modeling_session()
+    recovered_id = await zoo_tools.zoo_start_modeling_session()
     assert zoo_tools.zoo_get_modeling_sessions() == [recovered_id]
 
     release_handshake.set()
-    starter.join(timeout=5)
+    with pytest.raises(ZooMCPException, match="start was canceled"):
+        await starter
 
     # The canceled starter closes the socket it opened and leaves the
     # recovered session alone.
-    assert len(errors) == 1
-    assert "start was canceled" in str(errors[0])
-    hung_context.__exit__.assert_called_once_with(None, None, None)
-    live_context.__exit__.assert_not_called()
+    hung_websocket.close.assert_awaited_once_with()
+    live_websocket.close.assert_not_awaited()
     assert zoo_tools.zoo_get_modeling_sessions() == [recovered_id]
 
-    zoo_tools.zoo_stop_modeling_session(recovered_id)
+    await zoo_tools.zoo_stop_modeling_session(recovered_id)
 
 
-def test_stop_rejects_an_id_that_is_neither_open_nor_starting(
+@pytest.mark.asyncio
+async def test_stop_rejects_an_id_that_is_neither_open_nor_starting(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    context = MagicMock()
-    context.__enter__.return_value = MagicMock()
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+    monkeypatch.setattr(zoo_tools, "_open_modeling_websocket", AsyncMock())
 
-    session_id = zoo_tools.zoo_start_modeling_session()
+    session_id = await zoo_tools.zoo_start_modeling_session()
     with pytest.raises(ZooMCPException, match="Unknown modeling session"):
-        zoo_tools.zoo_stop_modeling_session("some-other-id")
+        await zoo_tools.zoo_stop_modeling_session("some-other-id")
 
     # The real session survives a mismatched stop.
     assert zoo_tools.zoo_get_modeling_sessions() == [session_id]
-    zoo_tools.zoo_stop_modeling_session(session_id)
+    await zoo_tools.zoo_stop_modeling_session(session_id)
 
 
-def test_busy_session_does_not_block_rejection_of_another_session(
+@pytest.mark.asyncio
+async def test_busy_session_does_not_block_rejection_of_another_session(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Starting another session must not wait for the active session's lock."""
-    context = MagicMock()
-    context.__enter__.return_value = MagicMock()
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+    monkeypatch.setattr(zoo_tools, "_open_modeling_websocket", AsyncMock())
 
-    session_id = zoo_tools.zoo_start_modeling_session()
-    holding = threading.Event()
-    release = threading.Event()
+    session_id = await zoo_tools.zoo_start_modeling_session()
+    holding = asyncio.Event()
+    release = asyncio.Event()
 
-    def hold() -> None:
-        with zoo_tools._modeling_websocket(session_id):
+    async def hold() -> None:
+        async with zoo_tools._modeling_websocket(session_id):
             holding.set()
-            release.wait(timeout=5)
+            await release.wait()
 
-    holder = threading.Thread(target=hold)
-    holder.start()
-    assert holding.wait(timeout=5)
+    holder = asyncio.create_task(hold())
+    await asyncio.wait_for(holding.wait(), timeout=1)
 
-    started = time.monotonic()
     with pytest.raises(ZooMCPException, match="already open"):
-        zoo_tools.zoo_start_modeling_session()
-    elapsed = time.monotonic() - started
+        await asyncio.wait_for(zoo_tools.zoo_start_modeling_session(), timeout=0.5)
 
     release.set()
-    holder.join(timeout=5)
-    zoo_tools.zoo_stop_modeling_session(session_id)
-
-    assert elapsed < 0.5, (
-        f"rejecting another session blocked for {elapsed:.2f}s behind a busy one"
-    )
+    await holder
+    await zoo_tools.zoo_stop_modeling_session(session_id)
 
 
-def test_session_is_evicted_when_its_websocket_dies(
+@pytest.mark.asyncio
+async def test_session_is_evicted_when_its_websocket_dies(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    context = MagicMock()
-    context.__enter__.return_value = MagicMock()
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+    monkeypatch.setattr(zoo_tools, "_open_modeling_websocket", AsyncMock())
 
-    session_id = zoo_tools.zoo_start_modeling_session()
+    session_id = await zoo_tools.zoo_start_modeling_session()
     artifact_graph_path = tmp_path / "artifact-graph.json"
     artifact_graph_path.write_text("{}")
     assert isinstance(zoo_tools._modeling_session, zoo_tools._ModelingSession)
     zoo_tools._modeling_session.artifact_graph_paths.add(artifact_graph_path)
 
-    with (
-        pytest.raises(ZooMCPException, match="no longer connected"),
-        zoo_tools._modeling_websocket(session_id),
-    ):
-        raise ConnectionClosedError(None, None)
+    with pytest.raises(ZooMCPException, match="no longer connected"):
+        async with zoo_tools._modeling_websocket(session_id):
+            raise ConnectionClosedError(None, None)
 
     assert zoo_tools._modeling_session is None
     assert not artifact_graph_path.exists()
-    with (
-        pytest.raises(ZooMCPException, match="Unknown modeling session"),
-        zoo_tools._modeling_websocket(session_id),
-    ):
-        pass
+    with pytest.raises(ZooMCPException, match="Unknown modeling session"):
+        async with zoo_tools._modeling_websocket(session_id):
+            pass
 
 
-def test_only_one_session_can_be_open(monkeypatch: pytest.MonkeyPatch):
-    context = MagicMock()
-    context.__enter__.return_value = MagicMock()
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+@pytest.mark.asyncio
+async def test_only_one_session_can_be_open(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(zoo_tools, "_open_modeling_websocket", AsyncMock())
 
-    first = zoo_tools.zoo_start_modeling_session()
+    first = await zoo_tools.zoo_start_modeling_session()
 
     with pytest.raises(ZooMCPException, match="already open"):
-        zoo_tools.zoo_start_modeling_session()
+        await zoo_tools.zoo_start_modeling_session()
 
-    zoo_tools.zoo_stop_modeling_session(first)
-    second = zoo_tools.zoo_start_modeling_session()
-    zoo_tools.zoo_stop_modeling_session(second)
+    await zoo_tools.zoo_stop_modeling_session(first)
+    second = await zoo_tools.zoo_start_modeling_session()
+    await zoo_tools.zoo_stop_modeling_session(second)
 
 
-def test_get_modeling_sessions(monkeypatch: pytest.MonkeyPatch):
-    context = MagicMock()
-    context.__enter__.return_value = MagicMock()
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+@pytest.mark.asyncio
+async def test_get_modeling_sessions(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(zoo_tools, "_open_modeling_websocket", AsyncMock())
 
     assert zoo_tools.zoo_get_modeling_sessions() == []
 
-    session_id = zoo_tools.zoo_start_modeling_session()
+    session_id = await zoo_tools.zoo_start_modeling_session()
     assert zoo_tools.zoo_get_modeling_sessions() == [session_id]
 
-    zoo_tools.zoo_stop_modeling_session(session_id)
+    await zoo_tools.zoo_stop_modeling_session(session_id)
     assert zoo_tools.zoo_get_modeling_sessions() == []
 
 
@@ -516,7 +546,7 @@ async def test_execute_kcl_executes_in_modeling_session(
     monkeypatch: pytest.MonkeyPatch,
 ):
     artifact_graph_path = Path("artifact-graph.json")
-    execute_project = MagicMock(return_value=artifact_graph_path)
+    execute_project = AsyncMock(return_value=artifact_graph_path)
     monkeypatch.setattr(zoo_tools, "zoo_exec_kcl_project", execute_project)
 
     result = await zoo_tools.zoo_execute_kcl(
@@ -527,7 +557,7 @@ async def test_execute_kcl_executes_in_modeling_session(
     assert isinstance(result, zoo_tools.ResultZooExecuteKclRemote)
     assert result.ok is True
     assert result.path_artifact_graph == artifact_graph_path
-    execute_project.assert_called_once_with(
+    execute_project.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,
         session_id="session-id",
@@ -542,7 +572,7 @@ async def test_execute_kcl_session_message_states_diagnostics_are_unavailable(
     monkeypatch.setattr(
         zoo_tools,
         "zoo_exec_kcl_project",
-        MagicMock(return_value=Path("artifact-graph.json")),
+        AsyncMock(return_value=Path("artifact-graph.json")),
     )
 
     result = await zoo_tools.zoo_execute_kcl(
@@ -555,7 +585,8 @@ async def test_execute_kcl_session_message_states_diagnostics_are_unavailable(
     assert "not" in result.message
 
 
-def test_exec_kcl_project_reads_within_the_remaining_budget(
+@pytest.mark.asyncio
+async def test_exec_kcl_project_reads_within_the_remaining_budget(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Each read is bounded by what is left of the call, not a fixed per-read value.
@@ -567,23 +598,18 @@ def test_exec_kcl_project_reads_within_the_remaining_budget(
     monkeypatch.setattr(zoo_tools, "monotonic", clock)
     monkeypatch.setattr(zoo_tools, "MODELING_COMMAND_TIMEOUT", 100.0)
 
-    websocket = MagicMock()
+    websocket = AsyncMock()
     sent: dict[str, object] = {}
     timeouts: list[float | None] = []
 
-    def send(payload: str) -> None:
-        import json
-
+    async def send(payload: str) -> None:
         sent.update(json.loads(payload))
 
-    websocket.ws.send.side_effect = send
+    websocket.send.side_effect = send
 
-    def recv(timeout: float | None = None) -> str:
-        import json
-
-        timeouts.append(timeout)
+    async def recv() -> str:
         clock.advance(10.0)
-        if len(timeouts) == 1:
+        if len(timeouts) == 2:
             # A frame for someone else's request must consume the budget.
             return json.dumps({"success": True, "request_id": "other"})
         return json.dumps(
@@ -597,11 +623,19 @@ def test_exec_kcl_project_reads_within_the_remaining_budget(
             }
         )
 
-    websocket.ws.recv.side_effect = recv
+    websocket.recv.side_effect = recv
+    wait_for = asyncio.wait_for
 
-    result = zoo_tools._exec_kcl_project(cast(Any, websocket), "main.kcl", [])
+    async def record_timeout(awaitable: Any, timeout: float) -> Any:
+        timeouts.append(timeout)
+        return await awaitable
 
-    assert timeouts == [100.0, 90.0]
+    monkeypatch.setattr(zoo_tools.asyncio, "wait_for", record_timeout)
+
+    result = await zoo_tools._exec_kcl_project(cast(Any, websocket), "main.kcl", [])
+    monkeypatch.setattr(zoo_tools.asyncio, "wait_for", wait_for)
+
+    assert timeouts == [100.0, 100.0, 90.0]
 
     try:
         assert result.suffix == ".json"
@@ -627,7 +661,7 @@ def _capture_snapshot_commands(
         ),
     }
 
-    def send_command(
+    async def send_command(
         ws: object,
         command: ModelingCmd,
         expected_response: type,
@@ -641,7 +675,7 @@ def _capture_snapshot_commands(
     monkeypatch.setattr(
         zoo_tools,
         "_modeling_websocket",
-        lambda session_id: nullcontext(MagicMock()),
+        lambda session_id: _async_context(AsyncMock()),
     )
     return commands
 
@@ -652,12 +686,15 @@ def _camera_view(name: str) -> OptionDefaultCameraLookAt:
     )
 
 
-def test_snapshot_frames_the_scene_before_capturing(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.asyncio
+async def test_snapshot_frames_the_scene_before_capturing(
+    monkeypatch: pytest.MonkeyPatch,
+):
     commands = _capture_snapshot_commands(monkeypatch)
     resize = MagicMock(return_value=b"resized-jpeg")
     monkeypatch.setattr(zoo_tools, "resize_image", resize)
 
-    result = zoo_tools.zoo_snapshot(
+    result = await zoo_tools.zoo_snapshot(
         session_id="session-id",
         max_image_dimension=256,
     )
@@ -674,7 +711,10 @@ def test_snapshot_frames_the_scene_before_capturing(monkeypatch: pytest.MonkeyPa
     resize.assert_called_once_with(b"jpeg", 256)
 
 
-def test_snapshot_hides_edge_lines_by_default(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.asyncio
+async def test_snapshot_hides_edge_lines_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Edge outlines otherwise compete with highlight_set_entities."""
     commands = _capture_snapshot_commands(monkeypatch)
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
@@ -682,7 +722,7 @@ def test_snapshot_hides_edge_lines_by_default(monkeypatch: pytest.MonkeyPatch):
         zoo_tools, "create_image_collage", MagicMock(return_value=b"collage")
     )
 
-    zoo_tools.zoo_snapshot(session_id="session-id")
+    await zoo_tools.zoo_snapshot(session_id="session-id")
 
     edge_commands = [
         command.root
@@ -693,11 +733,12 @@ def test_snapshot_hides_edge_lines_by_default(monkeypatch: pytest.MonkeyPatch):
     assert cast(Any, edge_commands[0]).hidden is True
 
 
-def test_snapshot_can_show_edge_lines(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.asyncio
+async def test_snapshot_can_show_edge_lines(monkeypatch: pytest.MonkeyPatch):
     commands = _capture_snapshot_commands(monkeypatch)
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
 
-    zoo_tools.zoo_snapshot(session_id="session-id", highlight_edges=True)
+    await zoo_tools.zoo_snapshot(session_id="session-id", highlight_edges=True)
 
     edge_commands = [
         command.root
@@ -708,7 +749,8 @@ def test_snapshot_can_show_edge_lines(monkeypatch: pytest.MonkeyPatch):
     assert cast(Any, edge_commands[0]).hidden is False
 
 
-def test_snapshot_sets_edge_visibility_once_across_views(
+@pytest.mark.asyncio
+async def test_snapshot_sets_edge_visibility_once_across_views(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """It is a scene-wide setting, so re-sending it per view is wasted work."""
@@ -718,7 +760,7 @@ def test_snapshot_sets_edge_visibility_once_across_views(
         zoo_tools, "create_image_collage", MagicMock(return_value=b"collage")
     )
 
-    zoo_tools.zoo_snapshot(
+    await zoo_tools.zoo_snapshot(
         session_id="session-id",
         views=[_camera_view("front"), _camera_view("top")],
     )
@@ -735,7 +777,8 @@ def test_snapshot_sets_edge_visibility_once_across_views(
     )
 
 
-def test_snapshot_always_uses_orthographic_projection(
+@pytest.mark.asyncio
+async def test_snapshot_always_uses_orthographic_projection(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Perspective projection distorts measurements read off the image."""
@@ -743,18 +786,21 @@ def test_snapshot_always_uses_orthographic_projection(
 
     for zoom in (True, False):
         commands = _capture_snapshot_commands(monkeypatch)
-        zoo_tools.zoo_snapshot(session_id="session-id", zoom=zoom)
+        await zoo_tools.zoo_snapshot(session_id="session-id", zoom=zoom)
         assert any(
             isinstance(command.root, OptionDefaultCameraSetOrthographic)
             for command in commands
         ), f"zoom={zoom} did not set an orthographic camera"
 
 
-def test_snapshot_can_preserve_the_current_camera(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.asyncio
+async def test_snapshot_can_preserve_the_current_camera(
+    monkeypatch: pytest.MonkeyPatch,
+):
     commands = _capture_snapshot_commands(monkeypatch)
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
 
-    zoo_tools.zoo_snapshot(session_id="session-id", zoom=False)
+    await zoo_tools.zoo_snapshot(session_id="session-id", zoom=False)
 
     # No isometric/zoom-to-fit: the caller's framing is left alone.
     assert not any(
@@ -763,14 +809,15 @@ def test_snapshot_can_preserve_the_current_camera(monkeypatch: pytest.MonkeyPatc
     )
 
 
-def test_snapshot_captures_one_image_per_view(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.asyncio
+async def test_snapshot_captures_one_image_per_view(monkeypatch: pytest.MonkeyPatch):
     commands = _capture_snapshot_commands(monkeypatch)
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"resized"))
     collage = MagicMock(return_value=b"collage")
     monkeypatch.setattr(zoo_tools, "create_image_collage", collage)
 
     views = [_camera_view(name) for name in ("front", "right", "top")]
-    result = zoo_tools.zoo_snapshot(session_id="session-id", views=views)
+    result = await zoo_tools.zoo_snapshot(session_id="session-id", views=views)
 
     assert result == b"resized"
     # Each requested view is aimed explicitly, so no isometric fallback.
@@ -795,13 +842,14 @@ def test_snapshot_captures_one_image_per_view(monkeypatch: pytest.MonkeyPatch):
     collage.assert_called_once_with([b"jpeg"] * 3)
 
 
-def test_snapshot_fits_the_whole_session(
+@pytest.mark.asyncio
+async def test_snapshot_fits_the_whole_session(
     monkeypatch: pytest.MonkeyPatch,
 ):
     commands = _capture_snapshot_commands(monkeypatch)
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
 
-    zoo_tools.zoo_snapshot(session_id="session-id")
+    await zoo_tools.zoo_snapshot(session_id="session-id")
 
     zoom_commands = [
         command.root
@@ -817,7 +865,8 @@ def test_face_info_uuid_type_is_accepted():
     assert str(Uuid("face-id")) == "face-id"
 
 
-def test_unmatched_frames_consume_the_budget_instead_of_resetting_it(
+@pytest.mark.asyncio
+async def test_unmatched_frames_consume_the_budget_instead_of_resetting_it(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """The regression this whole deadline exists for.
@@ -830,57 +879,86 @@ def test_unmatched_frames_consume_the_budget_instead_of_resetting_it(
     monkeypatch.setattr(zoo_tools, "monotonic", clock)
     monkeypatch.setattr(zoo_tools, "MODELING_COMMAND_TIMEOUT", 300.0)
 
-    websocket = MagicMock()
+    websocket = AsyncMock()
     timeouts: list[float] = []
 
-    def recv() -> SimpleNamespace:
-        timeouts.append(websocket._recv_timeout)
+    async def recv() -> str:
         clock.advance(10.0)
         return _session_frame()
 
     websocket.recv.side_effect = recv
+    wait_for = asyncio.wait_for
+
+    async def record_timeout(awaitable: Any, timeout: float) -> Any:
+        timeouts.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(zoo_tools.asyncio, "wait_for", record_timeout)
 
     with pytest.raises(zoo_tools.ZooMCPTimeoutError) as exc_info:
-        zoo_tools._send_modeling_command(
+        await zoo_tools._send_modeling_command(
             cast(Any, websocket),
             ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
             ResponseEntityGetIndex,
             "entity index",
         )
+    monkeypatch.setattr(zoo_tools.asyncio, "wait_for", wait_for)
 
     # Each read is offered only what is left, so the budget runs out.
-    assert timeouts[:3] == [300.0, 290.0, 280.0]
-    assert len(timeouts) == 30
+    assert timeouts[:4] == [300.0, 300.0, 290.0, 280.0]
+    assert len(timeouts) == 31
     message = str(exc_info.value)
     assert "entity index" in message
     assert "300s" in message
     assert "waited 300.0s" in message
 
 
-def test_command_times_out_when_the_engine_never_answers(
+@pytest.mark.asyncio
+async def test_command_times_out_when_the_engine_never_answers(
     monkeypatch: pytest.MonkeyPatch,
 ):
     clock = _FakeClock()
     monkeypatch.setattr(zoo_tools, "monotonic", clock)
     monkeypatch.setattr(zoo_tools, "MODELING_COMMAND_TIMEOUT", 300.0)
 
-    websocket = MagicMock()
+    websocket = AsyncMock()
 
-    def recv() -> SimpleNamespace:
+    async def recv() -> str:
         clock.advance(300.0)
         raise TimeoutError
 
     websocket.recv.side_effect = recv
 
     with pytest.raises(zoo_tools.ZooMCPTimeoutError, match="entity index"):
-        zoo_tools._send_modeling_command(
+        await zoo_tools._send_modeling_command(
             cast(Any, websocket),
             ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
             ResponseEntityGetIndex,
             "entity index",
         )
 
-    assert websocket._recv_timeout == 300.0
+    websocket.recv.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_command_send_uses_the_same_deadline_as_its_response():
+    websocket = AsyncMock()
+
+    async def send(payload: object) -> None:
+        await asyncio.sleep(60)
+
+    websocket.send.side_effect = send
+
+    with pytest.raises(zoo_tools.ZooMCPTimeoutError, match="entity index"):
+        await zoo_tools._send_modeling_command(
+            cast(Any, websocket),
+            ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
+            ResponseEntityGetIndex,
+            "entity index",
+            zoo_tools._Deadline(timeout=0.01),
+        )
+
+    websocket.recv.assert_not_awaited()
 
 
 def test_a_timeout_is_a_zoo_mcp_exception_subclass():
@@ -888,37 +966,42 @@ def test_a_timeout_is_a_zoo_mcp_exception_subclass():
     assert issubclass(zoo_tools.ZooMCPTimeoutError, ZooMCPException)
 
 
-def test_timeout_closes_and_evicts_the_session(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.asyncio
+async def test_timeout_aborts_and_evicts_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """A session whose engine still owes a response cannot be handed back."""
     clock = _FakeClock()
     monkeypatch.setattr(zoo_tools, "monotonic", clock)
     monkeypatch.setattr(zoo_tools, "MODELING_COMMAND_TIMEOUT", 300.0)
 
-    websocket = MagicMock()
+    websocket = AsyncMock()
+    websocket.transport = MagicMock()
 
-    def recv() -> SimpleNamespace:
+    async def recv() -> str:
         clock.advance(300.0)
         raise TimeoutError
 
     websocket.recv.side_effect = recv
-    context = MagicMock()
-    context.__enter__.return_value = websocket
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
 
-    session_id = zoo_tools.zoo_start_modeling_session()
+    session_id = await zoo_tools.zoo_start_modeling_session()
 
     with pytest.raises(zoo_tools.ZooMCPTimeoutError):
-        zoo_tools.zoo_execute_modeling_command(
+        await zoo_tools.zoo_execute_modeling_command(
             ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
             ResponseEntityGetIndex,
             "entity index",
             session_id,
         )
 
-    context.__exit__.assert_called_once_with(None, None, None)
+    websocket.transport.abort.assert_called_once_with()
+    websocket.close.assert_not_awaited()
     assert zoo_tools._modeling_session is None
     with pytest.raises(ZooMCPException, match="Unknown modeling session"):
-        zoo_tools.zoo_execute_modeling_command(
+        await zoo_tools.zoo_execute_modeling_command(
             ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
             ResponseEntityGetIndex,
             "entity index",
@@ -926,19 +1009,57 @@ def test_timeout_closes_and_evicts_the_session(monkeypatch: pytest.MonkeyPatch):
         )
 
 
-def test_connection_close_mid_command_reports_a_dead_session(
+@pytest.mark.asyncio
+async def test_cancellation_aborts_and_evicts_the_session(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    websocket = MagicMock()
-    websocket.recv.side_effect = ConnectionClosedError(None, None)
-    context = MagicMock()
-    context.__enter__.return_value = websocket
-    monkeypatch.setattr(zoo_tools, "_modeling_websocket_context", lambda: context)
+    websocket = AsyncMock()
+    websocket.transport = MagicMock()
+    response_started = asyncio.Event()
 
-    session_id = zoo_tools.zoo_start_modeling_session()
+    async def recv() -> str:
+        response_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    websocket.recv.side_effect = recv
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
+    session_id = await zoo_tools.zoo_start_modeling_session()
+
+    command = asyncio.create_task(
+        zoo_tools.zoo_execute_modeling_command(
+            ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
+            ResponseEntityGetIndex,
+            "entity index",
+            session_id,
+        )
+    )
+    await asyncio.wait_for(response_started.wait(), timeout=1)
+    command.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await command
+
+    websocket.transport.abort.assert_called_once_with()
+    assert zoo_tools._modeling_session is None
+
+
+@pytest.mark.asyncio
+async def test_connection_close_mid_command_reports_a_dead_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    websocket = AsyncMock()
+    websocket.recv.side_effect = ConnectionClosedError(None, None)
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
+
+    session_id = await zoo_tools.zoo_start_modeling_session()
 
     with pytest.raises(ZooMCPException, match="no longer connected") as exc_info:
-        zoo_tools.zoo_execute_modeling_command(
+        await zoo_tools.zoo_execute_modeling_command(
             ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
             ResponseEntityGetIndex,
             "entity index",
@@ -950,13 +1071,14 @@ def test_connection_close_mid_command_reports_a_dead_session(
     assert zoo_tools._modeling_session is None
 
 
-def test_snapshot_shares_one_budget_across_all_its_commands(
+@pytest.mark.asyncio
+async def test_snapshot_shares_one_budget_across_all_its_commands(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Otherwise a four-view capture gets fourteen separate budgets."""
     seen: list[object] = []
 
-    def send_command(
+    async def send_command(
         ws: object,
         command: ModelingCmd,
         expected_response: type,
@@ -972,14 +1094,14 @@ def test_snapshot_shares_one_budget_across_all_its_commands(
     monkeypatch.setattr(
         zoo_tools,
         "_modeling_websocket",
-        lambda session_id: nullcontext(MagicMock()),
+        lambda session_id: _async_context(AsyncMock()),
     )
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
     monkeypatch.setattr(
         zoo_tools, "create_image_collage", MagicMock(return_value=b"collage")
     )
 
-    zoo_tools.zoo_snapshot(
+    await zoo_tools.zoo_snapshot(
         session_id="session-id",
         views=[_camera_view("front"), _camera_view("right")],
     )
@@ -989,17 +1111,18 @@ def test_snapshot_shares_one_budget_across_all_its_commands(
     assert len({id(deadline) for deadline in seen}) == 1
 
 
-def _stub_import_transport(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    websocket = MagicMock()
+def _stub_import_transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    websocket = AsyncMock()
     monkeypatch.setattr(
         zoo_tools,
         "_modeling_websocket",
-        lambda session_id: nullcontext(websocket),
+        lambda session_id: _async_context(websocket),
     )
     return websocket
 
 
-def test_import_logs_safe_metadata_and_outcome(
+@pytest.mark.asyncio
+async def test_import_logs_safe_metadata_and_outcome(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
@@ -1011,13 +1134,13 @@ def test_import_logs_safe_metadata_and_outcome(
     monkeypatch.setattr(
         zoo_tools,
         "_await_modeling_response",
-        lambda *args, **kwargs: SimpleNamespace(
-            data=SimpleNamespace(object_id="object-id")
+        AsyncMock(
+            return_value=SimpleNamespace(data=SimpleNamespace(object_id="object-id"))
         ),
     )
 
     with caplog.at_level("INFO", logger="zoo_mcp"):
-        assert zoo_tools.zoo_import_cad_file("session-id", step) == "object-id"
+        assert await zoo_tools.zoo_import_cad_file("session-id", step) == "object-id"
 
     records = [r.getMessage() for r in caplog.records if "CAD import" in r.getMessage()]
     assert len(records) == 2
@@ -1035,7 +1158,8 @@ def test_import_logs_safe_metadata_and_outcome(
         assert "SECRET-CUSTOMER-GEOMETRY" not in record
 
 
-def test_import_timeout_is_logged_and_raised(
+@pytest.mark.asyncio
+async def test_import_timeout_is_logged_and_raised(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
@@ -1044,7 +1168,7 @@ def test_import_timeout_is_logged_and_raised(
     step.write_bytes(b"ISO-10303-21;")
     _stub_import_transport(monkeypatch)
 
-    def timeout(*args: object, **kwargs: object) -> None:
+    async def timeout(*args: object, **kwargs: object) -> None:
         raise zoo_tools.ZooMCPTimeoutError("engine went quiet")
 
     monkeypatch.setattr(zoo_tools, "_await_modeling_response", timeout)
@@ -1053,7 +1177,7 @@ def test_import_timeout_is_logged_and_raised(
         caplog.at_level("INFO", logger="zoo_mcp"),
         pytest.raises(zoo_tools.ZooMCPTimeoutError),
     ):
-        zoo_tools.zoo_import_cad_file("session-id", step)
+        await zoo_tools.zoo_import_cad_file("session-id", step)
 
     assert any(
         "CAD import finished" in r.getMessage() and "outcome=timeout" in r.getMessage()
@@ -1061,7 +1185,8 @@ def test_import_timeout_is_logged_and_raised(
     )
 
 
-def test_import_waits_within_one_budget(
+@pytest.mark.asyncio
+async def test_import_waits_within_one_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     """The import's own read loop is the one the production hang sat in."""
@@ -1073,13 +1198,13 @@ def test_import_waits_within_one_budget(
     step.write_bytes(b"ISO-10303-21;")
     websocket = _stub_import_transport(monkeypatch)
 
-    def recv() -> SimpleNamespace:
+    async def recv() -> str:
         clock.advance(10.0)
         return _session_frame()
 
     websocket.recv.side_effect = recv
 
     with pytest.raises(zoo_tools.ZooMCPTimeoutError, match="CAD file import"):
-        zoo_tools.zoo_import_cad_file("session-id", step)
+        await zoo_tools.zoo_import_cad_file("session-id", step)
 
-    assert websocket.recv.call_count == 12
+    assert websocket.recv.await_count == 12

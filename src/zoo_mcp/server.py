@@ -110,6 +110,7 @@ from zoo_mcp.zoo_tools import (
     FaceInfo,
     ResultZooExecuteKcl,
     ResultZooExecuteKclLocal,
+    _abort_all_modeling_sessions,
     zoo_calculate_bounding_box_cad,
     zoo_calculate_bounding_box_kcl,
     zoo_calculate_cad_physical_properties,
@@ -188,7 +189,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        zoo_stop_all_modeling_sessions()
+        await zoo_stop_all_modeling_sessions()
         if _kcl_index_task is not None and not _kcl_index_task.done():
             _kcl_index_task.cancel()
         _kcl_index_task = None
@@ -212,24 +213,12 @@ async def _modeling_command(
     response_description: str,
     session_id: str,
 ) -> _ModelingResponseT:
-    """Run a modeling command without holding the event loop.
-
-    The modeling helpers read their websocket synchronously. Called inline from
-    an async tool they stall the whole server rather than just their own call:
-    MCP dispatches every tool handler onto one event loop, so a blocked read
-    starves the other in-flight tools, the stdin reader, and any cancellation
-    the client sends. Handing the read to a worker thread keeps this call
-    awaitable, so it is the tool's deadline that ends a stalled command.
-    """
-    # Called through a closure so the command's response type is resolved here
-    # rather than lost passing a generic function to to_thread.
-    return await asyncio.to_thread(
-        lambda: zoo_execute_modeling_command(
-            command,
-            expected_response,
-            response_description,
-            session_id,
-        )
+    """Run a modeling command through the asynchronous websocket."""
+    return await zoo_execute_modeling_command(
+        command,
+        expected_response,
+        response_description,
+        session_id,
     )
 
 
@@ -560,11 +549,8 @@ async def exec_kcl_project(
     logger.info("exec_kcl_project tool called")
 
     return str(
-        await asyncio.to_thread(
-            zoo_exec_kcl_project,
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            session_id=session_id,
+        await zoo_exec_kcl_project(
+            kcl_code=kcl_code, kcl_path=kcl_path, session_id=session_id
         )
     )
 
@@ -588,7 +574,7 @@ async def start_modeling_session() -> str:
         str: The session ID to pass to session-aware modeling tools.
     """
     logger.info("start_modeling_session tool called")
-    return await asyncio.to_thread(zoo_start_modeling_session)
+    return await zoo_start_modeling_session()
 
 
 @mcp.tool()
@@ -620,9 +606,7 @@ async def import_cad_file(session_id: str, input_file: str) -> str:
         str: The modeling engine ID of the imported object.
     """
     logger.info("import_cad_file tool called for file: %s", input_file)
-    return await asyncio.to_thread(
-        zoo_import_cad_file, session_id=session_id, input_file=input_file
-    )
+    return await zoo_import_cad_file(session_id=session_id, input_file=input_file)
 
 
 @mcp.tool()
@@ -640,7 +624,7 @@ async def stop_modeling_session(session_id: str) -> None:
         None
     """
     logger.info("stop_modeling_session tool called")
-    await asyncio.to_thread(zoo_stop_modeling_session, session_id)
+    await zoo_stop_modeling_session(session_id)
 
 
 @mcp.tool()
@@ -792,11 +776,7 @@ async def get_face_info(
     """
     logger.info("get_face_info tool called for face_id=%s", face_id)
 
-    return await asyncio.to_thread(
-        zoo_face_info,
-        face_id=Uuid(face_id),
-        session_id=session_id,
-    )
+    return await zoo_face_info(face_id=Uuid(face_id), session_id=session_id)
 
 
 @mcp.tool()
@@ -1387,8 +1367,7 @@ async def snapshot(
     """
     logger.info("snapshot tool called")
 
-    image = await asyncio.to_thread(
-        zoo_snapshot,
+    image = await zoo_snapshot(
         session_id=session_id,
         views=_resolve_camera_views(camera_view),
         max_image_dimension=max_image_dimension,
@@ -1496,7 +1475,7 @@ async def list_org_datasets() -> list[dict] | str:
     logger.info("list_org_datasets tool called")
 
     try:
-        return zoo_list_org_datasets()
+        return await zoo_list_org_datasets()
     except Exception as e:
         return f"There was an error listing org datasets: {e}"
 
@@ -1516,7 +1495,7 @@ async def list_org_skills() -> list[dict] | str:
     logger.info("list_org_skills tool called")
 
     try:
-        return zoo_list_org_skills()
+        return await zoo_list_org_skills()
     except Exception as e:
         return f"There was an error listing org skills: {e}"
 
@@ -1545,7 +1524,7 @@ async def search_org_dataset_semantic(
     logger.info("search_org_dataset_semantic tool called for dataset_id=%s", dataset_id)
 
     try:
-        return zoo_search_org_dataset_semantic(
+        return await zoo_search_org_dataset_semantic(
             dataset_id=dataset_id, query=query, limit=limit
         )
     except Exception as e:
@@ -1741,6 +1720,11 @@ def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:
     raise KeyboardInterrupt
 
 
+def _abort_modeling_sessions_at_exit() -> None:
+    """Best-effort fallback for exits outside the FastMCP lifespan."""
+    _abort_all_modeling_sessions()
+
+
 def install_shutdown_handlers() -> None:
     """Make the server close its modeling sessions on the way out."""
     try:
@@ -1750,7 +1734,7 @@ def install_shutdown_handlers() -> None:
         # application owns signal disposition.
         logger.debug("Not on the main thread, leaving signal handlers alone")
 
-    atexit.register(zoo_stop_all_modeling_sessions)
+    atexit.register(_abort_modeling_sessions_at_exit)
 
 
 def main():
