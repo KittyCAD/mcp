@@ -1050,6 +1050,32 @@ async def test_execute_with_retries_retries_then_succeeds(
 
 
 @pytest.mark.asyncio
+async def test_execute_with_retries_recovers_from_missing_websocket_auth_header(
+    retry_delays: list[float],
+):
+    calls = 0
+
+    async def fn() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _RetryableError(
+                'engine: Please send { headers: { Authorization: "Bearer <token>" } } '
+                "over this websocket",
+                retryable=False,
+            )
+        return "recovered"
+
+    with zoo_mcp.zoo_tools.capture_execution_retry_events() as events:
+        result = await zoo_mcp.zoo_tools._execute_with_retries(fn)
+
+    assert result == "recovered"
+    assert calls == 2
+    assert retry_delays == [0.25]
+    assert [event.outcome for event in events] == ["retry_scheduled", "recovered"]
+
+
+@pytest.mark.asyncio
 async def test_execute_with_retries_exhausts_attempts(
     retry_delays: list[float],
 ):
