@@ -730,6 +730,7 @@ async def visualize_sketch(
     modeling session. ``sketch_name`` is the variable assigned to the sketch,
     such as ``profile`` in ``profile = sketch(on = XY) { ... }``. Use
     ``get_sketch_constraint_status`` to discover sketch names when needed.
+    A failure in KCL after the named sketch does not block its render.
 
     Args:
         sketch_name: Variable name of the sketch to render.

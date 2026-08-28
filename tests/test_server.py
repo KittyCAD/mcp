@@ -1450,6 +1450,31 @@ s2 = sketch(on = XZ) {
 }
 """
 
+SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL = f"""
+{SKETCH_VISUALIZER_KCL}
+
+extrude(missingSketch, length = 5mm)
+"""
+
+
+def test_source_through_sketch_keeps_complete_pipeline():
+    source = """
+profile = startSketchOn(XY)
+  |> startProfile(at = [0, 0])
+  |> xLine(length = 10)
+  |> yLine(length = 10)
+  |> xLine(length = -10)
+  |> close()
+
+broken = missingValue
+"""
+
+    isolated = zoo_mcp.zoo_tools._source_through_sketch(source, "profile")
+
+    assert isolated is not None
+    assert "|> close()" in isolated
+    assert "broken = missingValue" not in isolated
+
 
 @pytest.mark.asyncio
 async def test_visualize_sketch_returns_png():
@@ -1469,6 +1494,52 @@ async def test_visualize_sketch_returns_png():
     assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
     with PILImage.open(io.BytesIO(png_bytes)) as png:
         assert png.format == "PNG"
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_ignores_downstream_execution_error():
+    response = await mcp.call_tool(
+        "visualize_sketch",
+        arguments={
+            "sketch_name": "s1",
+            "kcl_code": SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL,
+            "kcl_path": None,
+        },
+    )
+
+    image = _content_list(response)[0]
+    assert isinstance(image, ImageContent)
+    assert image.mimeType == "image/png"
+    assert base64.b64decode(image.data).startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_path_ignores_downstream_execution_error(
+    tmp_path: Path,
+):
+    project_code = SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL.replace(
+        "@settings(experimentalFeatures = allow)",
+        '@settings(experimentalFeatures = allow)\n\nimport unused from "helper.kcl"',
+        1,
+    )
+    kcl_path = tmp_path / "main.kcl"
+    kcl_path.write_text(project_code)
+    (tmp_path / "helper.kcl").write_text("export unused = 1\n")
+
+    response = await mcp.call_tool(
+        "visualize_sketch",
+        arguments={
+            "sketch_name": "s1",
+            "kcl_code": None,
+            "kcl_path": str(kcl_path),
+        },
+    )
+
+    image = _content_list(response)[0]
+    assert isinstance(image, ImageContent)
+    assert image.mimeType == "image/png"
+    assert base64.b64decode(image.data).startswith(b"\x89PNG\r\n\x1a\n")
+    assert kcl_path.read_text() == project_code
 
 
 @pytest.mark.asyncio
