@@ -1861,7 +1861,70 @@ async def zoo_get_sketch_constraint_status(
         raise ZooMCPException(f"Failed to get sketch constraint status: {e}")
 
 
-_KCL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+def _starts_with_pipeline_after_comments(source: str) -> bool:
+    """Return whether the next KCL token is a pipeline continuation."""
+    remaining = source
+    while True:
+        remaining = remaining.lstrip()
+        if remaining.startswith("//"):
+            _, separator, remaining = remaining.partition("\n")
+            if not separator:
+                return False
+            continue
+        if remaining.startswith("/*"):
+            comment_end = remaining.find("*/", 2)
+            if comment_end < 0:
+                return False
+            remaining = remaining[comment_end + 2 :]
+            continue
+        return remaining.startswith("|>")
+
+
+def _mask_kcl_non_code(source: str) -> str:
+    """Mask KCL comments and strings while preserving source positions."""
+    masked = list(source)
+    index = 0
+    in_string = False
+    while index < len(source):
+        if in_string:
+            if source[index] == "\\":
+                masked[index] = " "
+                if index + 1 < len(source) and source[index + 1] != "\n":
+                    masked[index + 1] = " "
+                index += 2
+                continue
+            if source[index] == '"':
+                in_string = False
+            if source[index] != "\n":
+                masked[index] = " "
+            index += 1
+            continue
+
+        if source[index] == '"':
+            in_string = True
+            masked[index] = " "
+            index += 1
+            continue
+        if source.startswith("//", index):
+            comment_end = source.find("\n", index + 2)
+            if comment_end < 0:
+                comment_end = len(source)
+            masked[index:comment_end] = " " * (comment_end - index)
+            index = comment_end
+            continue
+        if source.startswith("/*", index):
+            comment_end = source.find("*/", index + 2)
+            if comment_end < 0:
+                comment_end = len(source)
+            else:
+                comment_end += 2
+            for comment_index in range(index, comment_end):
+                if masked[comment_index] != "\n":
+                    masked[comment_index] = " "
+            index = comment_end
+            continue
+        index += 1
+    return "".join(masked)
 
 
 def _source_through_sketch(kcl_code: str, sketch_name: str) -> str | None:
@@ -1873,33 +1936,28 @@ def _source_through_sketch(kcl_code: str, sketch_name: str) -> str | None:
     must stay attached to the declaration: ``startSketchOn`` alone is valid
     KCL but would render an incomplete sketch before its ``|>`` operations.
     """
-    if _KCL_IDENTIFIER.fullmatch(sketch_name) is None:
+    if not sketch_name:
         return None
 
     lines = kcl_code.splitlines(keepends=True)
-    declaration = re.compile(rf"^(?:export[ \t]+)?{re.escape(sketch_name)}[ \t]*=")
-    declaration_line = next(
-        (index for index, line in enumerate(lines) if declaration.match(line)), None
+    searchable_source = _mask_kcl_non_code(kcl_code)
+    declaration = re.compile(
+        rf"^[ \t]*(?:export[ \t]+)?{re.escape(sketch_name)}[ \t\r\n]*=",
+        re.MULTILINE,
     )
-    if declaration_line is None:
+    declaration_match = declaration.search(searchable_source)
+    if declaration_match is None:
         return None
+    declaration_end_line = searchable_source.count("\n", 0, declaration_match.end())
 
-    for end in range(declaration_line + 1, len(lines) + 1):
+    for end in range(declaration_end_line + 1, len(lines) + 1):
         candidate = "".join(lines[:end])
         try:
             kcl.parse_code(candidate)
         except kcl.KclError:
             continue
 
-        next_code_line = next(
-            (
-                line.strip()
-                for line in lines[end:]
-                if line.strip() and not line.lstrip().startswith("//")
-            ),
-            None,
-        )
-        if next_code_line is not None and next_code_line.startswith("|>"):
+        if _starts_with_pipeline_after_comments("".join(lines[end:])):
             continue
         return candidate
 
@@ -1925,6 +1983,10 @@ def _copy_project_with_entrypoint(
             copied.write_text(entrypoint_code)
         else:
             copied.write_bytes(source.read_bytes())
+
+    project_manifest = root / "project.toml"
+    if project_manifest.is_file():
+        (destination / project_manifest.name).write_bytes(project_manifest.read_bytes())
 
     return copied_entrypoint
 
@@ -1999,11 +2061,7 @@ async def zoo_visualize_sketch(
                     str(kcl_path),
                     _operation="visualize_sketch",
                 )
-        except Exception as execution_error:
-            is_retryable = getattr(execution_error, "is_retryable", None)
-            if callable(is_retryable) and is_retryable():
-                raise
-
+        except Exception:
             isolated_outcome = await _execute_through_sketch(
                 sketch_name=sketch_name,
                 kcl_code=kcl_code,
