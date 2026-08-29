@@ -13,12 +13,14 @@ import pytest_asyncio
 from kittycad.models import (
     EntityGetIndex,
     ModelingCmd,
+    StepImportTargetRepresentation,
     TakeSnapshot,
     WebSocketRequest,
     WebSocketResponse,
 )
 from kittycad.models.api_error import ApiError
 from kittycad.models.failure_web_socket_response import FailureWebSocketResponse
+from kittycad.models.input_format3d import OptionStep
 from kittycad.models.modeling_cmd import (
     OptionDefaultCameraLookAt,
     OptionDefaultCameraSetOrthographic,
@@ -1119,6 +1121,31 @@ def _stub_import_transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
         lambda session_id: _async_context(websocket),
     )
     return websocket
+
+
+def test_step_import_defaults_to_editable_brep() -> None:
+    input_format = zoo_tools._get_input_format("step")
+
+    assert input_format is not None
+    assert isinstance(input_format.root, OptionStep)
+    assert (
+        input_format.root.target_representation == StepImportTargetRepresentation.BREP
+    )
+    assert input_format.root.split_closed_faces is True
+
+
+def test_step_import_can_request_render_only_mesh() -> None:
+    input_format = zoo_tools._get_input_format(
+        "step",
+        step_target_representation=StepImportTargetRepresentation.MESH,
+    )
+
+    assert input_format is not None
+    assert isinstance(input_format.root, OptionStep)
+    assert (
+        input_format.root.target_representation == StepImportTargetRepresentation.MESH
+    )
+    assert input_format.root.split_closed_faces is False
 
 
 @pytest.mark.asyncio

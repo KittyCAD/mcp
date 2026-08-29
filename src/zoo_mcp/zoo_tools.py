@@ -52,6 +52,7 @@ from kittycad.models import (
     Point2d,
     Point3d,
     PostEffectType,
+    StepImportTargetRepresentation,
     System,
     UnitArea,
     UnitDensity,
@@ -659,7 +660,13 @@ async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
     return volume
 
 
-def _get_input_format(ext: str) -> InputFormat3d | None:
+def _get_input_format(
+    ext: str,
+    *,
+    step_target_representation: StepImportTargetRepresentation = (
+        StepImportTargetRepresentation.BREP
+    ),
+) -> InputFormat3d | None:
     match ext.lower():
         case "fbx":
             return InputFormat3d(OptionFbx())
@@ -692,7 +699,15 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
         case "sldprt":
             return InputFormat3d(OptionSldprt(split_closed_faces=True))
         case "step" | "stp":
-            return InputFormat3d(OptionStep(split_closed_faces=True))
+            return InputFormat3d(
+                OptionStep(
+                    split_closed_faces=(
+                        step_target_representation
+                        == StepImportTargetRepresentation.BREP
+                    ),
+                    target_representation=step_target_representation,
+                )
+            )
         case "stl":
             return InputFormat3d(
                 OptionStl(
@@ -708,8 +723,19 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
     return None
 
 
-async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
+async def zoo_import_cad_file(
+    session_id: str,
+    input_file: Path | str,
+    *,
+    step_target_representation: StepImportTargetRepresentation = (
+        StepImportTargetRepresentation.BREP
+    ),
+) -> str:
     """Import a CAD file into the scene and return the imported object's id.
+
+    STEP defaults to an editable B-rep for the public MCP import tool. Render-only
+    callers can explicitly request ``StepImportTargetRepresentation.MESH`` to
+    bypass B-rep reconstruction.
 
     Sent as a binary frame rather than through ``_send_modeling_command``
     because the file contents are binary in MsgPack encoding.
@@ -723,7 +749,10 @@ async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
             f"expected one of {sorted(SUPPORTED_EXTS)}"
         )
 
-    input_format = _get_input_format(input_ext)
+    input_format = _get_input_format(
+        input_ext,
+        step_target_representation=step_target_representation,
+    )
     if input_format is None:
         raise ZooMCPException(f"'{input_ext}' files cannot be imported")
 
