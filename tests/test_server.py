@@ -14,6 +14,7 @@ import pytest_asyncio
 from kittycad import AsyncKittyCAD
 from kittycad.exceptions import KittyCADClientError
 from kittycad.models import (
+    ApiCallStatus,
     FaceGetCenter,
     FaceGetGradient,
     FaceGetPosition,
@@ -21,6 +22,7 @@ from kittycad.models import (
     OrgDataset,
     Point3d,
 )
+from kittycad.models.async_api_call_output import OptionFileMass, OptionFileVolume
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ImageContent, TextContent
 from PIL import Image as PILImage
@@ -200,6 +202,233 @@ async def test_calculate_volume(cube_stl: str):
     result = _meta_result(response)
     assert isinstance(result, float)
     assert result == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_calculate_volume_polls_async_operation(
+    monkeypatch: pytest.MonkeyPatch,
+    cube_stl: str,
+    async_kittycad_client: AsyncKittyCAD,
+):
+    operation_id = "d4154735-9cf8-4bc4-98a4-7c7af077388f"
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "FILE_API_CALL_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "create_file_volume",
+        AsyncMock(
+            return_value=FileVolume.model_construct(
+                id=operation_id,
+                status=ApiCallStatus.UPLOADED,
+                volume=None,
+            )
+        ),
+    )
+    get_async_operation = AsyncMock(
+        side_effect=[
+            SimpleNamespace(
+                root=OptionFileVolume.model_construct(
+                    id=operation_id,
+                    status=ApiCallStatus.IN_PROGRESS,
+                    volume=None,
+                )
+            ),
+            SimpleNamespace(
+                root=OptionFileVolume.model_construct(
+                    id=operation_id,
+                    status=ApiCallStatus.COMPLETED,
+                    volume=42.0,
+                )
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        async_kittycad_client.api_calls,
+        "get_async_operation",
+        get_async_operation,
+    )
+
+    response = await mcp.call_tool(
+        "calculate_volume",
+        arguments={"input_file": cube_stl, "unit_volume": "cm3"},
+    )
+
+    assert _meta_result(response) == pytest.approx(42.0)
+    assert get_async_operation.await_count == 2
+    get_async_operation.assert_awaited_with(id=operation_id)
+
+
+@pytest.mark.asyncio
+async def test_pending_async_file_operation_does_not_starve_other_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    cube_stl: str,
+    async_kittycad_client: AsyncKittyCAD,
+):
+    operation_id = "533575ce-740a-4101-9094-a59a26d377c1"
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "create_file_volume",
+        AsyncMock(
+            return_value=FileVolume.model_construct(
+                id=operation_id,
+                status=ApiCallStatus.UPLOADED,
+                volume=None,
+            )
+        ),
+    )
+
+    async def delayed_async_result(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        entered.set()
+        await release.wait()
+        return SimpleNamespace(
+            root=OptionFileVolume.model_construct(
+                id=operation_id,
+                status=ApiCallStatus.COMPLETED,
+                volume=42.0,
+            )
+        )
+
+    monkeypatch.setattr(
+        async_kittycad_client.api_calls,
+        "get_async_operation",
+        delayed_async_result,
+    )
+
+    pending = asyncio.create_task(
+        mcp.call_tool(
+            "calculate_volume",
+            arguments={"input_file": cube_stl, "unit_volume": "cm3"},
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    other = await asyncio.wait_for(
+        mcp.call_tool("get_modeling_sessions", arguments={}), timeout=1
+    )
+    assert _meta_result(other) == []
+    assert not pending.done()
+
+    release.set()
+    assert _meta_result(await pending) == pytest.approx(42.0)
+
+
+@pytest.mark.asyncio
+async def test_calculate_volume_surfaces_async_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    cube_stl: str,
+    async_kittycad_client: AsyncKittyCAD,
+):
+    operation_id = "06f632ae-4da3-45fa-ad6e-d24566aba7e3"
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "create_file_volume",
+        AsyncMock(
+            return_value=FileVolume.model_construct(
+                id=operation_id,
+                status=ApiCallStatus.QUEUED,
+                volume=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        async_kittycad_client.api_calls,
+        "get_async_operation",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                root=OptionFileVolume.model_construct(
+                    id=operation_id,
+                    status=ApiCallStatus.FAILED,
+                    error="unsupported topology",
+                    volume=None,
+                )
+            )
+        ),
+    )
+
+    response = await mcp.call_tool(
+        "calculate_volume",
+        arguments={"input_file": cube_stl, "unit_volume": "cm3"},
+    )
+
+    result = _meta_result(response)
+    assert "operation 06f632ae-4da3-45fa-ad6e-d24566aba7e3 failed" in result
+    assert "unsupported topology" in result
+
+
+@pytest.mark.asyncio
+async def test_calculate_volume_rejects_wrong_async_result_variant(
+    monkeypatch: pytest.MonkeyPatch,
+    cube_stl: str,
+    async_kittycad_client: AsyncKittyCAD,
+):
+    operation_id = "35bf3830-9f6d-49fc-b2d0-bc74a18c1680"
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "create_file_volume",
+        AsyncMock(
+            return_value=FileVolume.model_construct(
+                id=operation_id,
+                status=ApiCallStatus.UPLOADED,
+                volume=None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        async_kittycad_client.api_calls,
+        "get_async_operation",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                root=OptionFileMass.model_construct(
+                    id=operation_id,
+                    status=ApiCallStatus.COMPLETED,
+                    mass=42.0,
+                )
+            )
+        ),
+    )
+
+    response = await mcp.call_tool(
+        "calculate_volume",
+        arguments={"input_file": cube_stl, "unit_volume": "cm3"},
+    )
+
+    assert "returned file_mass" in _meta_result(response)
+
+
+@pytest.mark.asyncio
+async def test_calculate_volume_bounds_async_polling(
+    monkeypatch: pytest.MonkeyPatch,
+    cube_stl: str,
+    async_kittycad_client: AsyncKittyCAD,
+):
+    operation_id = "d1c29e7e-0f6b-460b-b871-3d976510ff20"
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "FILE_API_CALL_TIMEOUT", 0.0)
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "create_file_volume",
+        AsyncMock(
+            return_value=FileVolume.model_construct(
+                id=operation_id,
+                status=ApiCallStatus.IN_PROGRESS,
+                volume=None,
+            )
+        ),
+    )
+    get_async_operation = AsyncMock()
+    monkeypatch.setattr(
+        async_kittycad_client.api_calls,
+        "get_async_operation",
+        get_async_operation,
+    )
+
+    response = await mcp.call_tool(
+        "calculate_volume",
+        arguments={"input_file": cube_stl, "unit_volume": "cm3"},
+    )
+
+    assert "Timed out waiting for calculate volume operation" in _meta_result(response)
+    get_async_operation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
