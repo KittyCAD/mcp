@@ -289,7 +289,29 @@ def _check_kcl_code_or_path(
 # retry behavior the bindings' own tests use.
 MAX_EXECUTION_ATTEMPTS = 3
 
+# The native zoo-kcl client supplies its bearer token on the WebSocket HTTP
+# upgrade. The API can nevertheless intermittently report that this particular
+# socket did not receive the header. zoo-kcl does not currently classify that
+# response as retryable, but a fresh execution creates a fresh authenticated
+# socket and recovers. Match the server's distinctive instruction rather than
+# broad authentication text so invalid or expired credentials still fail fast.
+_TRANSIENT_WEBSOCKET_AUTH_ERROR_MARKERS = (
+    "Authorization",
+    "Bearer <token>",
+    "over this websocket",
+)
+
 _KclCoro = Callable[..., Awaitable[_T]]
+
+
+def _is_retryable_execution_error(error: Exception) -> bool:
+    """Return whether a KCL execution should be retried on a fresh socket."""
+    message = str(error)
+    if all(marker in message for marker in _TRANSIENT_WEBSOCKET_AUTH_ERROR_MARKERS):
+        return True
+
+    is_retryable = getattr(error, "is_retryable", None)
+    return callable(is_retryable) and is_retryable()
 
 
 async def _execute_with_retries(
@@ -315,8 +337,7 @@ async def _execute_with_retries(
         try:
             return await async_fn(*args, **kwargs)
         except Exception as error:
-            is_retryable = getattr(error, "is_retryable", None)
-            if retries_remaining > 0 and callable(is_retryable) and is_retryable():
+            if retries_remaining > 0 and _is_retryable_execution_error(error):
                 logger.warning(
                     "Retryable KCL execution error, retrying (%d attempt(s) left): %s",
                     retries_remaining,
