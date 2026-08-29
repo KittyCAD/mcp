@@ -1123,7 +1123,7 @@ def _stub_import_transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return websocket
 
 
-def test_step_import_defaults_to_editable_brep() -> None:
+def test_editable_step_import_uses_brep() -> None:
     input_format = zoo_tools._get_input_format("step")
 
     assert input_format is not None
@@ -1134,11 +1134,8 @@ def test_step_import_defaults_to_editable_brep() -> None:
     assert input_format.root.split_closed_faces is True
 
 
-def test_step_import_can_request_render_only_mesh() -> None:
-    input_format = zoo_tools._get_input_format(
-        "step",
-        step_target_representation=StepImportTargetRepresentation.MESH,
-    )
+def test_render_only_step_import_uses_mesh_without_brep_fallback() -> None:
+    input_format = zoo_tools._get_render_input_format("step")
 
     assert input_format is not None
     assert isinstance(input_format.root, OptionStep)
@@ -1146,6 +1143,12 @@ def test_step_import_can_request_render_only_mesh() -> None:
         input_format.root.target_representation == StepImportTargetRepresentation.MESH
     )
     assert input_format.root.split_closed_faces is False
+
+
+def test_render_only_non_step_import_keeps_its_native_format() -> None:
+    assert zoo_tools._get_render_input_format("obj") == zoo_tools._get_input_format(
+        "obj"
+    )
 
 
 @pytest.mark.asyncio

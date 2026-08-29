@@ -660,13 +660,7 @@ async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
     return volume
 
 
-def _get_input_format(
-    ext: str,
-    *,
-    step_target_representation: StepImportTargetRepresentation = (
-        StepImportTargetRepresentation.BREP
-    ),
-) -> InputFormat3d | None:
+def _get_input_format(ext: str) -> InputFormat3d | None:
     match ext.lower():
         case "fbx":
             return InputFormat3d(OptionFbx())
@@ -701,11 +695,8 @@ def _get_input_format(
         case "step" | "stp":
             return InputFormat3d(
                 OptionStep(
-                    split_closed_faces=(
-                        step_target_representation
-                        == StepImportTargetRepresentation.BREP
-                    ),
-                    target_representation=step_target_representation,
+                    split_closed_faces=True,
+                    target_representation=StepImportTargetRepresentation.BREP,
                 )
             )
         case "stl":
@@ -723,22 +714,27 @@ def _get_input_format(
     return None
 
 
-async def zoo_import_cad_file(
+def _get_render_input_format(ext: str) -> InputFormat3d | None:
+    """Return a non-editable input format suitable for scene rendering."""
+    if ext.lower() in {"step", "stp"}:
+        return InputFormat3d(
+            OptionStep(
+                split_closed_faces=False,
+                target_representation=StepImportTargetRepresentation.MESH,
+            )
+        )
+    return _get_input_format(ext)
+
+
+async def _zoo_import_cad_file(
     session_id: str,
     input_file: Path | str,
-    *,
-    step_target_representation: StepImportTargetRepresentation = (
-        StepImportTargetRepresentation.BREP
-    ),
+    input_format_for: Callable[[str], InputFormat3d | None],
 ) -> str:
-    """Import a CAD file into the scene and return the imported object's id.
+    """Import a CAD file with a caller-owned representation policy.
 
-    STEP defaults to an editable B-rep for the public MCP import tool. Render-only
-    callers can explicitly request ``StepImportTargetRepresentation.MESH`` to
-    bypass B-rep reconstruction.
-
-    Sent as a binary frame rather than through ``_send_modeling_command``
-    because the file contents are binary in MsgPack encoding.
+    This stays private so public callers cannot select or fall back between the
+    editing and render-only STEP representations.
     """
     input_file = Path(input_file)
 
@@ -749,10 +745,7 @@ async def zoo_import_cad_file(
             f"expected one of {sorted(SUPPORTED_EXTS)}"
         )
 
-    input_format = _get_input_format(
-        input_ext,
-        step_target_representation=step_target_representation,
-    )
+    input_format = input_format_for(input_ext)
     if input_format is None:
         raise ZooMCPException(f"'{input_ext}' files cannot be imported")
 
@@ -813,6 +806,30 @@ async def zoo_import_cad_file(
 
         log_stage("finished", "imported")
         return response.data.object_id
+
+
+async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
+    """Import editable CAD geometry and return the imported object's id.
+
+    The public MCP import tool uses this editing-oriented path. STEP files are
+    loaded as B-reps.
+    """
+    return await _zoo_import_cad_file(session_id, input_file, _get_input_format)
+
+
+async def zoo_import_cad_file_for_rendering(
+    session_id: str, input_file: Path | str
+) -> str:
+    """Import non-editable CAD geometry for snapshots.
+
+    STEP files are always loaded as meshes. This path neither accepts a target
+    representation nor falls back to B-rep when mesh import fails.
+    """
+    return await _zoo_import_cad_file(
+        session_id,
+        input_file,
+        _get_render_input_format,
+    )
 
 
 async def zoo_calculate_cad_physical_properties(
