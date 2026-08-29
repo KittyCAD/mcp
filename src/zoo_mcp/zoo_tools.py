@@ -52,6 +52,7 @@ from kittycad.models import (
     Point2d,
     Point3d,
     PostEffectType,
+    StepImportTargetRepresentation,
     System,
     UnitArea,
     UnitDensity,
@@ -692,7 +693,12 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
         case "sldprt":
             return InputFormat3d(OptionSldprt(split_closed_faces=True))
         case "step" | "stp":
-            return InputFormat3d(OptionStep(split_closed_faces=True))
+            return InputFormat3d(
+                OptionStep(
+                    split_closed_faces=False,
+                    target_representation=StepImportTargetRepresentation.MESH,
+                )
+            )
         case "stl":
             return InputFormat3d(
                 OptionStl(
@@ -711,8 +717,8 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
 async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
     """Import a CAD file into the scene and return the imported object's id.
 
-    Sent as a binary frame rather than through ``_send_modeling_command``
-    because the file contents are binary in MsgPack encoding.
+    STEP files are always imported as meshes. B-rep STEP import is not supported,
+    and import failure is returned without a B-rep fallback.
     """
     input_file = Path(input_file)
 
