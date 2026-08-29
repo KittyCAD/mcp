@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 from kittycad.exceptions import KittyCADClientError
 from kittycad.models import (
+    ApiCallStatus,
     Axis,
     AxisDirectionPair,
     Direction,
@@ -136,10 +137,107 @@ SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 # retryable error instead of an abandoned request.
 MODELING_COMMAND_TIMEOUT = 300.0
 
+# Large file-analysis requests are asynchronous. Leave enough headroom under
+# the enclosing 300-second tool budget to surface a typed timeout instead of
+# letting the caller abandon the request while it is still polling.
+FILE_API_CALL_TIMEOUT = 285.0
+FILE_API_CALL_POLL_INTERVAL = 1.0
+
+_PENDING_API_CALL_STATUSES = {
+    ApiCallStatus.QUEUED,
+    ApiCallStatus.UPLOADED,
+    ApiCallStatus.IN_PROGRESS,
+}
+
+FileApiCall: TypeAlias = (
+    FileCenterOfMass | FileConversion | FileMass | FileSurfaceArea | FileVolume
+)
+_FileApiCallT = TypeVar("_FileApiCallT", bound=FileApiCall)
+
+_ASYNC_FILE_API_CALL_TYPES: dict[type[FileApiCall], str] = {
+    FileCenterOfMass: "file_center_of_mass",
+    FileConversion: "file_conversion",
+    FileMass: "file_mass",
+    FileSurfaceArea: "file_surface_area",
+    FileVolume: "file_volume",
+}
+
 # Map alternative extensions to their canonical FileImportFormat values
 _EXT_ALIASES = {
     "stp": "step",
 }
+
+
+async def _resolve_file_api_call(
+    client: AsyncKittyCAD,
+    result: object,
+    expected_type: type[_FileApiCallT],
+    operation_name: str,
+    *,
+    deadline: float | None = None,
+) -> _FileApiCallT:
+    """Resolve a synchronous or asynchronous Zoo file API response."""
+    if not isinstance(result, expected_type):
+        raise ZooMCPException(
+            f"Failed to {operation_name}, incorrect return type {type(result)}"
+        )
+
+    current = result
+    if deadline is None:
+        deadline = monotonic() + FILE_API_CALL_TIMEOUT
+
+    status = getattr(current, "status", ApiCallStatus.COMPLETED)
+    while status in _PENDING_API_CALL_STATUSES:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for {operation_name} operation {current.id}"
+            )
+
+        logger.info(
+            "Waiting for %s operation %s (status=%s)",
+            operation_name,
+            current.id,
+            status.value,
+        )
+        try:
+            async with asyncio.timeout(remaining):
+                polled = await client.api_calls.get_async_operation(id=str(current.id))
+        except TimeoutError as error:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for {operation_name} operation {current.id}"
+            ) from error
+
+        async_result = polled.root
+        expected_async_type = _ASYNC_FILE_API_CALL_TYPES[expected_type]
+        if getattr(async_result, "type", None) != expected_async_type:
+            raise ZooMCPException(
+                f"Failed to {operation_name}, async operation {current.id} "
+                f"returned {getattr(async_result, 'type', type(async_result))}"
+            )
+
+        current = expected_type.model_construct(
+            **async_result.model_dump(exclude={"type"})
+        )
+        status = current.status
+        if status in _PENDING_API_CALL_STATUSES:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                continue
+            await asyncio.sleep(min(FILE_API_CALL_POLL_INTERVAL, remaining))
+
+    if status == ApiCallStatus.FAILED:
+        detail = current.error or "the worker returned no error detail"
+        raise ZooMCPException(
+            f"Failed to {operation_name}, operation {current.id} failed: {detail}"
+        )
+    if status != ApiCallStatus.COMPLETED:
+        raise ZooMCPException(
+            f"Failed to {operation_name}, operation {current.id} returned "
+            f"unexpected status {status.value}"
+        )
+
+    return current
 
 
 def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[int]]]]:
@@ -500,15 +598,11 @@ async def zoo_calculate_center_of_mass(
             body=data,
             output_unit=UnitLength(unit_length),
         )
-
-    if not isinstance(result, FileCenterOfMass):
-        logger.info(
-            "Failed to calculate center of mass, incorrect return type %s",
-            type(result),
-        )
-        raise ZooMCPException(
-            "Failed to calculate center of mass, incorrect return type %s",
-            type(result),
+        result = await _resolve_file_api_call(
+            client,
+            result,
+            FileCenterOfMass,
+            "calculate center of mass",
         )
 
     com = result.center_of_mass.to_dict() if result.center_of_mass is not None else None
@@ -556,11 +650,11 @@ async def zoo_calculate_mass(
             material_density_unit=UnitDensity(unit_density),
             material_density=density,
         )
-
-    if not isinstance(result, FileMass):
-        logger.info("Failed to calculate mass, incorrect return type %s", type(result))
-        raise ZooMCPException(
-            "Failed to calculate mass, incorrect return type %s", type(result)
+        result = await _resolve_file_api_call(
+            client,
+            result,
+            FileMass,
+            "calculate mass",
         )
 
     mass = result.mass
@@ -597,14 +691,11 @@ async def zoo_calculate_surface_area(file_path: Path | str, unit_area: str) -> f
             src_format=src_format,
             body=data,
         )
-
-    if not isinstance(result, FileSurfaceArea):
-        logger.error(
-            "Failed to calculate surface area, incorrect return type %s",
-            type(result),
-        )
-        raise ZooMCPException(
-            "Failed to calculate surface area, incorrect return type %s",
+        result = await _resolve_file_api_call(
+            client,
+            result,
+            FileSurfaceArea,
+            "calculate surface area",
         )
 
     surface_area = result.surface_area
@@ -643,13 +734,11 @@ async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
             src_format=src_format,
             body=data,
         )
-
-    if not isinstance(result, FileVolume):
-        logger.info(
-            "Failed to calculate volume, incorrect return type %s", type(result)
-        )
-        raise ZooMCPException(
-            "Failed to calculate volume, incorrect return type %s", type(result)
+        result = await _resolve_file_api_call(
+            client,
+            result,
+            FileVolume,
+            "calculate volume",
         )
 
     volume = result.volume
@@ -826,6 +915,7 @@ async def zoo_calculate_cad_physical_properties(
 
     normalized_ext = _normalize_ext(file_path.suffix.split(".")[1])
     src_format = FileImportFormat(normalized_ext)
+    deadline = monotonic() + FILE_API_CALL_TIMEOUT
 
     async with AsyncKittyCAD(verify_ssl=ctx) as client:
         volume_result = await client.file.create_file_volume(
@@ -833,7 +923,14 @@ async def zoo_calculate_cad_physical_properties(
             src_format=src_format,
             body=data,
         )
-        if not isinstance(volume_result, FileVolume) or volume_result.volume is None:
+        volume_result = await _resolve_file_api_call(
+            client,
+            volume_result,
+            FileVolume,
+            "calculate volume",
+            deadline=deadline,
+        )
+        if volume_result.volume is None:
             raise ZooMCPException("Failed to calculate volume")
 
         mass_result = await client.file.create_file_mass(
@@ -843,7 +940,14 @@ async def zoo_calculate_cad_physical_properties(
             material_density_unit=UnitDensity(unit_density),
             material_density=density,
         )
-        if not isinstance(mass_result, FileMass) or mass_result.mass is None:
+        mass_result = await _resolve_file_api_call(
+            client,
+            mass_result,
+            FileMass,
+            "calculate mass",
+            deadline=deadline,
+        )
+        if mass_result.mass is None:
             raise ZooMCPException("Failed to calculate mass")
 
         sa_result = await client.file.create_file_surface_area(
@@ -851,7 +955,14 @@ async def zoo_calculate_cad_physical_properties(
             src_format=src_format,
             body=data,
         )
-        if not isinstance(sa_result, FileSurfaceArea) or sa_result.surface_area is None:
+        sa_result = await _resolve_file_api_call(
+            client,
+            sa_result,
+            FileSurfaceArea,
+            "calculate surface area",
+            deadline=deadline,
+        )
+        if sa_result.surface_area is None:
             raise ZooMCPException("Failed to calculate surface area")
 
         com_result = await client.file.create_file_center_of_mass(
@@ -859,10 +970,14 @@ async def zoo_calculate_cad_physical_properties(
             body=data,
             output_unit=UnitLength(unit_length),
         )
-        if (
-            not isinstance(com_result, FileCenterOfMass)
-            or com_result.center_of_mass is None
-        ):
+        com_result = await _resolve_file_api_call(
+            client,
+            com_result,
+            FileCenterOfMass,
+            "calculate center of mass",
+            deadline=deadline,
+        )
+        if com_result.center_of_mass is None:
             raise ZooMCPException("Failed to calculate center of mass")
 
         if normalized_ext == "stl":
@@ -873,10 +988,13 @@ async def zoo_calculate_cad_physical_properties(
                 output_format=FileExportFormat.STL,
                 body=data,
             )
-            if not isinstance(stl_result, FileConversion):
-                raise ZooMCPException(
-                    "Failed to convert file for bounding box calculation"
-                )
+            stl_result = await _resolve_file_api_call(
+                client,
+                stl_result,
+                FileConversion,
+                "convert file for bounding box calculation",
+                deadline=deadline,
+            )
             if stl_result.outputs is None or len(stl_result.outputs) == 0:
                 raise ZooMCPException(
                     "Failed to convert file for bounding box calculation, no output"
@@ -1082,11 +1200,11 @@ async def zoo_calculate_bounding_box_cad(
             output_format=FileExportFormat.STL,
             body=data,
         )
-
-    if not isinstance(stl_result, FileConversion):
-        raise ZooMCPException(
-            "Failed to convert file for bounding box calculation, incorrect return type %s",
-            type(stl_result),
+        stl_result = await _resolve_file_api_call(
+            client,
+            stl_result,
+            FileConversion,
+            "convert file for bounding box calculation",
         )
 
     if stl_result.outputs is None or len(stl_result.outputs) == 0:
@@ -1173,14 +1291,11 @@ async def zoo_convert_cad_file(
             output_format=FileExportFormat(export_format),
             body=data,
         )
-
-    if not isinstance(export_response, FileConversion):
-        logger.error(
-            "Failed to convert file, incorrect return type %s",
-            type(export_response),
-        )
-        raise ZooMCPException(
-            "Failed to convert file, incorrect return type %s",
+        export_response = await _resolve_file_api_call(
+            client,
+            export_response,
+            FileConversion,
+            "convert file",
         )
 
     if export_response.outputs is None:
