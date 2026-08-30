@@ -24,7 +24,7 @@ from kittycad.models import (
 )
 from kittycad.models.async_api_call_output import OptionFileMass, OptionFileVolume
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image as PILImage
 
 import zoo_mcp
@@ -57,24 +57,36 @@ def async_kittycad_client(monkeypatch: pytest.MonkeyPatch) -> AsyncKittyCAD:
     return client
 
 
-def _meta_result(response: Sequence[Any] | dict[str, Any]) -> Any:
+def _meta_result(response: Sequence[Any] | dict[str, Any] | CallToolResult) -> Any:
     """Extract response[1]["result"] with proper typing for ty."""
+    if isinstance(response, CallToolResult):
+        assert isinstance(response.structuredContent, dict)
+        return response.structuredContent["result"]
     assert isinstance(response, Sequence)
     meta = response[1]
     assert isinstance(meta, dict)
     return cast(dict[str, Any], meta)["result"]
 
 
-def _structured_result(response: Sequence[Any] | dict[str, Any]) -> dict[str, Any]:
+def _structured_result(
+    response: Sequence[Any] | dict[str, Any] | CallToolResult,
+) -> dict[str, Any]:
     """Extract structured content with proper typing for ty."""
+    if isinstance(response, CallToolResult):
+        assert isinstance(response.structuredContent, dict)
+        return response.structuredContent
     assert isinstance(response, Sequence)
     result = response[1]
     assert isinstance(result, dict)
     return cast(dict[str, Any], result)
 
 
-def _content_list(response: Sequence[Any] | dict[str, Any]) -> list[Any]:
+def _content_list(
+    response: Sequence[Any] | dict[str, Any] | CallToolResult,
+) -> list[Any]:
     """Extract response[0] as a typed list for ty."""
+    if isinstance(response, CallToolResult):
+        return list(response.content)
     assert isinstance(response, Sequence)
     content = response[0]
     assert isinstance(content, list)
@@ -91,6 +103,9 @@ def _physical_properties_result(
     surface_area: float | None = 600.0,
     property_statuses: dict[str, str] | None = None,
     property_errors: dict[str, str] | None = None,
+    render_status: str = "not_requested",
+    render_views: list[str] | None = None,
+    render_error: str | None = None,
 ) -> SimpleNamespace:
     if property_statuses is None:
         property_statuses = {
@@ -102,6 +117,8 @@ def _physical_properties_result(
         }
     if property_errors is None:
         property_errors = {}
+    if render_views is None:
+        render_views = []
     return SimpleNamespace(
         type="file_physical_properties",
         id=operation_id,
@@ -119,6 +136,17 @@ def _physical_properties_result(
         ),
         property_statuses=property_statuses,
         property_errors=property_errors,
+        render=SimpleNamespace(
+            status=render_status,
+            artifacts=[
+                SimpleNamespace(
+                    view=view,
+                    url=(f"/file/physical-properties/{operation_id}/render/{view}"),
+                )
+                for view in render_views
+            ],
+            error=render_error,
+        ),
     )
 
 
@@ -605,6 +633,8 @@ async def test_calculate_cad_physical_properties_uses_one_composite_request(
     assert bbox["dimensions"]["z"] == pytest.approx(10.0, abs=0.1)
     assert result["property_statuses"]["mass"] == "completed"
     assert result["property_errors"] == {}
+    assert result["render"]["status"] == "not_requested"
+    assert result["render"]["delivered_views"] == []
 
     create_file_physical_properties.assert_awaited_once_with(
         src_format=zoo_mcp.zoo_tools.FileImportFormat.STL,
@@ -621,6 +651,131 @@ async def test_calculate_cad_physical_properties_uses_one_composite_request(
     )
     for legacy_method in legacy_methods:
         legacy_method.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_calculate_cad_physical_properties_optionally_returns_renders(
+    monkeypatch: pytest.MonkeyPatch,
+    cube_stl: str,
+    async_kittycad_client: AsyncKittyCAD,
+):
+    views = ["isometric", "front", "right", "top"]
+    operation_id = "0b845d35-acde-4b27-acde-a50de0d08aaf"
+    create_file_physical_properties = AsyncMock(
+        return_value=_physical_properties_result(
+            operation_id=operation_id,
+            render_status="completed",
+            render_views=views,
+        )
+    )
+    download_render = AsyncMock(return_value=b"\x89PNG\r\n\x1a\nrender")
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "create_file_physical_properties",
+        create_file_physical_properties,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "get_file_physical_properties_render",
+        download_render,
+        raising=False,
+    )
+
+    response = await mcp.call_tool(
+        "calculate_cad_physical_properties",
+        arguments={
+            "input_file": cube_stl,
+            "unit_length": "mm",
+            "unit_mass": "g",
+            "unit_density": "kg:m3",
+            "density": 1000.0,
+            "unit_area": "mm2",
+            "unit_volume": "cm3",
+            "render": True,
+        },
+    )
+
+    assert isinstance(response, CallToolResult)
+    result = _meta_result(response)
+    assert result["volume"] == pytest.approx(1.0)
+    assert result["render"]["status"] == "completed"
+    assert result["render"]["delivered_views"] == views
+    assert result["render"]["delivery_errors"] == {}
+    images = [item for item in response.content if isinstance(item, ImageContent)]
+    assert len(images) == 4
+    assert all(image.mimeType == "image/png" for image in images)
+    labels = [
+        item.text
+        for item in response.content
+        if isinstance(item, TextContent) and item.text.startswith("Render view:")
+    ]
+    assert labels == [f"Render view: {view}" for view in views]
+    assert create_file_physical_properties.await_args is not None
+    assert create_file_physical_properties.await_args.kwargs["render"] is True
+    assert [call.kwargs for call in download_render.await_args_list] == [
+        {"id": operation_id, "view": view} for view in views
+    ]
+
+
+@pytest.mark.asyncio
+async def test_calculate_cad_physical_properties_preserves_measurements_when_render_download_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    cube_stl: str,
+    async_kittycad_client: AsyncKittyCAD,
+):
+    operation_id = "676313b8-a9e7-4b50-9cd6-bd4079e906b8"
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "create_file_physical_properties",
+        AsyncMock(
+            return_value=_physical_properties_result(
+                operation_id=operation_id,
+                render_status="completed",
+                render_views=["isometric", "front"],
+            )
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        async_kittycad_client.file,
+        "get_file_physical_properties_render",
+        AsyncMock(
+            side_effect=[
+                RuntimeError("download unavailable"),
+                b"\x89PNG\r\n\x1a\nrender",
+            ]
+        ),
+        raising=False,
+    )
+
+    response = await mcp.call_tool(
+        "calculate_cad_physical_properties",
+        arguments={
+            "input_file": cube_stl,
+            "unit_length": "mm",
+            "unit_mass": "g",
+            "unit_density": "kg:m3",
+            "density": 1000.0,
+            "unit_area": "mm2",
+            "unit_volume": "cm3",
+            "render": True,
+        },
+    )
+
+    result = _meta_result(response)
+    assert result["volume"] == pytest.approx(1.0)
+    assert result["render"]["status"] == "completed"
+    assert result["render"]["delivered_views"] == ["front"]
+    assert result["render"]["delivery_errors"] == {
+        "isometric": "could not download rendered view"
+    }
+    assert (
+        len(
+            [item for item in _content_list(response) if isinstance(item, ImageContent)]
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio

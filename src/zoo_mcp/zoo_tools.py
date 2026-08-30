@@ -177,6 +177,7 @@ class _FilePhysicalPropertiesResult(Protocol):
     bounding_box: object | None
     property_statuses: dict[object, object]
     property_errors: dict[object, str]
+    render: object
 
 
 # Map alternative extensions to their canonical FileImportFormat values
@@ -308,6 +309,7 @@ def _file_physical_properties_result(
         "bounding_box",
         "property_statuses",
         "property_errors",
+        "render",
     )
     if not all(hasattr(result, field_name) for field_name in required_fields):
         raise ZooMCPException(
@@ -921,6 +923,112 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
     return None
 
 
+def _file_analysis_render_bytes(response: object) -> bytes:
+    """Extract and validate one generated-SDK binary render response."""
+    if isinstance(response, bytes):
+        data = response
+    elif isinstance(response, bytearray | memoryview):
+        data = bytes(response)
+    else:
+        content = getattr(response, "content", None)
+        if not isinstance(content, bytes | bytearray | memoryview):
+            raise ZooMCPException("render download returned no binary content")
+        data = bytes(content)
+
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ZooMCPException("render download did not return PNG data")
+    return data
+
+
+async def _download_file_analysis_renders(
+    client: AsyncKittyCAD,
+    result: _FilePhysicalPropertiesResult,
+    *,
+    deadline: float,
+) -> tuple[dict[str, object], list[tuple[str, bytes]]]:
+    """Download completed render artifacts without discarding measurements."""
+    render_output = result.render
+    render_status = _enum_value(getattr(render_output, "status", "not_requested"))
+    render_error = getattr(render_output, "error", None)
+    artifacts = list(getattr(render_output, "artifacts", []) or [])
+    artifact_details = [
+        {
+            "view": _enum_value(getattr(artifact, "view", "unknown")),
+            "url": str(getattr(artifact, "url", "")),
+        }
+        for artifact in artifacts
+    ]
+    render_details: dict[str, object] = {
+        "status": render_status,
+        "artifacts": artifact_details,
+        "error": render_error,
+        "delivered_views": [],
+        "delivery_errors": {},
+    }
+    if render_status != "completed":
+        return render_details, []
+
+    if not artifacts:
+        render_details["delivery_errors"] = {
+            "render": "completed render returned no artifacts"
+        }
+        return render_details, []
+
+    download_render = getattr(client.file, "get_file_physical_properties_render", None)
+    if not callable(download_render):
+        render_details["delivery_errors"] = {
+            detail["view"]: "installed KittyCAD SDK cannot download rendered views"
+            for detail in artifact_details
+        }
+        return render_details, []
+
+    async def download(artifact: object) -> tuple[str, bytes | None, str | None]:
+        view = _enum_value(getattr(artifact, "view", "unknown"))
+        try:
+            response = await download_render(id=result.id, view=view)
+            return view, _file_analysis_render_bytes(response), None
+        except Exception:
+            logger.warning(
+                "Could not download physical-properties render operation=%s view=%s",
+                result.id,
+                view,
+                exc_info=True,
+            )
+            return view, None, "could not download rendered view"
+
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        render_details["delivery_errors"] = {
+            detail["view"]: "timed out before downloading rendered view"
+            for detail in artifact_details
+        }
+        return render_details, []
+
+    try:
+        async with asyncio.timeout(remaining):
+            downloads = await asyncio.gather(
+                *(download(artifact) for artifact in artifacts)
+            )
+    except TimeoutError:
+        render_details["delivery_errors"] = {
+            detail["view"]: "timed out downloading rendered view"
+            for detail in artifact_details
+        }
+        return render_details, []
+
+    rendered_views: list[tuple[str, bytes]] = []
+    delivery_errors: dict[str, str] = {}
+    for view, image_bytes, error in downloads:
+        if image_bytes is not None:
+            rendered_views.append((view, image_bytes))
+        elif error is not None:
+            delivery_errors[view] = error
+
+    render_details["delivered_views"] = [view for view, _ in rendered_views]
+    render_details["delivery_errors"] = delivery_errors
+    return render_details, rendered_views
+
+
 async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
     """Import a CAD file into the scene and return the imported object's id.
 
@@ -1007,7 +1115,8 @@ async def zoo_calculate_cad_physical_properties(
     density: float,
     unit_area: str,
     unit_vol: str,
-) -> dict:
+    render: bool = False,
+) -> tuple[dict[str, object], list[tuple[str, bytes]]]:
     """Calculate physical properties (volume, mass, surface area, center of mass, bounding box) of a CAD file.
 
     Args:
@@ -1018,9 +1127,11 @@ async def zoo_calculate_cad_physical_properties(
         density (float): The density of the material.
         unit_area (str): The unit of area for surface area. One of 'cm2', 'dm2', 'ft2', 'in2', 'km2', 'm2', 'mm2', 'yd2'.
         unit_vol (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
+        render (bool): Also request the four standard rendered PNG views.
 
     Returns:
-        dict: The five requested measurements plus per-property statuses and privacy-safe errors.
+        tuple: The structured measurements/status report and successfully
+            downloaded rendered views.
     """
     file_path = Path(file_path)
 
@@ -1057,7 +1168,7 @@ async def zoo_calculate_cad_physical_properties(
             surface_area_output_unit=surface_area_output_unit,
             center_of_mass_output_unit=center_of_mass_output_unit,
             bounding_box_output_unit=center_of_mass_output_unit,
-            render=False,
+            render=render,
             body=data,
         )
         result = await _resolve_file_physical_properties_call(
@@ -1065,8 +1176,13 @@ async def zoo_calculate_cad_physical_properties(
             result,
             deadline=deadline,
         )
+        render_details, rendered_views = await _download_file_analysis_renders(
+            client,
+            result,
+            deadline=deadline,
+        )
 
-    physical_properties = {
+    physical_properties: dict[str, object] = {
         "volume": result.volume,
         "mass": result.mass,
         "surface_area": result.surface_area,
@@ -1080,9 +1196,10 @@ async def zoo_calculate_cad_physical_properties(
             _enum_value(property_name): error
             for property_name, error in result.property_errors.items()
         },
+        "render": render_details,
     }
 
-    return physical_properties
+    return physical_properties, rendered_views
 
 
 async def zoo_calculate_kcl_physical_properties(
