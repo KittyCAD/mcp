@@ -333,7 +333,7 @@ async def calculate_cad_physical_properties(
 
     Args:
         input_file (str): The path of the file. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-        unit_length (str): The unit of length for center of mass. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
+        unit_length (str): The unit of length for center of mass and bounding box. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
         unit_mass (str): The unit of mass for the mass result. One of 'g', 'kg', 'lb'.
         unit_density (str): The unit of density for the material. One of 'lb:ft3', 'kg:m3'.
         density (float): The density of the material.
@@ -341,7 +341,7 @@ async def calculate_cad_physical_properties(
         unit_volume (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
 
     Returns:
-        dict | str: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass', and 'bounding_box', or an error message if the operation fails.
+        dict | str: The five requested measurements plus per-property statuses and privacy-safe errors, or an error message if the operation fails.
     """
 
     logger.info(

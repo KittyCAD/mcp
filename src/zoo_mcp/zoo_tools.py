@@ -153,6 +153,7 @@ FileApiCall: TypeAlias = (
     FileCenterOfMass | FileConversion | FileMass | FileSurfaceArea | FileVolume
 )
 _FileApiCallT = TypeVar("_FileApiCallT", bound=FileApiCall)
+_FileOperationT = TypeVar("_FileOperationT")
 
 _ASYNC_FILE_API_CALL_TYPES: dict[type[FileApiCall], str] = {
     FileCenterOfMass: "file_center_of_mass",
@@ -162,10 +163,99 @@ _ASYNC_FILE_API_CALL_TYPES: dict[type[FileApiCall], str] = {
     FileVolume: "file_volume",
 }
 
+
+class _FilePhysicalPropertiesResult(Protocol):
+    """Shape shared by the generated sync and async composite responses."""
+
+    id: object
+    status: ApiCallStatus
+    error: str | None
+    volume: float | None
+    mass: float | None
+    surface_area: float | None
+    center_of_mass: object | None
+    bounding_box: object | None
+    property_statuses: dict[object, object]
+    property_errors: dict[object, str]
+
+
 # Map alternative extensions to their canonical FileImportFormat values
 _EXT_ALIASES = {
     "stp": "step",
 }
+
+
+async def _resolve_file_operation(
+    client: AsyncKittyCAD,
+    result: object,
+    operation_name: str,
+    expected_async_type: str,
+    parse_result: Callable[[object], _FileOperationT],
+    *,
+    parse_async_result: Callable[[object], _FileOperationT] | None = None,
+    deadline: float | None = None,
+) -> _FileOperationT:
+    """Resolve one file operation without resubmitting work while polling."""
+    current = parse_result(result)
+    if deadline is None:
+        deadline = monotonic() + FILE_API_CALL_TIMEOUT
+
+    status = getattr(current, "status", ApiCallStatus.COMPLETED)
+    while status in _PENDING_API_CALL_STATUSES:
+        operation_id = getattr(current, "id", None)
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for {operation_name} operation {operation_id}"
+            )
+
+        logger.info(
+            "Waiting for %s operation %s (status=%s)",
+            operation_name,
+            operation_id,
+            status.value,
+        )
+        try:
+            async with asyncio.timeout(remaining):
+                polled = await client.api_calls.get_async_operation(
+                    id=str(operation_id)
+                )
+        except TimeoutError as error:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for {operation_name} operation {operation_id}"
+            ) from error
+
+        async_result = polled.root
+        if getattr(async_result, "type", None) != expected_async_type:
+            raise ZooMCPException(
+                f"Failed to {operation_name}, async operation {operation_id} "
+                f"returned {getattr(async_result, 'type', type(async_result))}"
+            )
+
+        current = (parse_async_result or parse_result)(async_result)
+        status = getattr(current, "status", ApiCallStatus.COMPLETED)
+        if status in _PENDING_API_CALL_STATUSES:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                continue
+            await asyncio.sleep(min(FILE_API_CALL_POLL_INTERVAL, remaining))
+
+    if status == ApiCallStatus.FAILED:
+        operation_id = getattr(current, "id", None)
+        detail = getattr(current, "error", None) or (
+            "the worker returned no error detail"
+        )
+        raise ZooMCPException(
+            f"Failed to {operation_name}, operation {operation_id} failed: {detail}"
+        )
+    if status != ApiCallStatus.COMPLETED:
+        operation_id = getattr(current, "id", None)
+        raise ZooMCPException(
+            f"Failed to {operation_name}, operation {operation_id} returned "
+            f"unexpected status {status.value}"
+        )
+
+    return current
 
 
 async def _resolve_file_api_call(
@@ -177,67 +267,95 @@ async def _resolve_file_api_call(
     deadline: float | None = None,
 ) -> _FileApiCallT:
     """Resolve a synchronous or asynchronous Zoo file API response."""
-    if not isinstance(result, expected_type):
-        raise ZooMCPException(
-            f"Failed to {operation_name}, incorrect return type {type(result)}"
-        )
 
-    current = result
-    if deadline is None:
-        deadline = monotonic() + FILE_API_CALL_TIMEOUT
-
-    status = getattr(current, "status", ApiCallStatus.COMPLETED)
-    while status in _PENDING_API_CALL_STATUSES:
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise ZooMCPTimeoutError(
-                f"Timed out waiting for {operation_name} operation {current.id}"
-            )
-
-        logger.info(
-            "Waiting for %s operation %s (status=%s)",
-            operation_name,
-            current.id,
-            status.value,
-        )
-        try:
-            async with asyncio.timeout(remaining):
-                polled = await client.api_calls.get_async_operation(id=str(current.id))
-        except TimeoutError as error:
-            raise ZooMCPTimeoutError(
-                f"Timed out waiting for {operation_name} operation {current.id}"
-            ) from error
-
-        async_result = polled.root
-        expected_async_type = _ASYNC_FILE_API_CALL_TYPES[expected_type]
-        if getattr(async_result, "type", None) != expected_async_type:
+    def parse_result(value: object) -> _FileApiCallT:
+        if not isinstance(value, expected_type):
             raise ZooMCPException(
-                f"Failed to {operation_name}, async operation {current.id} "
-                f"returned {getattr(async_result, 'type', type(async_result))}"
+                f"Failed to {operation_name}, incorrect return type {type(value)}"
             )
+        return value
 
-        current = expected_type.model_construct(
-            **async_result.model_dump(exclude={"type"})
-        )
-        status = current.status
-        if status in _PENDING_API_CALL_STATUSES:
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                continue
-            await asyncio.sleep(min(FILE_API_CALL_POLL_INTERVAL, remaining))
+    def parse_async_result(value: object) -> _FileApiCallT:
+        model_dump = getattr(value, "model_dump", None)
+        if not callable(model_dump):
+            raise ZooMCPException(
+                f"Failed to {operation_name}, incorrect return type {type(value)}"
+            )
+        return expected_type.model_construct(**model_dump(exclude={"type"}))
 
-    if status == ApiCallStatus.FAILED:
-        detail = current.error or "the worker returned no error detail"
+    return await _resolve_file_operation(
+        client,
+        result,
+        operation_name,
+        _ASYNC_FILE_API_CALL_TYPES[expected_type],
+        parse_result,
+        parse_async_result=parse_async_result,
+        deadline=deadline,
+    )
+
+
+def _file_physical_properties_result(
+    result: object,
+) -> _FilePhysicalPropertiesResult:
+    required_fields = (
+        "id",
+        "status",
+        "error",
+        "volume",
+        "mass",
+        "surface_area",
+        "center_of_mass",
+        "bounding_box",
+        "property_statuses",
+        "property_errors",
+    )
+    if not all(hasattr(result, field_name) for field_name in required_fields):
         raise ZooMCPException(
-            f"Failed to {operation_name}, operation {current.id} failed: {detail}"
+            "Failed to calculate physical properties, incorrect return type "
+            f"{type(result)}"
         )
-    if status != ApiCallStatus.COMPLETED:
-        raise ZooMCPException(
-            f"Failed to {operation_name}, operation {current.id} returned "
-            f"unexpected status {status.value}"
-        )
+    return cast(_FilePhysicalPropertiesResult, result)
 
-    return current
+
+async def _resolve_file_physical_properties_call(
+    client: AsyncKittyCAD,
+    result: object,
+    *,
+    deadline: float,
+) -> _FilePhysicalPropertiesResult:
+    """Resolve one composite file-analysis operation without resubmitting it."""
+    return await _resolve_file_operation(
+        client,
+        result,
+        "calculate physical properties",
+        "file_physical_properties",
+        _file_physical_properties_result,
+        deadline=deadline,
+    )
+
+
+def _enum_value(value: object) -> str:
+    enum_value = getattr(value, "value", value)
+    return str(enum_value)
+
+
+def _model_dict(value: object | None) -> dict | None:
+    if value is None:
+        return None
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        result = to_dict()
+        if isinstance(result, dict):
+            return result
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        result = model_dump(mode="json")
+        if isinstance(result, dict):
+            return result
+    raise ZooMCPException(
+        "Failed to calculate physical properties, invalid property result "
+        f"{type(value)}"
+    )
 
 
 def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[int]]]]:
@@ -892,11 +1010,9 @@ async def zoo_calculate_cad_physical_properties(
 ) -> dict:
     """Calculate physical properties (volume, mass, surface area, center of mass, bounding box) of a CAD file.
 
-    NOTE: The bounding box will be returned in the same unit length as the original CAD file.
-
     Args:
         file_path (Path | str): The path to the file. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-        unit_length (str): The unit of length for center of mass. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
+        unit_length (str): The unit of length for center of mass and bounding box. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
         unit_mass (str): The unit of mass for the mass result. One of 'g', 'kg', 'lb'.
         unit_density (str): The unit of density for the material. One of 'lb:ft3', 'kg:m3'.
         density (float): The density of the material.
@@ -904,7 +1020,7 @@ async def zoo_calculate_cad_physical_properties(
         unit_vol (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
 
     Returns:
-        dict: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass', and 'bounding_box'.
+        dict: The five requested measurements plus per-property statuses and privacy-safe errors.
     """
     file_path = Path(file_path)
 
@@ -913,102 +1029,57 @@ async def zoo_calculate_cad_physical_properties(
     async with aiofiles.open(file_path, "rb") as inp:
         data = await inp.read()
 
-    normalized_ext = _normalize_ext(file_path.suffix.split(".")[1])
-    src_format = FileImportFormat(normalized_ext)
+    src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
+    volume_output_unit = UnitVolume(unit_vol)
+    mass_output_unit = UnitMass(unit_mass)
+    material_density_unit = UnitDensity(unit_density)
+    surface_area_output_unit = UnitArea(unit_area)
+    center_of_mass_output_unit = UnitLength(unit_length)
     deadline = monotonic() + FILE_API_CALL_TIMEOUT
 
     async with AsyncKittyCAD(verify_ssl=ctx) as client:
-        volume_result = await client.file.create_file_volume(
-            output_unit=UnitVolume(unit_vol),
-            src_format=src_format,
-            body=data,
+        create_file_physical_properties = getattr(
+            client.file, "create_file_physical_properties", None
         )
-        volume_result = await _resolve_file_api_call(
-            client,
-            volume_result,
-            FileVolume,
-            "calculate volume",
-            deadline=deadline,
-        )
-        if volume_result.volume is None:
-            raise ZooMCPException("Failed to calculate volume")
+        if not callable(create_file_physical_properties):
+            raise ZooMCPException(
+                "The installed KittyCAD SDK does not support composite file "
+                "physical properties; update it after KittyCAD/api#4491 is released"
+            )
 
-        mass_result = await client.file.create_file_mass(
-            output_unit=UnitMass(unit_mass),
+        result = await create_file_physical_properties(
             src_format=src_format,
-            body=data,
-            material_density_unit=UnitDensity(unit_density),
+            properties=("volume,mass,surface_area,center_of_mass,bounding_box"),
             material_density=density,
-        )
-        mass_result = await _resolve_file_api_call(
-            client,
-            mass_result,
-            FileMass,
-            "calculate mass",
-            deadline=deadline,
-        )
-        if mass_result.mass is None:
-            raise ZooMCPException("Failed to calculate mass")
-
-        sa_result = await client.file.create_file_surface_area(
-            output_unit=UnitArea(unit_area),
-            src_format=src_format,
+            material_density_unit=material_density_unit,
+            volume_output_unit=volume_output_unit,
+            mass_output_unit=mass_output_unit,
+            surface_area_output_unit=surface_area_output_unit,
+            center_of_mass_output_unit=center_of_mass_output_unit,
+            bounding_box_output_unit=center_of_mass_output_unit,
+            render=False,
             body=data,
         )
-        sa_result = await _resolve_file_api_call(
+        result = await _resolve_file_physical_properties_call(
             client,
-            sa_result,
-            FileSurfaceArea,
-            "calculate surface area",
+            result,
             deadline=deadline,
         )
-        if sa_result.surface_area is None:
-            raise ZooMCPException("Failed to calculate surface area")
-
-        com_result = await client.file.create_file_center_of_mass(
-            src_format=src_format,
-            body=data,
-            output_unit=UnitLength(unit_length),
-        )
-        com_result = await _resolve_file_api_call(
-            client,
-            com_result,
-            FileCenterOfMass,
-            "calculate center of mass",
-            deadline=deadline,
-        )
-        if com_result.center_of_mass is None:
-            raise ZooMCPException("Failed to calculate center of mass")
-
-        if normalized_ext == "stl":
-            stl_data = data
-        else:
-            stl_result = await client.file.create_file_conversion(
-                src_format=src_format,
-                output_format=FileExportFormat.STL,
-                body=data,
-            )
-            stl_result = await _resolve_file_api_call(
-                client,
-                stl_result,
-                FileConversion,
-                "convert file for bounding box calculation",
-                deadline=deadline,
-            )
-            if stl_result.outputs is None or len(stl_result.outputs) == 0:
-                raise ZooMCPException(
-                    "Failed to convert file for bounding box calculation, no output"
-                )
-            stl_data = next(iter(stl_result.outputs.values()))
-
-    bbox = await asyncio.to_thread(_compute_stl_bounding_box, stl_data)
 
     physical_properties = {
-        "volume": volume_result.volume,
-        "mass": mass_result.mass,
-        "surface_area": sa_result.surface_area,
-        "center_of_mass": com_result.center_of_mass.to_dict(),
-        "bounding_box": bbox,
+        "volume": result.volume,
+        "mass": result.mass,
+        "surface_area": result.surface_area,
+        "center_of_mass": _model_dict(result.center_of_mass),
+        "bounding_box": _model_dict(result.bounding_box),
+        "property_statuses": {
+            _enum_value(property_name): _enum_value(status)
+            for property_name, status in result.property_statuses.items()
+        },
+        "property_errors": {
+            _enum_value(property_name): error
+            for property_name, error in result.property_errors.items()
+        },
     }
 
     return physical_properties
