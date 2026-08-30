@@ -165,7 +165,7 @@ async def test_calculate_center_of_mass(cube_stl: str):
     assert "x" in result and "y" in result and "z" in result
     assert result["x"] == pytest.approx(5.0)
     assert result["y"] == pytest.approx(5.0)
-    assert result["z"] == pytest.approx(-5.0)
+    assert result["z"] == pytest.approx(5.0)
 
 
 @pytest.mark.asyncio
