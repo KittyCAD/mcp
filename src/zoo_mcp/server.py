@@ -1,10 +1,11 @@
 import asyncio
 import atexit
+import json
 import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import FrameType
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from kittycad.models import (
     CameraMovement,
@@ -84,7 +85,7 @@ from kittycad.models.ok_modeling_cmd_response import (
 )
 from kittycad.models.uuid import Uuid
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ImageContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from zoo_mcp import ZooMCPException, logger
 from zoo_mcp.kcl_docs import (
@@ -328,20 +329,25 @@ async def calculate_cad_physical_properties(
     density: float,
     unit_area: str,
     unit_volume: str,
+    render: bool = False,
 ) -> dict | str:
     """Calculate physical properties (volume, mass, surface area, center of mass, bounding box) of a CAD file.
 
     Args:
         input_file (str): The path of the file. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-        unit_length (str): The unit of length for center of mass. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
+        unit_length (str): The unit of length for center of mass and bounding box. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
         unit_mass (str): The unit of mass for the mass result. One of 'g', 'kg', 'lb'.
         unit_density (str): The unit of density for the material. One of 'lb:ft3', 'kg:m3'.
         density (float): The density of the material.
         unit_area (str): The unit of area for surface area. One of 'cm2', 'dm2', 'ft2', 'in2', 'km2', 'm2', 'mm2', 'yd2'.
         unit_volume (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
+        render (bool): Also return isometric, front, right, and top PNG views
+            generated from the same imported analysis geometry.
 
     Returns:
-        dict | str: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass', and 'bounding_box', or an error message if the operation fails.
+        dict | str: The five requested measurements, per-property and render
+            statuses, and any requested PNGs. An operation-level failure is
+            returned as an error message.
     """
 
     logger.info(
@@ -349,7 +355,10 @@ async def calculate_cad_physical_properties(
     )
 
     try:
-        return await zoo_calculate_cad_physical_properties(
+        (
+            physical_properties,
+            rendered_views,
+        ) = await zoo_calculate_cad_physical_properties(
             file_path=input_file,
             unit_length=unit_length,
             unit_mass=unit_mass,
@@ -357,9 +366,36 @@ async def calculate_cad_physical_properties(
             density=density,
             unit_area=unit_area,
             unit_vol=unit_volume,
+            render=render,
+        )
+        content = [
+            TextContent(
+                type="text",
+                text=json.dumps(physical_properties, indent=2),
+            )
+        ]
+        for view, image_bytes in rendered_views:
+            content.append(TextContent(type="text", text=f"Render view: {view}"))
+            content.append(encode_image(image_bytes, image_format="png"))
+        # FastMCP recognizes the runtime CallToolResult and preserves both the
+        # inline images and structured output. Keep the declared dict | str
+        # contract so clients still receive the tool's output schema.
+        return cast(
+            dict | str,
+            CallToolResult(
+                content=content,
+                structuredContent={"result": physical_properties},
+            ),
         )
     except Exception as e:
-        return f"There was an error calculating physical properties of the file: {e}"
+        message = f"There was an error calculating physical properties of the file: {e}"
+        return cast(
+            dict | str,
+            CallToolResult(
+                content=[TextContent(type="text", text=message)],
+                structuredContent={"result": message},
+            ),
+        )
 
 
 @mcp.tool()
