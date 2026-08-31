@@ -74,7 +74,7 @@ dev = [
     "pytest-httpx",
     "pytest-rerunfailures",
     "pytest-xdist",
-    "ruff==0.16.3",
+    "ruff==0.16.4",
     "ty",
     "uv-build",
 ]
