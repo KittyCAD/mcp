@@ -1142,6 +1142,35 @@ async def test_execute_with_retries_sanitizes_engine_hangup(
 
 
 @pytest.mark.asyncio
+async def test_kcl_execution_errors_keep_details_out_of_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "PRIVATE_CUSTOMER_CONTENT"
+
+    async def fail(*_args: object, **_kwargs: object) -> None:
+        raise ValueError(secret)
+
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "_execute_with_retries", fail)
+
+    with caplog.at_level("INFO", logger="zoo_mcp"):
+        execute_result = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="code")
+        with pytest.raises(zoo_mcp.ZooMCPException) as constraint_error:
+            await zoo_mcp.zoo_tools.zoo_get_sketch_constraint_status(kcl_code="code")
+        with pytest.raises(zoo_mcp.ZooMCPException) as visualization_error:
+            await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+                "sketch",
+                kcl_code="code",
+            )
+
+    assert secret in execute_result.message
+    assert secret in str(constraint_error.value)
+    assert secret in str(visualization_error.value)
+    assert secret not in caplog.text
+    assert caplog.text.count("error_family=ValueError") == 3
+
+
+@pytest.mark.asyncio
 async def test_execute_with_retries_collects_concurrent_events():
     async def fn() -> str:
         return "ok"

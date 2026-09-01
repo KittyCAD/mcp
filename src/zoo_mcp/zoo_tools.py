@@ -1537,7 +1537,10 @@ async def zoo_execute_kcl(
             ok=True, message="KCL code executed successfully"
         )
     except Exception as e:
-        logger.info("Failed to execute KCL code: %s", e)
+        logger.info(
+            "Failed to execute KCL code (error_family=%s)",
+            _execution_error_family(e),
+        )
         return ResultZooExecuteKclLocal(
             ok=False, message=f"Failed to execute KCL code: {e}"
         )
@@ -1810,7 +1813,10 @@ async def zoo_get_sketch_constraint_status(
             )
         return _format_constraint_report(report)
     except Exception as e:
-        logger.error(e)
+        logger.error(
+            "Failed to get sketch constraint status (error_family=%s)",
+            _execution_error_family(e),
+        )
         raise ZooMCPException(f"Failed to get sketch constraint status: {e}")
 
 
@@ -1853,7 +1859,10 @@ async def zoo_visualize_sketch(
             )
         return bytes(outcome.render_sketch_png(sketch_name))
     except Exception as e:
-        logger.error(e)
+        logger.error(
+            "Failed to visualize sketch (error_family=%s)",
+            _execution_error_family(e),
+        )
         raise ZooMCPException(f"Failed to visualize sketch: {e}")
 
 
