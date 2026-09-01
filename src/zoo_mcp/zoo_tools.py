@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import io
 import json
 import random
@@ -392,7 +391,6 @@ MAX_EXECUTION_ATTEMPTS = 3
 EXECUTION_RETRY_BASE_DELAY_SECONDS = 0.25
 EXECUTION_RETRY_MAX_DELAY_SECONDS = 2.0
 EXECUTION_RETRY_JITTER_SECONDS = 0.25
-EXECUTION_RETRY_TOTAL_TIMEOUT_SECONDS = 300.0
 EXECUTION_RETRY_EVENT_HANDLER_TIMEOUT_SECONDS = 1.0
 
 ExecutionRetryOutcome: TypeAlias = Literal[
@@ -418,45 +416,79 @@ class ExecutionRetryEvent:
     fresh_connection: bool
 
 
-ExecutionRetryEventHandler: TypeAlias = Callable[
-    [ExecutionRetryEvent], Awaitable[None] | None
-]
+ExecutionRetryEventHandler: TypeAlias = Callable[[ExecutionRetryEvent], Awaitable[None]]
 
-_execution_retry_event_handler: ContextVar[ExecutionRetryEventHandler | None] = (
-    ContextVar("execution_retry_event_handler", default=None)
+
+@dataclass(slots=True)
+class _ExecutionRetryEventObserver:
+    handler: ExecutionRetryEventHandler
+    disabled: bool = False
+
+
+_execution_retry_event_observer: ContextVar[_ExecutionRetryEventObserver | None] = (
+    ContextVar("execution_retry_event_observer", default=None)
 )
+_background_retry_event_tasks: set[asyncio.Future[None]] = set()
+
+
+def _finish_background_retry_event_task(task: asyncio.Future[None]) -> None:
+    _background_retry_event_tasks.discard(task)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as error:
+        logger.warning(
+            "KCL retry event handler failed after timeout (error_type=%s)",
+            type(error).__name__,
+        )
+
+
+def _cancel_background_retry_event_task(task: asyncio.Future[None]) -> None:
+    _background_retry_event_tasks.add(task)
+    task.add_done_callback(_finish_background_retry_event_task)
+    task.cancel()
 
 
 @contextmanager
 def capture_execution_retry_events(
     handler: ExecutionRetryEventHandler,
 ) -> Iterator[None]:
-    """Send retry events to ``handler`` for calls in the current async context."""
+    """Send retry events to an async handler in the current async context."""
 
-    token = _execution_retry_event_handler.set(handler)
+    token = _execution_retry_event_observer.set(_ExecutionRetryEventObserver(handler))
     try:
         yield
     finally:
-        _execution_retry_event_handler.reset(token)
+        _execution_retry_event_observer.reset(token)
 
 
 async def _emit_execution_retry_event(event: ExecutionRetryEvent) -> None:
     """Notify the current observer without allowing telemetry to break execution."""
 
-    handler = _execution_retry_event_handler.get()
-    if handler is None:
+    observer = _execution_retry_event_observer.get()
+    if observer is None or observer.disabled:
         return
 
-    async def invoke_handler() -> None:
-        result = await asyncio.to_thread(handler, event)
-        if inspect.isawaitable(result):
-            await result
+    task = asyncio.ensure_future(observer.handler(event))
+    try:
+        done, _ = await asyncio.wait(
+            {task}, timeout=EXECUTION_RETRY_EVENT_HANDLER_TIMEOUT_SECONDS
+        )
+    except asyncio.CancelledError:
+        _cancel_background_retry_event_task(task)
+        raise
+
+    if task not in done:
+        observer.disabled = True
+        logger.warning("KCL retry event handler timed out")
+        _cancel_background_retry_event_task(task)
+        return
 
     try:
-        async with asyncio.timeout(EXECUTION_RETRY_EVENT_HANDLER_TIMEOUT_SECONDS):
-            await invoke_handler()
-    except TimeoutError:
-        logger.warning("KCL retry event handler timed out")
+        task.result()
+    except asyncio.CancelledError:
+        logger.warning("KCL retry event handler was cancelled")
     except Exception as error:
         logger.warning(
             "KCL retry event handler failed (error_type=%s)",
@@ -490,8 +522,6 @@ async def _report_execution_retry_event(
 def _execution_error_family(error: Exception) -> str:
     """Return a stable error family without exposing an exception message."""
 
-    if isinstance(error, ZooMCPTimeoutError):
-        return "RetryBudgetExceeded"
     if isinstance(error, kcl.KclError):
         message = error.args[0] if error.args else None
         if isinstance(message, str) and message.startswith("KCL EngineHangup error"):
@@ -525,7 +555,7 @@ async def _execute_with_retries(
     ``is_retryable()`` so transient errors (e.g. an engine hangup) can be
     retried instead of bubbling up. Each call invokes the binding again, which
     creates a fresh modeling connection. Non-retryable errors are re-raised
-    immediately. The total wall-clock time across attempts and delays is capped.
+    immediately. The retry count and backoff delays are bounded.
 
     Args:
         async_fn: The kcl coroutine function to call (e.g. ``kcl.execute_code``).
@@ -540,51 +570,31 @@ async def _execute_with_retries(
     operation = _operation or getattr(async_fn, "__name__", type(async_fn).__name__)
 
     for attempt in range(1, MAX_EXECUTION_ATTEMPTS + 1):
-        elapsed = monotonic() - started_at
-        remaining = EXECUTION_RETRY_TOTAL_TIMEOUT_SECONDS - elapsed
-        if remaining <= 0:
-            error = ZooMCPTimeoutError("KCL execution exceeded its retry time budget")
-            await _report_execution_retry_event(
-                operation, "exhausted", attempt, started_at, error=error
-            )
-            raise error
-
-        budget_timeout_error: TimeoutError | None = None
         try:
-            timeout = asyncio.timeout(remaining)
-            try:
-                async with timeout:
-                    result = await async_fn(*args, **kwargs)
-            except TimeoutError as timeout_error:
-                if timeout.expired():
-                    budget_timeout_error = timeout_error
-                else:
-                    raise
+            result = await async_fn(*args, **kwargs)
         except Exception as error:
             is_retryable = getattr(error, "is_retryable", None)
             retryable = callable(is_retryable) and is_retryable()
-            elapsed = monotonic() - started_at
             if retryable and attempt < MAX_EXECUTION_ATTEMPTS:
                 delay = _execution_retry_delay(attempt)
-                if elapsed + delay <= EXECUTION_RETRY_TOTAL_TIMEOUT_SECONDS:
-                    await _report_execution_retry_event(
-                        operation,
-                        "retry_scheduled",
-                        attempt,
-                        started_at,
-                        delay=delay,
-                        error=error,
-                    )
-                    logger.warning(
-                        "Retryable KCL execution error; scheduling attempt %d/%d "
-                        "in %.3fs (error_family=%s)",
-                        attempt + 1,
-                        MAX_EXECUTION_ATTEMPTS,
-                        delay,
-                        _execution_error_family(error),
-                    )
-                    await asyncio.sleep(delay)
-                    continue
+                await _report_execution_retry_event(
+                    operation,
+                    "retry_scheduled",
+                    attempt,
+                    started_at,
+                    delay=delay,
+                    error=error,
+                )
+                logger.warning(
+                    "Retryable KCL execution error; scheduling attempt %d/%d "
+                    "in %.3fs (error_family=%s)",
+                    attempt + 1,
+                    MAX_EXECUTION_ATTEMPTS,
+                    delay,
+                    _execution_error_family(error),
+                )
+                await asyncio.sleep(delay)
+                continue
 
             outcome: ExecutionRetryOutcome = (
                 "exhausted" if retryable else "terminal_non_retryable"
@@ -593,13 +603,6 @@ async def _execute_with_retries(
                 operation, outcome, attempt, started_at, error=error
             )
             raise
-
-        if budget_timeout_error is not None:
-            error = ZooMCPTimeoutError("KCL execution exceeded its retry time budget")
-            await _report_execution_retry_event(
-                operation, "exhausted", attempt, started_at, error=error
-            )
-            raise error from budget_timeout_error
 
         await _report_execution_retry_event(
             operation,

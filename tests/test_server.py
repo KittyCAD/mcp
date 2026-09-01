@@ -3,7 +3,6 @@ import base64
 import io
 import json
 import os
-import threading
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -996,6 +995,15 @@ def retry_delays(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return delays
 
 
+def _retry_event_collector(
+    events: list[zoo_mcp.zoo_tools.ExecutionRetryEvent],
+) -> zoo_mcp.zoo_tools.ExecutionRetryEventHandler:
+    async def collect(event: zoo_mcp.zoo_tools.ExecutionRetryEvent) -> None:
+        events.append(event)
+
+    return collect
+
+
 @pytest.mark.asyncio
 async def test_execute_with_retries_succeeds_first_try():
     calls = 0
@@ -1006,7 +1014,9 @@ async def test_execute_with_retries_succeeds_first_try():
         calls += 1
         return value
 
-    with zoo_mcp.zoo_tools.capture_execution_retry_events(events.append):
+    with zoo_mcp.zoo_tools.capture_execution_retry_events(
+        _retry_event_collector(events)
+    ):
         result = await zoo_mcp.zoo_tools._execute_with_retries(
             fn,
             "ok",
@@ -1038,7 +1048,9 @@ async def test_execute_with_retries_retries_then_succeeds(
             raise _RetryableError("hangup", retryable=True)
         return "recovered"
 
-    with zoo_mcp.zoo_tools.capture_execution_retry_events(events.append):
+    with zoo_mcp.zoo_tools.capture_execution_retry_events(
+        _retry_event_collector(events)
+    ):
         result = await zoo_mcp.zoo_tools._execute_with_retries(fn)
 
     assert result == "recovered"
@@ -1065,7 +1077,9 @@ async def test_execute_with_retries_exhausts_attempts(
         raise _RetryableError("hangup", retryable=True)
 
     with (
-        zoo_mcp.zoo_tools.capture_execution_retry_events(events.append),
+        zoo_mcp.zoo_tools.capture_execution_retry_events(
+            _retry_event_collector(events)
+        ),
         pytest.raises(_RetryableError),
     ):
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
@@ -1090,7 +1104,9 @@ async def test_execute_with_retries_does_not_retry_non_retryable():
         raise _RetryableError("bad code", retryable=False)
 
     with (
-        zoo_mcp.zoo_tools.capture_execution_retry_events(events.append),
+        zoo_mcp.zoo_tools.capture_execution_retry_events(
+            _retry_event_collector(events)
+        ),
         pytest.raises(_RetryableError),
     ):
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
@@ -1112,7 +1128,9 @@ async def test_execute_with_retries_does_not_retry_plain_exception():
         raise ValueError("no is_retryable method")
 
     with (
-        zoo_mcp.zoo_tools.capture_execution_retry_events(events.append),
+        zoo_mcp.zoo_tools.capture_execution_retry_events(
+            _retry_event_collector(events)
+        ),
         pytest.raises(ValueError),
     ):
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
@@ -1134,7 +1152,9 @@ async def test_execute_with_retries_sanitizes_engine_hangup(
         raise kcl.KclError(f"KCL EngineHangup error\n{secret}", True)
 
     with (
-        zoo_mcp.zoo_tools.capture_execution_retry_events(events.append),
+        zoo_mcp.zoo_tools.capture_execution_retry_events(
+            _retry_event_collector(events)
+        ),
         pytest.raises(kcl.KclError),
     ):
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
@@ -1166,7 +1186,7 @@ async def test_execute_with_retries_supports_async_event_handler():
 
 @pytest.mark.asyncio
 async def test_execute_with_retries_ignores_event_handler_failure():
-    def handler(_event: zoo_mcp.zoo_tools.ExecutionRetryEvent) -> None:
+    async def handler(_event: zoo_mcp.zoo_tools.ExecutionRetryEvent) -> None:
         raise RuntimeError("telemetry unavailable")
 
     async def fn() -> str:
@@ -1177,27 +1197,38 @@ async def test_execute_with_retries_ignores_event_handler_failure():
 
 
 @pytest.mark.asyncio
-async def test_execute_with_retries_bounds_sync_event_handler(
+async def test_execute_with_retries_stops_waiting_for_cancel_resistant_handler(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    release_handler = threading.Event()
+    release_handler = asyncio.Event()
+    cancellation_seen = asyncio.Event()
     monkeypatch.setattr(
         zoo_mcp.zoo_tools,
         "EXECUTION_RETRY_EVENT_HANDLER_TIMEOUT_SECONDS",
         0.01,
     )
 
-    def handler(_event: zoo_mcp.zoo_tools.ExecutionRetryEvent) -> None:
-        release_handler.wait()
+    async def handler(_event: zoo_mcp.zoo_tools.ExecutionRetryEvent) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_handler.wait()
 
     async def fn() -> str:
         return "ok"
 
+    safety_release = asyncio.get_running_loop().call_later(1, release_handler.set)
+    started_at = asyncio.get_running_loop().time()
     try:
         with zoo_mcp.zoo_tools.capture_execution_retry_events(handler):
             assert await zoo_mcp.zoo_tools._execute_with_retries(fn) == "ok"
+        assert asyncio.get_running_loop().time() - started_at < 0.2
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
     finally:
         release_handler.set()
+        safety_release.cancel()
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -1208,7 +1239,9 @@ async def test_execute_with_retries_preserves_inner_timeout_error():
         raise TimeoutError("upstream socket timed out")
 
     with (
-        zoo_mcp.zoo_tools.capture_execution_retry_events(events.append),
+        zoo_mcp.zoo_tools.capture_execution_retry_events(
+            _retry_event_collector(events)
+        ),
         pytest.raises(TimeoutError, match="upstream socket timed out"),
     ):
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
@@ -1216,32 +1249,6 @@ async def test_execute_with_retries_preserves_inner_timeout_error():
     assert len(events) == 1
     assert events[0].outcome == "terminal_non_retryable"
     assert events[0].error_family == "TimeoutError"
-
-
-@pytest.mark.asyncio
-async def test_execute_with_retries_enforces_total_time_budget(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    events: list[zoo_mcp.zoo_tools.ExecutionRetryEvent] = []
-    never_finishes = asyncio.Event()
-    monkeypatch.setattr(
-        zoo_mcp.zoo_tools,
-        "EXECUTION_RETRY_TOTAL_TIMEOUT_SECONDS",
-        0.01,
-    )
-
-    async def fn() -> None:
-        await never_finishes.wait()
-
-    with (
-        zoo_mcp.zoo_tools.capture_execution_retry_events(events.append),
-        pytest.raises(zoo_mcp.ZooMCPTimeoutError),
-    ):
-        await zoo_mcp.zoo_tools._execute_with_retries(fn)
-
-    assert len(events) == 1
-    assert events[0].outcome == "exhausted"
-    assert events[0].error_family == "RetryBudgetExceeded"
 
 
 @pytest.mark.asyncio
