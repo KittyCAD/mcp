@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import kcl
 import pytest
 import pytest_asyncio
 from kittycad import AsyncKittyCAD
@@ -982,6 +983,18 @@ class _RetryableError(Exception):
         return self._retryable
 
 
+@pytest.fixture
+def retry_delays(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(zoo_mcp.zoo_tools.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(zoo_mcp.zoo_tools.random, "uniform", lambda _a, _b: 0.0)
+    return delays
+
+
 @pytest.mark.asyncio
 async def test_execute_with_retries_succeeds_first_try():
     calls = 0
@@ -991,13 +1004,28 @@ async def test_execute_with_retries_succeeds_first_try():
         calls += 1
         return value
 
-    result = await zoo_mcp.zoo_tools._execute_with_retries(fn, "ok")
+    with zoo_mcp.zoo_tools.capture_execution_retry_events() as events:
+        result = await zoo_mcp.zoo_tools._execute_with_retries(
+            fn,
+            "ok",
+            _operation="test_operation",
+        )
+
     assert result == "ok"
     assert calls == 1
+    assert len(events) == 1
+    assert events[0].operation == "test_operation"
+    assert events[0].outcome == "succeeded"
+    assert events[0].attempt == 1
+    assert events[0].max_attempts == zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS
+    assert events[0].error_family is None
+    assert events[0].fresh_invocation is True
 
 
 @pytest.mark.asyncio
-async def test_execute_with_retries_retries_then_succeeds():
+async def test_execute_with_retries_retries_then_succeeds(
+    retry_delays: list[float],
+):
     calls = 0
 
     async def fn() -> str:
@@ -1007,13 +1035,24 @@ async def test_execute_with_retries_retries_then_succeeds():
             raise _RetryableError("hangup", retryable=True)
         return "recovered"
 
-    result = await zoo_mcp.zoo_tools._execute_with_retries(fn)
+    with zoo_mcp.zoo_tools.capture_execution_retry_events() as events:
+        result = await zoo_mcp.zoo_tools._execute_with_retries(fn)
+
     assert result == "recovered"
     assert calls == zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS
+    assert retry_delays == [0.25, 0.5]
+    assert [event.outcome for event in events] == [
+        "retry_scheduled",
+        "retry_scheduled",
+        "recovered",
+    ]
+    assert [event.attempt for event in events] == [1, 2, 3]
 
 
 @pytest.mark.asyncio
-async def test_execute_with_retries_exhausts_attempts():
+async def test_execute_with_retries_exhausts_attempts(
+    retry_delays: list[float],
+):
     calls = 0
 
     async def fn() -> str:
@@ -1021,9 +1060,19 @@ async def test_execute_with_retries_exhausts_attempts():
         calls += 1
         raise _RetryableError("hangup", retryable=True)
 
-    with pytest.raises(_RetryableError):
+    with (
+        zoo_mcp.zoo_tools.capture_execution_retry_events() as events,
+        pytest.raises(_RetryableError),
+    ):
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
+
     assert calls == zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS
+    assert retry_delays == [0.25, 0.5]
+    assert [event.outcome for event in events] == [
+        "retry_scheduled",
+        "retry_scheduled",
+        "exhausted",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1035,9 +1084,16 @@ async def test_execute_with_retries_does_not_retry_non_retryable():
         calls += 1
         raise _RetryableError("bad code", retryable=False)
 
-    with pytest.raises(_RetryableError):
+    with (
+        zoo_mcp.zoo_tools.capture_execution_retry_events() as events,
+        pytest.raises(_RetryableError),
+    ):
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
+
     assert calls == 1
+    assert len(events) == 1
+    assert events[0].outcome == "terminal_non_retryable"
+    assert events[0].error_family == "_RetryableError"
 
 
 @pytest.mark.asyncio
@@ -1049,9 +1105,100 @@ async def test_execute_with_retries_does_not_retry_plain_exception():
         calls += 1
         raise ValueError("no is_retryable method")
 
-    with pytest.raises(ValueError):
+    with (
+        zoo_mcp.zoo_tools.capture_execution_retry_events() as events,
+        pytest.raises(ValueError),
+    ):
         await zoo_mcp.zoo_tools._execute_with_retries(fn)
+
     assert calls == 1
+    assert len(events) == 1
+    assert events[0].outcome == "terminal_non_retryable"
+    assert events[0].error_family == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_sanitizes_engine_hangup(
+    retry_delays: list[float],
+):
+    secret = "customer-code-and-filename"
+
+    async def fn() -> None:
+        raise kcl.KclError(f"KCL EngineHangup error\n{secret}", True)
+
+    with (
+        zoo_mcp.zoo_tools.capture_execution_retry_events() as events,
+        pytest.raises(kcl.KclError),
+    ):
+        await zoo_mcp.zoo_tools._execute_with_retries(fn)
+
+    assert retry_delays == [0.25, 0.5]
+    assert [event.error_family for event in events] == [
+        "EngineHangup",
+        "EngineHangup",
+        "EngineHangup",
+    ]
+    assert secret not in repr(events)
+
+
+@pytest.mark.asyncio
+async def test_kcl_execution_errors_keep_details_out_of_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "PRIVATE_CUSTOMER_CONTENT"
+
+    async def fail(*_args: object, **_kwargs: object) -> None:
+        raise ValueError(secret)
+
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "_execute_with_retries", fail)
+
+    with caplog.at_level("INFO", logger="zoo_mcp"):
+        execute_result = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="code")
+        with pytest.raises(zoo_mcp.ZooMCPException) as constraint_error:
+            await zoo_mcp.zoo_tools.zoo_get_sketch_constraint_status(kcl_code="code")
+        with pytest.raises(zoo_mcp.ZooMCPException) as visualization_error:
+            await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+                "sketch",
+                kcl_code="code",
+            )
+
+    assert secret in execute_result.message
+    assert secret in str(constraint_error.value)
+    assert secret in str(visualization_error.value)
+    assert secret not in caplog.text
+    assert caplog.text.count("error_family=ValueError") == 3
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_collects_concurrent_events():
+    async def fn() -> str:
+        return "ok"
+
+    with zoo_mcp.zoo_tools.capture_execution_retry_events() as events:
+        results = await asyncio.gather(
+            *(zoo_mcp.zoo_tools._execute_with_retries(fn) for _ in range(20))
+        )
+
+    assert results == ["ok"] * 20
+    assert len(events) == 20
+    assert all(event.outcome == "succeeded" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_preserves_inner_timeout_error():
+    async def fn() -> None:
+        raise TimeoutError("upstream socket timed out")
+
+    with (
+        zoo_mcp.zoo_tools.capture_execution_retry_events() as events,
+        pytest.raises(TimeoutError, match="upstream socket timed out"),
+    ):
+        await zoo_mcp.zoo_tools._execute_with_retries(fn)
+
+    assert len(events) == 1
+    assert events[0].outcome == "terminal_non_retryable"
+    assert events[0].error_family == "TimeoutError"
 
 
 @pytest.mark.asyncio
@@ -1270,10 +1417,11 @@ async def test_get_sketch_constraint_status_path(fully_constrained_kcl: str):
 
 @pytest.mark.asyncio
 async def test_get_sketch_constraint_status_error():
-    response = await mcp.call_tool(
-        "get_sketch_constraint_status",
-        arguments={"kcl_code": "asdf = asdf", "kcl_path": None},
-    )
+    with zoo_mcp.zoo_tools.capture_execution_retry_events() as events:
+        response = await mcp.call_tool(
+            "get_sketch_constraint_status",
+            arguments={"kcl_code": "this is invalid KCL", "kcl_path": None},
+        )
     result = _meta_result(response)
     assert isinstance(result, dict)
     assert result["kcl_executes_successfully"] is False
@@ -1281,6 +1429,9 @@ async def test_get_sketch_constraint_status_error():
     assert result["kcl_error"]["phase"] in {"parse", "execution"}
     assert isinstance(result["kcl_error"]["text"], str)
     assert result["kcl_error"]["text"] != ""
+    assert len(events) == 1
+    assert events[0].outcome == "terminal_non_retryable"
+    assert events[0].error_family in {"KclParseError", "KclExecutionError"}
 
 
 SKETCH_VISUALIZER_KCL = """

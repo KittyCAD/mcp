@@ -1,8 +1,10 @@
 import asyncio
 import io
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+import random
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -386,43 +388,194 @@ def _check_kcl_code_or_path(
 # errors via ``KclError.is_retryable()`` so callers can retry them. Mirror the
 # retry behavior the bindings' own tests use.
 MAX_EXECUTION_ATTEMPTS = 3
+EXECUTION_RETRY_BASE_DELAY_SECONDS = 0.25
+EXECUTION_RETRY_MAX_DELAY_SECONDS = 2.0
+EXECUTION_RETRY_JITTER_SECONDS = 0.25
+
+ExecutionRetryOutcome: TypeAlias = Literal[
+    "succeeded",
+    "retry_scheduled",
+    "recovered",
+    "exhausted",
+    "terminal_non_retryable",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRetryEvent:
+    """Privacy-safe outcome from one KCL execution attempt."""
+
+    operation: str
+    outcome: ExecutionRetryOutcome
+    attempt: int
+    max_attempts: int
+    delay_seconds: float
+    elapsed_seconds: float
+    error_family: str | None
+    fresh_invocation: bool
+
+
+_execution_retry_event_buffer: ContextVar[list[ExecutionRetryEvent] | None] = (
+    ContextVar("execution_retry_event_buffer", default=None)
+)
+
+
+@contextmanager
+def capture_execution_retry_events() -> Iterator[list[ExecutionRetryEvent]]:
+    """Collect retry events emitted in the current async context."""
+
+    events: list[ExecutionRetryEvent] = []
+    token = _execution_retry_event_buffer.set(events)
+    try:
+        yield events
+    finally:
+        _execution_retry_event_buffer.reset(token)
+
+
+async def _emit_execution_retry_event(event: ExecutionRetryEvent) -> None:
+    """Record an event without invoking external telemetry during execution."""
+
+    events = _execution_retry_event_buffer.get()
+    if events is not None:
+        events.append(event)
+
+
+async def _report_execution_retry_event(
+    operation: str,
+    outcome: ExecutionRetryOutcome,
+    attempt: int,
+    started_at: float,
+    *,
+    delay: float = 0,
+    error: Exception | None = None,
+    error_family: str | None = None,
+) -> None:
+    if error_family is None and error is not None:
+        error_family = _execution_error_family(error)
+    await _emit_execution_retry_event(
+        ExecutionRetryEvent(
+            operation=operation,
+            outcome=outcome,
+            attempt=attempt,
+            max_attempts=MAX_EXECUTION_ATTEMPTS,
+            delay_seconds=delay,
+            elapsed_seconds=monotonic() - started_at,
+            error_family=error_family,
+            fresh_invocation=True,
+        )
+    )
+
+
+def _execution_error_family(error: Exception) -> str:
+    """Return a stable error family without exposing an exception message."""
+
+    if isinstance(error, kcl.KclError):
+        message = error.args[0] if error.args else None
+        if isinstance(message, str) and message.startswith("KCL EngineHangup error"):
+            return "EngineHangup"
+        return "KclError"
+    return type(error).__name__
+
+
+def _execution_retry_delay(attempt: int) -> float:
+    """Calculate capped exponential backoff with additive jitter."""
+
+    backoff = min(
+        EXECUTION_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+        EXECUTION_RETRY_MAX_DELAY_SECONDS,
+    )
+    return backoff + random.uniform(0, EXECUTION_RETRY_JITTER_SECONDS)
+
 
 _KclCoro = Callable[..., Awaitable[_T]]
 
 
 async def _execute_with_retries(
-    async_fn: _KclCoro[_T], *args: object, **kwargs: object
+    async_fn: _KclCoro[_T],
+    *args: object,
+    _operation: str | None = None,
+    _result_error_family: Callable[[_T], str | None] | None = None,
+    **kwargs: object,
 ) -> _T:
-    """Await a KCL execution coroutine, retrying on retryable engine errors.
+    """Run a KCL coroutine with finite, observable retries.
 
     The kcl bindings raise ``kcl.KclError`` for execution failures and expose
     ``is_retryable()`` so transient errors (e.g. an engine hangup) can be
-    retried instead of bubbling up. Non-retryable errors are re-raised
-    immediately.
+    retried instead of bubbling up. Each attempt invokes the binding again;
+    whether the binding opens a connection depends on its pre-execution
+    validation. Non-retryable errors are re-raised immediately. The retry count
+    and backoff delays are bounded.
 
     Args:
         async_fn: The kcl coroutine function to call (e.g. ``kcl.execute_code``).
         *args: Positional arguments forwarded to ``async_fn``.
+        _operation: Stable, privacy-safe operation name for retry events.
+        _result_error_family: Optional classifier for APIs that return failures
+            as values instead of raising them.
         **kwargs: Keyword arguments forwarded to ``async_fn``.
 
     Returns:
         Whatever ``async_fn`` returns on success.
     """
-    retries_remaining = MAX_EXECUTION_ATTEMPTS - 1
-    while True:
+    started_at = monotonic()
+    operation = _operation or getattr(async_fn, "__name__", type(async_fn).__name__)
+
+    for attempt in range(1, MAX_EXECUTION_ATTEMPTS + 1):
         try:
-            return await async_fn(*args, **kwargs)
+            result = await async_fn(*args, **kwargs)
         except Exception as error:
             is_retryable = getattr(error, "is_retryable", None)
-            if retries_remaining > 0 and callable(is_retryable) and is_retryable():
-                logger.warning(
-                    "Retryable KCL execution error, retrying (%d attempt(s) left): %s",
-                    retries_remaining,
-                    error,
+            retryable = callable(is_retryable) and is_retryable()
+            if retryable and attempt < MAX_EXECUTION_ATTEMPTS:
+                delay = _execution_retry_delay(attempt)
+                await _report_execution_retry_event(
+                    operation,
+                    "retry_scheduled",
+                    attempt,
+                    started_at,
+                    delay=delay,
+                    error=error,
                 )
-                retries_remaining -= 1
+                logger.warning(
+                    "Retryable KCL execution error; scheduling attempt %d/%d "
+                    "in %.3fs (error_family=%s)",
+                    attempt + 1,
+                    MAX_EXECUTION_ATTEMPTS,
+                    delay,
+                    _execution_error_family(error),
+                )
+                await asyncio.sleep(delay)
                 continue
+
+            outcome: ExecutionRetryOutcome = (
+                "exhausted" if retryable else "terminal_non_retryable"
+            )
+            await _report_execution_retry_event(
+                operation, outcome, attempt, started_at, error=error
+            )
             raise
+
+        result_error_family = (
+            _result_error_family(result) if _result_error_family else None
+        )
+        if result_error_family is not None:
+            await _report_execution_retry_event(
+                operation,
+                "terminal_non_retryable",
+                attempt,
+                started_at,
+                error_family=result_error_family,
+            )
+        else:
+            await _report_execution_retry_event(
+                operation,
+                "succeeded" if attempt == 1 else "recovered",
+                attempt,
+                started_at,
+            )
+        return result
+
+    raise AssertionError("unreachable")
 
 
 # Issue severities surfaced from an execution outcome, in descending order of
@@ -1061,11 +1214,17 @@ async def zoo_calculate_kcl_physical_properties(
 
     if kcl_code:
         response = await _execute_with_retries(
-            kcl.execute_code_and_measure, kcl_code, request
+            kcl.execute_code_and_measure,
+            kcl_code,
+            request,
+            _operation="calculate_kcl_physical_properties",
         )
     else:
         response = await _execute_with_retries(
-            kcl.execute_and_measure, str(kcl_path), request
+            kcl.execute_and_measure,
+            str(kcl_path),
+            request,
+            _operation="calculate_kcl_physical_properties",
         )
 
     volume = response.get_volume()
@@ -1147,12 +1306,14 @@ async def zoo_calculate_bounding_box_kcl(
         response = await _execute_with_retries(
             kcl.execute_code_and_bounding_box,
             kcl_code,
+            _operation="calculate_bounding_box_kcl",
             output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
         )
     else:
         response = await _execute_with_retries(
             kcl.execute_and_bounding_box,
             str(kcl_path),
+            _operation="calculate_bounding_box_kcl",
             output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
         )
 
@@ -1371,9 +1532,17 @@ async def zoo_execute_kcl(
             )
 
         if kcl_code:
-            outcome = await _execute_with_retries(kcl.execute_code, kcl_code)
+            outcome = await _execute_with_retries(
+                kcl.execute_code,
+                kcl_code,
+                _operation="execute_kcl",
+            )
         else:
-            outcome = await _execute_with_retries(kcl.execute, str(kcl_path))
+            outcome = await _execute_with_retries(
+                kcl.execute,
+                str(kcl_path),
+                _operation="execute_kcl",
+            )
 
         issues = _format_execution_issues(outcome)
         if issues:
@@ -1387,7 +1556,10 @@ async def zoo_execute_kcl(
             ok=True, message="KCL code executed successfully"
         )
     except Exception as e:
-        logger.info("Failed to execute KCL code: %s", e)
+        logger.info(
+            "Failed to execute KCL code (error_family=%s)",
+            _execution_error_family(e),
+        )
         return ResultZooExecuteKclLocal(
             ok=False, message=f"Failed to execute KCL code: {e}"
         )
@@ -1461,14 +1633,20 @@ async def zoo_export_kcl(
         if kcl_code:
             logger.info("Exporting KCL code to %s", str(kcl_code))
             export_response = await _execute_with_retries(
-                kcl.execute_code_and_export, kcl_code, export_format
+                kcl.execute_code_and_export,
+                kcl_code,
+                export_format,
+                _operation="export_kcl",
             )
         else:
             logger.info("Exporting KCL project to %s", str(kcl_path))
             assert kcl_path is not None  # _check_kcl_code_or_path ensures this
             kcl_path_resolved = Path(kcl_path)
             export_response = await _execute_with_retries(
-                kcl.execute_and_export, str(kcl_path_resolved.resolve()), export_format
+                kcl.execute_and_export,
+                str(kcl_path_resolved.resolve()),
+                export_format,
+                _operation="export_kcl",
             )
         await out.write(bytes(export_response[0].contents))
 
@@ -1620,6 +1798,21 @@ def _format_constraint_report(report: kcl.SketchConstraintReport) -> dict:
     return result
 
 
+def _constraint_report_error_family(
+    report: kcl.SketchConstraintReport,
+) -> str | None:
+    """Classify an incomplete constraint report without exposing its message."""
+    if report.is_complete:
+        return None
+    if report.kcl_error is None:
+        return "IncompleteConstraintReport"
+    if report.kcl_error.phase == "parse":
+        return "KclParseError"
+    if report.kcl_error.phase == "execution":
+        return "KclExecutionError"
+    return "KclConstraintError"
+
+
 async def zoo_get_sketch_constraint_status(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
@@ -1641,16 +1834,25 @@ async def zoo_get_sketch_constraint_status(
     try:
         if kcl_code:
             report = await _execute_with_retries(
-                kcl.get_sketch_constraint_status_code, kcl_code
+                kcl.get_sketch_constraint_status_code,
+                kcl_code,
+                _operation="get_sketch_constraint_status",
+                _result_error_family=_constraint_report_error_family,
             )
         else:
             assert kcl_path is not None
             report = await _execute_with_retries(
-                kcl.get_sketch_constraint_status, str(kcl_path)
+                kcl.get_sketch_constraint_status,
+                str(kcl_path),
+                _operation="get_sketch_constraint_status",
+                _result_error_family=_constraint_report_error_family,
             )
         return _format_constraint_report(report)
     except Exception as e:
-        logger.error(e)
+        logger.error(
+            "Failed to get sketch constraint status (error_family=%s)",
+            _execution_error_family(e),
+        )
         raise ZooMCPException(f"Failed to get sketch constraint status: {e}")
 
 
@@ -1679,13 +1881,24 @@ async def zoo_visualize_sketch(
 
     try:
         if kcl_code:
-            outcome = await _execute_with_retries(kcl.execute_code, kcl_code)
+            outcome = await _execute_with_retries(
+                kcl.execute_code,
+                kcl_code,
+                _operation="visualize_sketch",
+            )
         else:
             assert kcl_path is not None
-            outcome = await _execute_with_retries(kcl.execute, str(kcl_path))
+            outcome = await _execute_with_retries(
+                kcl.execute,
+                str(kcl_path),
+                _operation="visualize_sketch",
+            )
         return bytes(outcome.render_sketch_png(sketch_name))
     except Exception as e:
-        logger.error(e)
+        logger.error(
+            "Failed to visualize sketch (error_family=%s)",
+            _execution_error_family(e),
+        )
         raise ZooMCPException(f"Failed to visualize sketch: {e}")
 
 
