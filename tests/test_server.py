@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import os
+import threading
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -1173,6 +1174,48 @@ async def test_execute_with_retries_ignores_event_handler_failure():
 
     with zoo_mcp.zoo_tools.capture_execution_retry_events(handler):
         assert await zoo_mcp.zoo_tools._execute_with_retries(fn) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_bounds_sync_event_handler(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    release_handler = threading.Event()
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools,
+        "EXECUTION_RETRY_EVENT_HANDLER_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    def handler(_event: zoo_mcp.zoo_tools.ExecutionRetryEvent) -> None:
+        release_handler.wait()
+
+    async def fn() -> str:
+        return "ok"
+
+    try:
+        with zoo_mcp.zoo_tools.capture_execution_retry_events(handler):
+            assert await zoo_mcp.zoo_tools._execute_with_retries(fn) == "ok"
+    finally:
+        release_handler.set()
+
+
+@pytest.mark.asyncio
+async def test_execute_with_retries_preserves_inner_timeout_error():
+    events: list[zoo_mcp.zoo_tools.ExecutionRetryEvent] = []
+
+    async def fn() -> None:
+        raise TimeoutError("upstream socket timed out")
+
+    with (
+        zoo_mcp.zoo_tools.capture_execution_retry_events(events.append),
+        pytest.raises(TimeoutError, match="upstream socket timed out"),
+    ):
+        await zoo_mcp.zoo_tools._execute_with_retries(fn)
+
+    assert len(events) == 1
+    assert events[0].outcome == "terminal_non_retryable"
+    assert events[0].error_family == "TimeoutError"
 
 
 @pytest.mark.asyncio
