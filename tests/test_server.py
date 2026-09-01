@@ -1019,7 +1019,7 @@ async def test_execute_with_retries_succeeds_first_try():
     assert events[0].attempt == 1
     assert events[0].max_attempts == zoo_mcp.zoo_tools.MAX_EXECUTION_ATTEMPTS
     assert events[0].error_family is None
-    assert events[0].fresh_connection is True
+    assert events[0].fresh_invocation is True
 
 
 @pytest.mark.asyncio
@@ -1417,10 +1417,11 @@ async def test_get_sketch_constraint_status_path(fully_constrained_kcl: str):
 
 @pytest.mark.asyncio
 async def test_get_sketch_constraint_status_error():
-    response = await mcp.call_tool(
-        "get_sketch_constraint_status",
-        arguments={"kcl_code": "asdf = asdf", "kcl_path": None},
-    )
+    with zoo_mcp.zoo_tools.capture_execution_retry_events() as events:
+        response = await mcp.call_tool(
+            "get_sketch_constraint_status",
+            arguments={"kcl_code": "this is invalid KCL", "kcl_path": None},
+        )
     result = _meta_result(response)
     assert isinstance(result, dict)
     assert result["kcl_executes_successfully"] is False
@@ -1428,6 +1429,9 @@ async def test_get_sketch_constraint_status_error():
     assert result["kcl_error"]["phase"] in {"parse", "execution"}
     assert isinstance(result["kcl_error"]["text"], str)
     assert result["kcl_error"]["text"] != ""
+    assert len(events) == 1
+    assert events[0].outcome == "terminal_non_retryable"
+    assert events[0].error_family in {"KclParseError", "KclExecutionError"}
 
 
 SKETCH_VISUALIZER_KCL = """

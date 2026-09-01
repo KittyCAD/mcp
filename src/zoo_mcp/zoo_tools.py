@@ -412,7 +412,7 @@ class ExecutionRetryEvent:
     delay_seconds: float
     elapsed_seconds: float
     error_family: str | None
-    fresh_connection: bool
+    fresh_invocation: bool
 
 
 _execution_retry_event_buffer: ContextVar[list[ExecutionRetryEvent] | None] = (
@@ -448,7 +448,10 @@ async def _report_execution_retry_event(
     *,
     delay: float = 0,
     error: Exception | None = None,
+    error_family: str | None = None,
 ) -> None:
+    if error_family is None and error is not None:
+        error_family = _execution_error_family(error)
     await _emit_execution_retry_event(
         ExecutionRetryEvent(
             operation=operation,
@@ -457,8 +460,8 @@ async def _report_execution_retry_event(
             max_attempts=MAX_EXECUTION_ATTEMPTS,
             delay_seconds=delay,
             elapsed_seconds=monotonic() - started_at,
-            error_family=_execution_error_family(error) if error else None,
-            fresh_connection=True,
+            error_family=error_family,
+            fresh_invocation=True,
         )
     )
 
@@ -491,20 +494,24 @@ async def _execute_with_retries(
     async_fn: _KclCoro[_T],
     *args: object,
     _operation: str | None = None,
+    _result_error_family: Callable[[_T], str | None] | None = None,
     **kwargs: object,
 ) -> _T:
     """Run a KCL coroutine with finite, observable retries.
 
     The kcl bindings raise ``kcl.KclError`` for execution failures and expose
     ``is_retryable()`` so transient errors (e.g. an engine hangup) can be
-    retried instead of bubbling up. Each call invokes the binding again, which
-    creates a fresh modeling connection. Non-retryable errors are re-raised
-    immediately. The retry count and backoff delays are bounded.
+    retried instead of bubbling up. Each attempt invokes the binding again;
+    whether the binding opens a connection depends on its pre-execution
+    validation. Non-retryable errors are re-raised immediately. The retry count
+    and backoff delays are bounded.
 
     Args:
         async_fn: The kcl coroutine function to call (e.g. ``kcl.execute_code``).
         *args: Positional arguments forwarded to ``async_fn``.
         _operation: Stable, privacy-safe operation name for retry events.
+        _result_error_family: Optional classifier for APIs that return failures
+            as values instead of raising them.
         **kwargs: Keyword arguments forwarded to ``async_fn``.
 
     Returns:
@@ -548,12 +555,24 @@ async def _execute_with_retries(
             )
             raise
 
-        await _report_execution_retry_event(
-            operation,
-            "succeeded" if attempt == 1 else "recovered",
-            attempt,
-            started_at,
+        result_error_family = (
+            _result_error_family(result) if _result_error_family else None
         )
+        if result_error_family is not None:
+            await _report_execution_retry_event(
+                operation,
+                "terminal_non_retryable",
+                attempt,
+                started_at,
+                error_family=result_error_family,
+            )
+        else:
+            await _report_execution_retry_event(
+                operation,
+                "succeeded" if attempt == 1 else "recovered",
+                attempt,
+                started_at,
+            )
         return result
 
     raise AssertionError("unreachable")
@@ -1779,6 +1798,21 @@ def _format_constraint_report(report: kcl.SketchConstraintReport) -> dict:
     return result
 
 
+def _constraint_report_error_family(
+    report: kcl.SketchConstraintReport,
+) -> str | None:
+    """Classify an incomplete constraint report without exposing its message."""
+    if report.is_complete:
+        return None
+    if report.kcl_error is None:
+        return "IncompleteConstraintReport"
+    if report.kcl_error.phase == "parse":
+        return "KclParseError"
+    if report.kcl_error.phase == "execution":
+        return "KclExecutionError"
+    return "KclConstraintError"
+
+
 async def zoo_get_sketch_constraint_status(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
@@ -1803,6 +1837,7 @@ async def zoo_get_sketch_constraint_status(
                 kcl.get_sketch_constraint_status_code,
                 kcl_code,
                 _operation="get_sketch_constraint_status",
+                _result_error_family=_constraint_report_error_family,
             )
         else:
             assert kcl_path is not None
@@ -1810,6 +1845,7 @@ async def zoo_get_sketch_constraint_status(
                 kcl.get_sketch_constraint_status,
                 str(kcl_path),
                 _operation="get_sketch_constraint_status",
+                _result_error_family=_constraint_report_error_family,
             )
         return _format_constraint_report(report)
     except Exception as e:
