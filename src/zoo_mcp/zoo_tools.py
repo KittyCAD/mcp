@@ -391,7 +391,6 @@ MAX_EXECUTION_ATTEMPTS = 3
 EXECUTION_RETRY_BASE_DELAY_SECONDS = 0.25
 EXECUTION_RETRY_MAX_DELAY_SECONDS = 2.0
 EXECUTION_RETRY_JITTER_SECONDS = 0.25
-EXECUTION_RETRY_EVENT_HANDLER_TIMEOUT_SECONDS = 1.0
 
 ExecutionRetryOutcome: TypeAlias = Literal[
     "succeeded",
@@ -416,84 +415,29 @@ class ExecutionRetryEvent:
     fresh_connection: bool
 
 
-ExecutionRetryEventHandler: TypeAlias = Callable[[ExecutionRetryEvent], Awaitable[None]]
-
-
-@dataclass(slots=True)
-class _ExecutionRetryEventObserver:
-    handler: ExecutionRetryEventHandler
-    disabled: bool = False
-
-
-_execution_retry_event_observer: ContextVar[_ExecutionRetryEventObserver | None] = (
-    ContextVar("execution_retry_event_observer", default=None)
+_execution_retry_event_buffer: ContextVar[list[ExecutionRetryEvent] | None] = (
+    ContextVar("execution_retry_event_buffer", default=None)
 )
-_background_retry_event_tasks: set[asyncio.Future[None]] = set()
-
-
-def _finish_background_retry_event_task(task: asyncio.Future[None]) -> None:
-    _background_retry_event_tasks.discard(task)
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        pass
-    except Exception as error:
-        logger.warning(
-            "KCL retry event handler failed after timeout (error_type=%s)",
-            type(error).__name__,
-        )
-
-
-def _cancel_background_retry_event_task(task: asyncio.Future[None]) -> None:
-    _background_retry_event_tasks.add(task)
-    task.add_done_callback(_finish_background_retry_event_task)
-    task.cancel()
 
 
 @contextmanager
-def capture_execution_retry_events(
-    handler: ExecutionRetryEventHandler,
-) -> Iterator[None]:
-    """Send retry events to an async handler in the current async context."""
+def capture_execution_retry_events() -> Iterator[list[ExecutionRetryEvent]]:
+    """Collect retry events emitted in the current async context."""
 
-    token = _execution_retry_event_observer.set(_ExecutionRetryEventObserver(handler))
+    events: list[ExecutionRetryEvent] = []
+    token = _execution_retry_event_buffer.set(events)
     try:
-        yield
+        yield events
     finally:
-        _execution_retry_event_observer.reset(token)
+        _execution_retry_event_buffer.reset(token)
 
 
 async def _emit_execution_retry_event(event: ExecutionRetryEvent) -> None:
-    """Notify the current observer without allowing telemetry to break execution."""
+    """Record an event without invoking external telemetry during execution."""
 
-    observer = _execution_retry_event_observer.get()
-    if observer is None or observer.disabled:
-        return
-
-    task = asyncio.ensure_future(observer.handler(event))
-    try:
-        done, _ = await asyncio.wait(
-            {task}, timeout=EXECUTION_RETRY_EVENT_HANDLER_TIMEOUT_SECONDS
-        )
-    except asyncio.CancelledError:
-        _cancel_background_retry_event_task(task)
-        raise
-
-    if task not in done:
-        observer.disabled = True
-        logger.warning("KCL retry event handler timed out")
-        _cancel_background_retry_event_task(task)
-        return
-
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        logger.warning("KCL retry event handler was cancelled")
-    except Exception as error:
-        logger.warning(
-            "KCL retry event handler failed (error_type=%s)",
-            type(error).__name__,
-        )
+    events = _execution_retry_event_buffer.get()
+    if events is not None:
+        events.append(event)
 
 
 async def _report_execution_retry_event(
