@@ -26,6 +26,7 @@ from kittycad.models.modeling_cmd import (
     OptionDefaultCameraSetOrthographic,
     OptionEdgeLinesVisible,
     OptionEntityGetIndex,
+    OptionSetOrderIndependentTransparency,
     OptionTakeSnapshot,
     OptionViewIsometric,
     OptionZoomToFit,
@@ -658,6 +659,7 @@ def _capture_snapshot_commands(
         zoo_tools.ResponseViewIsometric: SimpleNamespace(data=None),
         zoo_tools.ResponseZoomToFit: SimpleNamespace(data=None),
         zoo_tools.ResponseEdgeLinesVisible: SimpleNamespace(data=None),
+        zoo_tools.ResponseSetOrderIndependentTransparency: SimpleNamespace(data=None),
         zoo_tools.ResponseTakeSnapshot: SimpleNamespace(
             data=TakeSnapshot(contents="anBlZw==")
         ),
@@ -705,12 +707,32 @@ async def test_snapshot_frames_the_scene_before_capturing(
     assert [type(command.root) for command in commands] == [
         OptionDefaultCameraSetOrthographic,
         OptionEdgeLinesVisible,
+        OptionSetOrderIndependentTransparency,
         OptionViewIsometric,
         OptionZoomToFit,
         OptionTakeSnapshot,
     ]
     assert cast(Any, commands[-1].root).format == "jpeg"
     resize.assert_called_once_with(b"jpeg", 256)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_enables_order_independent_transparency(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Material opacity is ignored by the renderer while OIT is disabled."""
+    commands = _capture_snapshot_commands(monkeypatch)
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
+
+    await zoo_tools.zoo_snapshot(session_id="session-id")
+
+    transparency_commands = [
+        command.root
+        for command in commands
+        if isinstance(command.root, OptionSetOrderIndependentTransparency)
+    ]
+    assert len(transparency_commands) == 1
+    assert cast(Any, transparency_commands[0]).enabled is True
 
 
 @pytest.mark.asyncio
@@ -1077,7 +1099,7 @@ async def test_connection_close_mid_command_reports_a_dead_session(
 async def test_snapshot_shares_one_budget_across_all_its_commands(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Otherwise a four-view capture gets fourteen separate budgets."""
+    """Otherwise a four-view capture gets fifteen separate budgets."""
     seen: list[object] = []
 
     async def send_command(

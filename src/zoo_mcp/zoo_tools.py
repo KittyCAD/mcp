@@ -82,6 +82,7 @@ from kittycad.models.modeling_cmd import (
     OptionFaceGetGradient,
     OptionFaceGetPosition,
     OptionImportFiles,
+    OptionSetOrderIndependentTransparency,
     OptionTakeSnapshot,
     OptionViewIsometric,
     OptionZoomToFit,
@@ -106,6 +107,9 @@ from kittycad.models.ok_modeling_cmd_response import (
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionImportFiles as ResponseImportFiles,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionSetOrderIndependentTransparency as ResponseSetOrderIndependentTransparency,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionTakeSnapshot as ResponseTakeSnapshot,
@@ -2663,10 +2667,11 @@ async def zoo_snapshot(
 
     Edge lines are hidden unless ``highlight_edges`` is True, so that entities
     highlighted via highlight_set_entities stand out instead of competing with
-    the outline drawn on every edge in the scene.
+    the outline drawn on every edge in the scene. Order-independent transparency
+    is enabled so material opacity is represented in the captured image.
     """
     # One budget for the whole capture. A per-command budget would multiply by
-    # the command count, which for a four-view capture is fourteen commands.
+    # the command count, which for a four-view capture is fifteen commands.
     deadline = _Deadline()
 
     async with _modeling_websocket(session_id) as ws:
@@ -2684,6 +2689,13 @@ async def zoo_snapshot(
             ModelingCmd(OptionEdgeLinesVisible(hidden=not highlight_edges)),
             ResponseEdgeLinesVisible,
             "edge line visibility",
+            deadline,
+        )
+        await _send_modeling_command(
+            ws,
+            ModelingCmd(OptionSetOrderIndependentTransparency(enabled=True)),
+            ResponseSetOrderIndependentTransparency,
+            "order-independent transparency",
             deadline,
         )
 
