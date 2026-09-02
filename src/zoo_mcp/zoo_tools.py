@@ -2,13 +2,14 @@ import asyncio
 import io
 import json
 import random
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -491,7 +492,29 @@ def _execution_retry_delay(attempt: int) -> float:
     return backoff + random.uniform(0, EXECUTION_RETRY_JITTER_SECONDS)
 
 
+# The native zoo-kcl client supplies its bearer token on the WebSocket HTTP
+# upgrade. The API can nevertheless intermittently report that this particular
+# socket did not receive the header. zoo-kcl does not currently classify that
+# response as retryable, but a fresh execution creates a fresh authenticated
+# socket and recovers. Match the server's distinctive instruction rather than
+# broad authentication text so invalid or expired credentials still fail fast.
+_TRANSIENT_WEBSOCKET_AUTH_ERROR_MARKERS = (
+    "Authorization",
+    "Bearer <token>",
+    "over this websocket",
+)
+
 _KclCoro = Callable[..., Awaitable[_T]]
+
+
+def _is_retryable_execution_error(error: Exception) -> bool:
+    """Return whether a KCL execution should be retried on a fresh socket."""
+    message = str(error)
+    if all(marker in message for marker in _TRANSIENT_WEBSOCKET_AUTH_ERROR_MARKERS):
+        return True
+
+    is_retryable = getattr(error, "is_retryable", None)
+    return callable(is_retryable) and is_retryable()
 
 
 async def _execute_with_retries(
@@ -507,8 +530,8 @@ async def _execute_with_retries(
     ``is_retryable()`` so transient errors (e.g. an engine hangup) can be
     retried instead of bubbling up. Each attempt invokes the binding again;
     whether the binding opens a connection depends on its pre-execution
-    validation. Non-retryable errors are re-raised immediately. The retry count
-    and backoff delays are bounded.
+    validation. Errors not classified as retryable are re-raised immediately.
+    The retry count and backoff delays are bounded.
 
     Args:
         async_fn: The kcl coroutine function to call (e.g. ``kcl.execute_code``).
@@ -528,8 +551,7 @@ async def _execute_with_retries(
         try:
             result = await async_fn(*args, **kwargs)
         except Exception as error:
-            is_retryable = getattr(error, "is_retryable", None)
-            retryable = callable(is_retryable) and is_retryable()
+            retryable = _is_retryable_execution_error(error)
             if retryable and attempt < MAX_EXECUTION_ATTEMPTS:
                 delay = _execution_retry_delay(attempt)
                 await _report_execution_retry_event(
@@ -1860,6 +1882,166 @@ async def zoo_get_sketch_constraint_status(
         raise ZooMCPException(f"Failed to get sketch constraint status: {e}")
 
 
+def _starts_with_pipeline_after_comments(source: str) -> bool:
+    """Return whether the next KCL token is a pipeline continuation."""
+    remaining = source
+    while True:
+        remaining = remaining.lstrip()
+        if remaining.startswith("//"):
+            _, separator, remaining = remaining.partition("\n")
+            if not separator:
+                return False
+            continue
+        if remaining.startswith("/*"):
+            comment_end = remaining.find("*/", 2)
+            if comment_end < 0:
+                return False
+            remaining = remaining[comment_end + 2 :]
+            continue
+        return remaining.startswith("|>")
+
+
+def _mask_kcl_non_code(source: str) -> str:
+    """Mask KCL comments and strings while preserving source positions."""
+    masked = list(source)
+    index = 0
+    in_string = False
+    while index < len(source):
+        if in_string:
+            if source[index] == "\\":
+                masked[index] = " "
+                if index + 1 < len(source) and source[index + 1] != "\n":
+                    masked[index + 1] = " "
+                index += 2
+                continue
+            if source[index] == '"':
+                in_string = False
+            if source[index] != "\n":
+                masked[index] = " "
+            index += 1
+            continue
+
+        if source[index] == '"':
+            in_string = True
+            masked[index] = " "
+            index += 1
+            continue
+        if source.startswith("//", index):
+            comment_end = source.find("\n", index + 2)
+            if comment_end < 0:
+                comment_end = len(source)
+            masked[index:comment_end] = " " * (comment_end - index)
+            index = comment_end
+            continue
+        if source.startswith("/*", index):
+            comment_end = source.find("*/", index + 2)
+            if comment_end < 0:
+                comment_end = len(source)
+            else:
+                comment_end += 2
+            for comment_index in range(index, comment_end):
+                if masked[comment_index] != "\n":
+                    masked[comment_index] = " "
+            index = comment_end
+            continue
+        index += 1
+    return "".join(masked)
+
+
+def _source_through_sketch(kcl_code: str, sketch_name: str) -> str | None:
+    """Return a parseable source prefix ending after a named top-level value.
+
+    KCL evaluates top-level declarations in source order. Keeping the program
+    through the requested sketch lets the sketch renderer ignore failures in
+    later consumers such as regions, extrudes, and booleans. Pipeline lines
+    must stay attached to the declaration: ``startSketchOn`` alone is valid
+    KCL but would render an incomplete sketch before its ``|>`` operations.
+    """
+    if not sketch_name:
+        return None
+
+    lines = kcl_code.splitlines(keepends=True)
+    searchable_source = _mask_kcl_non_code(kcl_code)
+    declaration = re.compile(
+        rf"^[ \t]*(?:export[ \t]+)?{re.escape(sketch_name)}[ \t\r\n]*=",
+        re.MULTILINE,
+    )
+    declaration_match = declaration.search(searchable_source)
+    if declaration_match is None:
+        return None
+    declaration_end_line = searchable_source.count("\n", 0, declaration_match.end())
+
+    for end in range(declaration_end_line + 1, len(lines) + 1):
+        candidate = "".join(lines[:end])
+        try:
+            kcl.parse_code(candidate)
+        except kcl.KclError:
+            continue
+
+        if _starts_with_pipeline_after_comments("".join(lines[end:])):
+            continue
+        return candidate
+
+    return None
+
+
+def _copy_project_with_entrypoint(
+    kcl_path: Path | str, entrypoint_code: str, destination: Path
+) -> Path:
+    """Copy KCL-relevant project files and replace the entrypoint source."""
+    path = Path(kcl_path).resolve()
+    root = path if path.is_dir() else path.parent
+    entrypoint = root / "main.kcl" if path.is_dir() else path
+    relevant_extensions = {f".{ext}" for ext in kcl.relevant_file_extensions()}
+    copied_entrypoint = destination / entrypoint.relative_to(root)
+
+    for source in root.rglob("*"):
+        if not source.is_file() or source.suffix.lower() not in relevant_extensions:
+            continue
+        copied = destination / source.relative_to(root)
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        if source == entrypoint:
+            copied.write_text(entrypoint_code)
+        else:
+            copied.write_bytes(source.read_bytes())
+
+    project_manifest = root / "project.toml"
+    if project_manifest.is_file():
+        (destination / project_manifest.name).write_bytes(project_manifest.read_bytes())
+
+    return copied_entrypoint
+
+
+async def _execute_through_sketch(
+    sketch_name: str,
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+) -> "kcl.ExecOutcome | None":
+    """Execute only through a named sketch when a full execution has failed."""
+    if kcl_code:
+        source = kcl_code
+    else:
+        assert kcl_path is not None
+        path = Path(kcl_path)
+        entrypoint = path / "main.kcl" if path.is_dir() else path
+        source = entrypoint.read_text()
+
+    isolated_source = _source_through_sketch(source, sketch_name)
+    if isolated_source is None or isolated_source.rstrip() == source.rstrip():
+        return None
+
+    logger.info("Retrying visualization with KCL isolated through %s", sketch_name)
+    if kcl_code:
+        return await _execute_with_retries(kcl.execute_code, isolated_source)
+
+    assert kcl_path is not None
+    with TemporaryDirectory(prefix="zoo-mcp-sketch-") as temporary_directory:
+        isolated_path = _copy_project_with_entrypoint(
+            kcl_path, isolated_source, Path(temporary_directory)
+        )
+        return await _execute_with_retries(kcl.execute, str(isolated_path))
+
+
 async def zoo_visualize_sketch(
     sketch_name: str,
     kcl_code: str | None = None,
@@ -1869,7 +2051,9 @@ async def zoo_visualize_sketch(
 
     The renderer is provided by ``zoo-kcl`` on ``ExecOutcome``. Sketch names
     are the variable names assigned to sketch expressions and are also exposed
-    by :func:`zoo_get_sketch_constraint_status`.
+    by :func:`zoo_get_sketch_constraint_status`. If full execution fails after
+    the named sketch, retry through that declaration so downstream errors do
+    not block the diagnostic render.
 
     Args:
         sketch_name: Variable name of the sketch to render.
@@ -1884,19 +2068,29 @@ async def zoo_visualize_sketch(
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
-        if kcl_code:
-            outcome = await _execute_with_retries(
-                kcl.execute_code,
-                kcl_code,
-                _operation="visualize_sketch",
+        try:
+            if kcl_code:
+                outcome = await _execute_with_retries(
+                    kcl.execute_code,
+                    kcl_code,
+                    _operation="visualize_sketch",
+                )
+            else:
+                assert kcl_path is not None
+                outcome = await _execute_with_retries(
+                    kcl.execute,
+                    str(kcl_path),
+                    _operation="visualize_sketch",
+                )
+        except Exception:
+            isolated_outcome = await _execute_through_sketch(
+                sketch_name=sketch_name,
+                kcl_code=kcl_code,
+                kcl_path=kcl_path,
             )
-        else:
-            assert kcl_path is not None
-            outcome = await _execute_with_retries(
-                kcl.execute,
-                str(kcl_path),
-                _operation="visualize_sketch",
-            )
+            if isolated_outcome is None:
+                raise
+            outcome = isolated_outcome
         return bytes(outcome.render_sketch_png(sketch_name))
     except Exception as e:
         logger.error(
