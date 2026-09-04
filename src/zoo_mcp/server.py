@@ -723,6 +723,8 @@ async def visualize_sketch(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     output_path: str | None = None,
+    highlighted_segments: list[str] | None = None,
+    resolved_region: str | None = None,
 ) -> ImageContent | str:
     """Render a named 2D KCL sketch as a solver-debug PNG.
 
@@ -731,6 +733,10 @@ async def visualize_sketch(
     such as ``profile`` in ``profile = sketch(on = XY) { ... }``. Use
     ``get_sketch_constraint_status`` to discover sketch names when needed.
     A failure in KCL after the named sketch does not block its render.
+    For region-selection problems, highlight seed segments in magenta and,
+    when available, included region segments in green. Green marks whole
+    original segments, not exact trimmed portions. If region creation fails,
+    omit ``resolved_region`` to inspect the seed segments alone.
 
     Args:
         sketch_name: Variable name of the sketch to render.
@@ -739,6 +745,11 @@ async def visualize_sketch(
         output_path: If provided, write the PNG to this file or directory and
             return its absolute path. A directory receives ``image.png``. If
             omitted, return the PNG inline as ImageContent.
+        highlighted_segments: Local segment names inside the named sketch,
+            e.g. ["topRightBlend", "topLug"], without the sketch-name prefix.
+        resolved_region: Top-level region variable from that sketch, e.g.
+            "topEarRegion". The region must resolve successfully; failures
+            later in the project do not block this overlay.
 
     Returns:
         The inline PNG, its saved absolute path, or an error message.
@@ -750,6 +761,8 @@ async def visualize_sketch(
             sketch_name=sketch_name,
             kcl_code=kcl_code,
             kcl_path=kcl_path,
+            highlighted_segments=highlighted_segments,
+            resolved_region=resolved_region,
         )
         if output_path is not None:
             return save_image_bytes_to_disk(image, output_path, image_format="png")
