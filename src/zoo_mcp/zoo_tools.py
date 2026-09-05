@@ -2012,12 +2012,13 @@ def _copy_project_with_entrypoint(
     return copied_entrypoint
 
 
-async def _execute_through_sketch(
-    sketch_name: str,
+async def _execute_through_declaration(
+    value_name: str,
     kcl_code: str | None,
     kcl_path: Path | str | None,
+    resolved_region: str | None = None,
 ) -> "kcl.ExecOutcome | None":
-    """Execute only through a named sketch when a full execution has failed."""
+    """Execute through a named sketch or region after full execution fails."""
     if kcl_code:
         source = kcl_code
     else:
@@ -2026,26 +2027,36 @@ async def _execute_through_sketch(
         entrypoint = path / "main.kcl" if path.is_dir() else path
         source = entrypoint.read_text()
 
-    isolated_source = _source_through_sketch(source, sketch_name)
+    isolated_source = _source_through_sketch(source, value_name)
     if isolated_source is None or isolated_source.rstrip() == source.rstrip():
         return None
 
-    logger.info("Retrying visualization with KCL isolated through %s", sketch_name)
+    logger.info("Retrying visualization with KCL isolated through %s", value_name)
+    execution_options = (
+        {"resolved_region": resolved_region} if resolved_region is not None else {}
+    )
     if kcl_code:
-        return await _execute_with_retries(kcl.execute_code, isolated_source)
+        return await _execute_with_retries(
+            kcl.execute_code, isolated_source, **execution_options
+        )
 
     assert kcl_path is not None
     with TemporaryDirectory(prefix="zoo-mcp-sketch-") as temporary_directory:
         isolated_path = _copy_project_with_entrypoint(
             kcl_path, isolated_source, Path(temporary_directory)
         )
-        return await _execute_with_retries(kcl.execute, str(isolated_path))
+        return await _execute_with_retries(
+            kcl.execute, str(isolated_path), **execution_options
+        )
 
 
 async def zoo_visualize_sketch(
     sketch_name: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
+    *,
+    highlighted_segments: list[str] | None = None,
+    resolved_region: str | None = None,
 ) -> bytes:
     """Execute KCL and render one named sketch as a PNG.
 
@@ -2059,11 +2070,19 @@ async def zoo_visualize_sketch(
         sketch_name: Variable name of the sketch to render.
         kcl_code: KCL source code to execute.
         kcl_path: Path to a KCL file or project containing ``main.kcl``.
+        highlighted_segments: Local segment names inside the selected sketch.
+        resolved_region: Top-level region variable from the selected sketch.
+            Soft green fill shows the actual trimmed region, leaving holes
+            unfilled and constraint-colored lines visible. Omit this if region
+            creation failed. Named seeds have magenta halos.
 
     Returns:
         Raw PNG bytes for the requested sketch.
     """
     logger.info("Visualizing sketch %s", sketch_name)
+    execution_options = (
+        {"resolved_region": resolved_region} if resolved_region is not None else {}
+    )
 
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
@@ -2074,6 +2093,7 @@ async def zoo_visualize_sketch(
                     kcl.execute_code,
                     kcl_code,
                     _operation="visualize_sketch",
+                    **execution_options,
                 )
             else:
                 assert kcl_path is not None
@@ -2081,16 +2101,26 @@ async def zoo_visualize_sketch(
                     kcl.execute,
                     str(kcl_path),
                     _operation="visualize_sketch",
+                    **execution_options,
                 )
         except Exception:
-            isolated_outcome = await _execute_through_sketch(
-                sketch_name=sketch_name,
+            isolated_outcome = await _execute_through_declaration(
+                value_name=resolved_region or sketch_name,
                 kcl_code=kcl_code,
                 kcl_path=kcl_path,
+                resolved_region=resolved_region,
             )
             if isolated_outcome is None:
                 raise
             outcome = isolated_outcome
+        if highlighted_segments or resolved_region is not None:
+            return bytes(
+                outcome.render_sketch_png(
+                    sketch_name,
+                    highlighted_segments=highlighted_segments,
+                    resolved_region=resolved_region,
+                )
+            )
         return bytes(outcome.render_sketch_png(sketch_name))
     except Exception as e:
         logger.error(
