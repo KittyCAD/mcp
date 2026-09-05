@@ -56,7 +56,7 @@ async def test_region_overlay_survives_downstream_failure(
     )
 
     assert output.is_file(), response
-    assert {(255, 79, 216), (117, 255, 90)} <= colors(output.read_bytes())
+    assert {(255, 79, 216), (43, 72, 43), (60, 115, 255)} <= colors(output.read_bytes())
     assert path.read_text() == source
 
 
@@ -85,7 +85,7 @@ async def test_failed_region_can_show_seeds_without_inventing_boundary() -> None
     assert isinstance(content[0], ImageContent)
     pixel_colors = colors(base64.b64decode(content[0].data))
     assert (255, 79, 216) in pixel_colors
-    assert (117, 255, 90) not in pixel_colors
+    assert (43, 72, 43) not in pixel_colors
 
 
 @pytest.mark.asyncio

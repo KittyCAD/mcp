@@ -48,7 +48,7 @@ Repository = "https://github.com/KittyCAD/mcp"
 
 [tool.uv.sources]
 # Temporary renderer source for modeling-app#13603; replace before release.
-zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "fc20fcad582fac21a9761aa588ca72aab4b7acc7", subdirectory = "rust/kcl-python-bindings" }
+zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "9a6354729b31dec5c989f082dd723fa5dce2646f", subdirectory = "rust/kcl-python-bindings" }
 
 [project.scripts]
 zoo-mcp = "zoo_mcp.server:main"

@@ -733,9 +733,9 @@ async def visualize_sketch(
     such as ``profile`` in ``profile = sketch(on = XY) { ... }``. Use
     ``get_sketch_constraint_status`` to discover sketch names when needed.
     A failure in KCL after the named sketch does not block its render.
-    For region-selection problems, highlight seed segments in magenta and,
-    when available, included region segments in green. Green marks whole
-    original segments, not exact trimmed portions. If region creation fails,
+    For region-selection problems, show magenta seed halos and, when available,
+    soft green fill inside the actual trimmed region. Holes remain unfilled;
+    constraint-colored lines remain visible on top. If region creation fails,
     omit ``resolved_region`` to inspect the seed segments alone.
 
     Args:
