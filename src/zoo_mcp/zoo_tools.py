@@ -2074,7 +2074,8 @@ async def zoo_visualize_sketch(
         resolved_region: Top-level region variable from the selected sketch.
             Soft green fill shows the actual trimmed region, leaving holes
             unfilled and constraint-colored lines visible. Omit this if region
-            creation failed. Named seeds have magenta halos.
+            creation failed. Named seeds have gold halos with dark separators;
+            the inner stroke retains its constraint color.
 
     Returns:
         Raw PNG bytes for the requested sketch.
