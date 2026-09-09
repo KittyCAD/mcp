@@ -952,7 +952,7 @@ async def test_execute_kcl_surfaces_all_issue_severities(monkeypatch):
         ]
     )
 
-    async def fake_execute_code(code: str):
+    async def fake_execute_code(code: str, *, trace=None):
         return outcome
 
     monkeypatch.setattr(zoo_mcp.zoo_tools.kcl, "execute_code", fake_execute_code)
