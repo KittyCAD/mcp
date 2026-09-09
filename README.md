@@ -53,6 +53,49 @@ ZOO_API_TOKEN="your_api_key_here" ./zoo-mcp-linux-x86_64
 ```
 > The binaries are not code-signed, so macOS Gatekeeper and Windows SmartScreen may warn on first run.
 
+## Capturing backend API call IDs in Python
+
+Python callers can collect tracing events without changing a tool's return value:
+
+```python
+from zoo_mcp.zoo_tools import capture_api_call_events, zoo_execute_kcl
+
+with capture_api_call_events() as events:
+    result = await zoo_execute_kcl(kcl_code="x = 1")
+
+api_call_ids = list(
+    dict.fromkeys(
+        event.api_call_id for event in events if event.api_call_id is not None
+    )
+)
+```
+
+The list remains available if a call raises or is canceled. Nested capture contexts
+each receive an event once. Concurrent tool invocations have separate invocation IDs;
+child tasks inherit their parent's capture contexts, so await them before consuming
+the completed event list.
+
+`ApiCallEvent` contains `operation`, `invocation_id`, `api_call_id`, `source`,
+`attempt`, and `outcome`, with optional `session_id`, `command_id`,
+`async_operation_id`, and HTTP `status_code`. A missing backend ID is `None`.
+The source distinguishes KCL attempts, REST responses, file operations, WebSocket
+handshakes, session use, commands, and invocation completion. An `observed` event
+records information already received; parsing or a later operation can still fail.
+Invocation completion describes the whole Python call, while KCL and command
+outcomes describe their individual attempts. A recovered invocation can therefore
+contain both failed and successful KCL attempts.
+
+Events are observations, not a count of backend requests. A persistent modeling
+session reuses one backend ID across many command IDs. A file operation's `id` is
+also retained as `async_operation_id`; each polling HTTP request has its own
+`api_call_id`. Repeated observations of an ID are expected. Existing execution
+retry events additionally expose `api_call_ids` for that attempt.
+
+The same events are logged at INFO even without a capture context. Log records
+include searchable identifiers and a structured `api_call_event` attribute;
+tracing does not include credentials, source code, request bodies, or query text.
+MCP tool response schemas are unchanged.
+
 ## Integrations
 
 The server can be used as is by [running the server](#running-the-server) or importing directly into your python code.
