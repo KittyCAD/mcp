@@ -2016,12 +2016,52 @@ def _copy_project_with_entrypoint(
     return copied_entrypoint
 
 
+def _source_for_sketch_first(source: str, sketch_name: str) -> str | None:
+    """Conservatively isolate a unique, directly declared solver sketch.
+
+    Imports, function instances, aliases and later whole-sketch operations
+    need full execution to preserve name resolution and placement. Segment
+    references in downstream regions and hiding the sketch are safe to omit.
+    This is a source prefix, not dependency slicing: earlier work stays intact.
+    """
+    masked = _mask_kcl_non_code(source)
+    if not sketch_name or re.search(r"\bimport\b|\bfn\s+hide\b|\bhide\s*=", masked):
+        return None
+    name = re.escape(sketch_name)
+    declarations = list(re.finditer(rf"\b{name}\s*=(?!=)", masked))
+    if len(declarations) != 1:
+        return None
+    declaration = declarations[0]
+    before = masked[: declaration.start()]
+    if any(
+        before.count(left) != before.count(right) for left, right in ("()", "[]", "{}")
+    ):
+        return None
+    if not re.match(r"\s*sketch\s*\(", masked[declaration.end() :]):
+        return None
+
+    prefix = _source_through_sketch(source, sketch_name)
+    if prefix is None or not _mask_kcl_non_code(prefix).rstrip().endswith("}"):
+        return None
+    if "|>" in masked[declaration.end() : len(prefix)]:
+        return None
+    suffix = masked[len(prefix) :]
+    if not suffix.strip() or re.search(r"@\s*settings\b", suffix):
+        return None
+    suffix = re.sub(r"\bhide\s*\([^()]*\)", "", suffix)
+    if re.search(rf"\b{name}\b(?!\s*\.)", suffix):
+        return None
+    return prefix
+
+
 async def _execute_through_sketch(
     sketch_name: str,
     kcl_code: str | None,
     kcl_path: Path | str | None,
+    *,
+    sketch_first: bool = False,
 ) -> "kcl.ExecOutcome | None":
-    """Execute only through a named sketch when a full execution has failed."""
+    """Execute a sketch prefix, guarded when used before full execution."""
     if kcl_code:
         source = kcl_code
     else:
@@ -2030,20 +2070,28 @@ async def _execute_through_sketch(
         entrypoint = path / "main.kcl" if path.is_dir() else path
         source = entrypoint.read_text()
 
-    isolated_source = _source_through_sketch(source, sketch_name)
+    isolated_source = (
+        _source_for_sketch_first(source, sketch_name)
+        if sketch_first
+        else _source_through_sketch(source, sketch_name)
+    )
     if isolated_source is None or isolated_source.rstrip() == source.rstrip():
         return None
 
-    logger.info("Retrying visualization with KCL isolated through %s", sketch_name)
+    logger.info("Executing visualization with KCL isolated through %s", sketch_name)
     if kcl_code:
-        return await _execute_with_retries(kcl.execute_code, isolated_source)
+        return await _execute_with_retries(
+            kcl.execute_code, isolated_source, _operation="visualize_sketch"
+        )
 
     assert kcl_path is not None
     with TemporaryDirectory(prefix="zoo-mcp-sketch-") as temporary_directory:
         isolated_path = _copy_project_with_entrypoint(
             kcl_path, isolated_source, Path(temporary_directory)
         )
-        return await _execute_with_retries(kcl.execute, str(isolated_path))
+        return await _execute_with_retries(
+            kcl.execute, str(isolated_path), _operation="visualize_sketch"
+        )
 
 
 async def zoo_visualize_sketch(
@@ -2056,9 +2104,9 @@ async def zoo_visualize_sketch(
 
     The renderer is provided by ``zoo-kcl`` on ``ExecOutcome``. Sketch names
     are the variable names assigned to sketch expressions and are also exposed
-    by :func:`zoo_get_sketch_constraint_status`. If full execution fails after
-    the named sketch, retry through that declaration so downstream errors do
-    not block the diagnostic render.
+    by :func:`zoo_get_sketch_constraint_status`. Safely isolated top-level
+    solver sketches execute first without downstream consumers. Other cases
+    use full execution, retaining prefix recovery for downstream failures.
 
     Args:
         sketch_name: Variable name of the sketch to render.
@@ -2078,6 +2126,17 @@ async def zoo_visualize_sketch(
         raise ZooMCPException("instance_index must be non-negative")
 
     try:
+        sketch_first_failed = False
+        if instance_index is None:
+            try:
+                isolated_outcome = await _execute_through_sketch(
+                    sketch_name, kcl_code, kcl_path, sketch_first=True
+                )
+                if isolated_outcome is not None:
+                    return bytes(isolated_outcome.render_sketch_png(sketch_name))
+            except Exception:
+                sketch_first_failed = True
+                logger.info("Sketch-first visualization unavailable; trying full KCL")
         try:
             if kcl_code:
                 outcome = await _execute_with_retries(
@@ -2093,6 +2152,8 @@ async def zoo_visualize_sketch(
                     _operation="visualize_sketch",
                 )
         except Exception:
+            if sketch_first_failed:
+                raise
             isolated_outcome = await _execute_through_sketch(
                 sketch_name=sketch_name,
                 kcl_code=kcl_code,

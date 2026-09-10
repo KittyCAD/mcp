@@ -1627,6 +1627,95 @@ def test_copy_project_with_entrypoint_preserves_project_manifest(tmp_path: Path)
     assert (destination / "project.toml").read_text() == project_manifest
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import value from "helper.kcl"\n' + SKETCH_VISUALIZER_KCL,
+        "fn make() {\n" + SKETCH_VISUALIZER_KCL.split("\n", 2)[2] + "\n}\nx = make()\n",
+        SKETCH_VISUALIZER_KCL
+        + "\nfn make() {\ns1 = sketch(on = XY) {}\nreturn s1\n}\n",
+        SKETCH_VISUALIZER_KCL + "\nalias = s1\n",
+        SKETCH_VISUALIZER_KCL + "\ntranslate(s1, x = 10mm)\n",
+        SKETCH_VISUALIZER_KCL + "\ncloned = clone(s1)\n",
+        SKETCH_VISUALIZER_KCL + "\n@settings(defaultLengthUnit = in)\n",
+        "fn hide(@value) { return clone(value) }\n"
+        + SKETCH_VISUALIZER_KCL
+        + "\nhide(s1)\n",
+        SKETCH_VISUALIZER_KCL.replace("}\n\ns2", "}\n  |> translate(x = 10mm)\n\ns2"),
+        "s1 = makeProfile()\nsolid = extrude(s1, length = 10mm)\n",
+        "s1 = startSketchOn(XY)\n  |> startProfile(at = [0, 0])\nx = 1\n",
+    ],
+)
+def test_sketch_first_rejects_uncertain_selection(source: str) -> None:
+    assert zoo_mcp.zoo_tools._source_for_sketch_first(source, "s1") is None
+
+
+def test_sketch_first_preserves_dependencies_and_ignores_non_code() -> None:
+    source = """
+// import s1 from "unused.kcl"
+label = "s1 = sketch(on = XY) {}"
+height = 10mm
+  s1
+    = sketch(on = offsetPlane(XZ, offset = height)) {
+      edge = line(start = [0mm, 0mm], end = [height, 0mm])
+    }
+region(segments = [s1.edge])
+hide(s1)
+"""
+    prefix = zoo_mcp.zoo_tools._source_for_sketch_first(source, "s1")
+    assert prefix is not None
+    assert "height = 10mm" in prefix
+    assert "offsetPlane(XZ, offset = height)" in prefix
+    assert "region(segments" not in prefix
+
+
+@pytest.mark.asyncio
+async def test_sketch_first_skips_downstream_execution() -> None:
+    source = SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL
+    with pytest.raises(kcl.KclError):
+        await kcl.execute_code(source)
+    with zoo_mcp.zoo_tools.capture_execution_retry_events() as events:
+        png = await zoo_mcp.zoo_tools.zoo_visualize_sketch("s1", kcl_code=source)
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert [(event.operation, event.outcome) for event in events] == [
+        ("visualize_sketch", "succeeded")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plane", ["XY", "offsetPlane(XZ, offset = 23mm)", "faceOf(base, face = END)"]
+)
+async def test_sketch_first_matches_full_png_and_constraints(plane: str) -> None:
+    source = f"""
+@settings(kclVersion = 2.0)
+baseSketch = sketch(on = XY) {{
+  edge = circle(center = [0mm, 0mm], start = [20mm, 0mm])
+}}
+base = extrude(region(segments = [baseSketch.edge]), length = 23mm)
+radiusValue = 10mm
+profile = sketch(on = {plane}) {{
+  perimeter = circle(center = [0mm, 0mm], start = [var 10mm, var 0mm])
+  radius(perimeter) == radiusValue
+}}
+solid = extrude(region(segments = [profile.perimeter]), length = 12mm)
+hide(profile)
+"""
+    full = await kcl.execute_code(source)
+    prefix = await zoo_mcp.zoo_tools._execute_through_sketch(
+        "profile", source, None, sketch_first=True
+    )
+    assert prefix is not None
+    assert bytes(prefix.render_sketch_png("profile")) == bytes(
+        full.render_sketch_png("profile")
+    )
+    full_report = full.sketch_constraint_report().under_constrained[0]
+    prefix_report = prefix.sketch_constraint_report().under_constrained[0]
+    assert prefix_report.status == full_report.status
+    assert prefix_report.free_count == full_report.free_count
+    assert prefix_report.instance_index == full_report.instance_index
+
+
 @pytest.mark.asyncio
 async def test_visualize_sketch_returns_png():
     response = await mcp.call_tool(
@@ -1684,13 +1773,15 @@ async def test_visualize_sketch_falls_back_after_retryable_execution_error(
 
     monkeypatch.setattr(zoo_mcp.zoo_tools.kcl, "execute_code", _execute_code)
 
+    # An alias requires the original full-first path, including its retries.
+    source = SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL + "\nalias = s1\n"
     png = await zoo_mcp.zoo_tools.zoo_visualize_sketch(
         sketch_name="s1",
-        kcl_code=SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL,
+        kcl_code=source,
     )
 
     assert png == expected_png
-    assert calls.count(SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL) == 3
+    assert calls.count(source) == 3
     assert len(calls) == 4
 
 
