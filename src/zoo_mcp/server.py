@@ -723,6 +723,7 @@ async def visualize_sketch(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
     output_path: str | None = None,
+    instance_index: int | None = None,
 ) -> ImageContent | str:
     """Render a named 2D KCL sketch as a solver-debug PNG.
 
@@ -731,6 +732,8 @@ async def visualize_sketch(
     such as ``profile`` in ``profile = sketch(on = XY) { ... }``. Use
     ``get_sketch_constraint_status`` to discover sketch names when needed.
     A failure in KCL after the named sketch does not block its render.
+    If names repeat (for example, a function called twice), select an
+    ``instance_index`` from a fresh constraint report for the same entrypoint.
 
     Args:
         sketch_name: Variable name of the sketch to render.
@@ -739,6 +742,8 @@ async def visualize_sketch(
         output_path: If provided, write the PNG to this file or directory and
             return its absolute path. A directory receives ``image.png``. If
             omitted, return the PNG inline as ImageContent.
+        instance_index: Zero-based creation order among sketches with this
+            name. Omit for a unique name; refresh the report after edits.
 
     Returns:
         The inline PNG, its saved absolute path, or an error message.
@@ -750,6 +755,7 @@ async def visualize_sketch(
             sketch_name=sketch_name,
             kcl_code=kcl_code,
             kcl_path=kcl_path,
+            instance_index=instance_index,
         )
         if output_path is not None:
             return save_image_bytes_to_disk(image, output_path, image_format="png")

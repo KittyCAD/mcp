@@ -1785,13 +1785,17 @@ def zoo_lint_and_fix_kcl(
 
 def _format_constraint_status(status: kcl.SketchConstraintStatus) -> dict:
     """Format a single SketchConstraintStatus into a dict."""
-    return {
+    result = {
         "name": status.name,
         "status": str(status.status).removeprefix("ConstraintKind."),
         "free_count": status.free_count,
         "conflict_count": status.conflict_count,
         "total_count": status.total_count,
     }
+    instance_index = getattr(status, "instance_index", None)
+    if isinstance(instance_index, int):
+        result["instance_index"] = instance_index
+    return result
 
 
 def _format_constraint_report(report: kcl.SketchConstraintReport) -> dict:
@@ -2046,6 +2050,7 @@ async def zoo_visualize_sketch(
     sketch_name: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
+    instance_index: int | None = None,
 ) -> bytes:
     """Execute KCL and render one named sketch as a PNG.
 
@@ -2059,6 +2064,8 @@ async def zoo_visualize_sketch(
         sketch_name: Variable name of the sketch to render.
         kcl_code: KCL source code to execute.
         kcl_path: Path to a KCL file or project containing ``main.kcl``.
+        instance_index: For duplicate names, zero-based creation order from a
+            fresh constraint report for the same entrypoint and source.
 
     Returns:
         Raw PNG bytes for the requested sketch.
@@ -2066,6 +2073,9 @@ async def zoo_visualize_sketch(
     logger.info("Visualizing sketch %s", sketch_name)
 
     _check_kcl_code_or_path(kcl_code, kcl_path)
+
+    if instance_index is not None and instance_index < 0:
+        raise ZooMCPException("instance_index must be non-negative")
 
     try:
         try:
@@ -2091,7 +2101,11 @@ async def zoo_visualize_sketch(
             if isolated_outcome is None:
                 raise
             outcome = isolated_outcome
-        return bytes(outcome.render_sketch_png(sketch_name))
+        if instance_index is None:
+            return bytes(outcome.render_sketch_png(sketch_name))
+        return bytes(
+            outcome.render_sketch_png(sketch_name, instance_index=instance_index)
+        )
     except Exception as e:
         logger.error(
             "Failed to visualize sketch (error_family=%s)",

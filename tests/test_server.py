@@ -1766,6 +1766,52 @@ async def test_visualize_sketch_reports_missing_name():
 
 
 @pytest.mark.asyncio
+async def test_visualize_sketch_duplicate_instances(tmp_path: Path) -> None:
+    (tmp_path / "helpers.kcl").write_text("""
+export fn makeProfile(@height) {
+  profile = sketch(on = XY) {
+    edge = line(start = [0mm, 0mm], end = [20mm, height])
+  }
+  return profile
+}
+""")
+    path = tmp_path / "main.kcl"
+    path.write_text("""
+@settings(kclVersion = 2.0)
+import makeProfile from "helpers.kcl"
+first = makeProfile(6.5mm)
+second = makeProfile(10.5mm)
+""")
+    report = await zoo_mcp.zoo_tools.zoo_get_sketch_constraint_status(kcl_path=path)
+    assert [s["instance_index"] for s in report["fully_constrained"]] == [0, 1]
+
+    arguments = {"sketch_name": "profile", "kcl_path": str(path)}
+    ambiguous = _meta_result(
+        await mcp.call_tool("visualize_sketch", arguments=arguments)
+    )
+    assert "found 2 sketches named `profile`" in ambiguous
+    assert "instance_index" in ambiguous
+
+    images = []
+    for index in (0, 1):
+        response = await mcp.call_tool(
+            "visualize_sketch", arguments={**arguments, "instance_index": index}
+        )
+        image = _content_list(response)[0]
+        assert isinstance(image, ImageContent)
+        images.append(base64.b64decode(image.data))
+    assert images[0] != images[1]
+
+    for index, message in ((-1, "must be non-negative"), (2, "out of range")):
+        result = _meta_result(
+            await mcp.call_tool(
+                "visualize_sketch", arguments={**arguments, "instance_index": index}
+            )
+        )
+        assert message in result
+
+
+@pytest.mark.asyncio
 async def test_get_face_info(monkeypatch):
     face_info = zoo_mcp.zoo_tools.FaceInfo(
         face_get_position=FaceGetPosition(pos=Point3d(x=1.0, y=2.0, z=3.0)),
