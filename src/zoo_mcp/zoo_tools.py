@@ -144,6 +144,9 @@ SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 # retryable error instead of an abandoned request.
 MODELING_COMMAND_TIMEOUT = 300.0
 
+# One budget shared by sketch execution, retries, recovery and rendering.
+SKETCH_VISUALIZATION_TIMEOUT = 120.0
+
 # Large file-analysis requests are asynchronous. Leave enough headroom under
 # the enclosing 300-second tool budget to surface a typed timeout instead of
 # letting the caller abandon the request while it is still polling.
@@ -2107,6 +2110,8 @@ async def zoo_visualize_sketch(
     by :func:`zoo_get_sketch_constraint_status`. Safely isolated top-level
     solver sketches execute first without downstream consumers. Other cases
     use full execution, retaining prefix recovery for downstream failures.
+    Eligible first instances of solid helpers use the native sketch-only path.
+    All attempts share ``SKETCH_VISUALIZATION_TIMEOUT`` seconds.
 
     Args:
         sketch_name: Variable name of the sketch to render.
@@ -2126,47 +2131,78 @@ async def zoo_visualize_sketch(
         raise ZooMCPException("instance_index must be non-negative")
 
     try:
-        sketch_first_failed = False
-        if instance_index is None:
+        async with asyncio.timeout(SKETCH_VISUALIZATION_TIMEOUT):
+            sketch_first_failed = False
+            if instance_index == 0:
+                instance_started = monotonic()
+                try:
+                    if kcl_code:
+                        instance_png = await kcl.try_render_sketch_instance_code(
+                            kcl_code, sketch_name, instance_index
+                        )
+                    else:
+                        assert kcl_path is not None
+                        instance_png = await kcl.try_render_sketch_instance(
+                            str(kcl_path), sketch_name, instance_index
+                        )
+                    if instance_png is not None:
+                        await _report_execution_retry_event(
+                            "visualize_sketch", "succeeded", 1, instance_started
+                        )
+                        logger.info(
+                            "Rendered sketch instance without unrelated geometry"
+                        )
+                        return bytes(instance_png)
+                except Exception:
+                    logger.info(
+                        "Sketch-instance isolation unavailable; trying full KCL"
+                    )
+            if instance_index is None:
+                try:
+                    isolated_outcome = await _execute_through_sketch(
+                        sketch_name, kcl_code, kcl_path, sketch_first=True
+                    )
+                    if isolated_outcome is not None:
+                        return bytes(isolated_outcome.render_sketch_png(sketch_name))
+                except Exception:
+                    sketch_first_failed = True
+                    logger.info(
+                        "Sketch-first visualization unavailable; trying full KCL"
+                    )
             try:
-                isolated_outcome = await _execute_through_sketch(
-                    sketch_name, kcl_code, kcl_path, sketch_first=True
-                )
-                if isolated_outcome is not None:
-                    return bytes(isolated_outcome.render_sketch_png(sketch_name))
+                if kcl_code:
+                    outcome = await _execute_with_retries(
+                        kcl.execute_code,
+                        kcl_code,
+                        _operation="visualize_sketch",
+                    )
+                else:
+                    assert kcl_path is not None
+                    outcome = await _execute_with_retries(
+                        kcl.execute,
+                        str(kcl_path),
+                        _operation="visualize_sketch",
+                    )
             except Exception:
-                sketch_first_failed = True
-                logger.info("Sketch-first visualization unavailable; trying full KCL")
-        try:
-            if kcl_code:
-                outcome = await _execute_with_retries(
-                    kcl.execute_code,
-                    kcl_code,
-                    _operation="visualize_sketch",
+                if sketch_first_failed:
+                    raise
+                isolated_outcome = await _execute_through_sketch(
+                    sketch_name=sketch_name,
+                    kcl_code=kcl_code,
+                    kcl_path=kcl_path,
                 )
-            else:
-                assert kcl_path is not None
-                outcome = await _execute_with_retries(
-                    kcl.execute,
-                    str(kcl_path),
-                    _operation="visualize_sketch",
-                )
-        except Exception:
-            if sketch_first_failed:
-                raise
-            isolated_outcome = await _execute_through_sketch(
-                sketch_name=sketch_name,
-                kcl_code=kcl_code,
-                kcl_path=kcl_path,
+                if isolated_outcome is None:
+                    raise
+                outcome = isolated_outcome
+            if instance_index is None:
+                return bytes(outcome.render_sketch_png(sketch_name))
+            return bytes(
+                outcome.render_sketch_png(sketch_name, instance_index=instance_index)
             )
-            if isolated_outcome is None:
-                raise
-            outcome = isolated_outcome
-        if instance_index is None:
-            return bytes(outcome.render_sketch_png(sketch_name))
-        return bytes(
-            outcome.render_sketch_png(sketch_name, instance_index=instance_index)
-        )
+    except TimeoutError as e:
+        raise ZooMCPTimeoutError(
+            f"Sketch visualization exceeded its {SKETCH_VISUALIZATION_TIMEOUT:g}-second budget"
+        ) from e
     except Exception as e:
         logger.error(
             "Failed to visualize sketch (error_family=%s)",

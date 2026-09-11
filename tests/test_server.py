@@ -1717,6 +1717,30 @@ hide(profile)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("instance_index", [None, 0])
+async def test_visualize_sketch_total_deadline_and_subsequent_success(
+    monkeypatch: pytest.MonkeyPatch, instance_index: int | None
+) -> None:
+    # Exercise the real native await in both the sketch-first and full paths.
+    # An expired budget must not be converted to a generic failure or retry.
+    with monkeypatch.context() as patch:
+        patch.setattr(zoo_mcp.zoo_tools, "SKETCH_VISUALIZATION_TIMEOUT", 0.0)
+        with (
+            zoo_mcp.zoo_tools.capture_execution_retry_events() as events,
+            pytest.raises(zoo_mcp.ZooMCPTimeoutError, match="0-second budget"),
+        ):
+            await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+                "s1", kcl_code=SKETCH_VISUALIZER_KCL, instance_index=instance_index
+            )
+        assert not events
+
+    png = await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+        "s1", kcl_code=SKETCH_VISUALIZER_KCL, instance_index=instance_index
+    )
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@pytest.mark.asyncio
 async def test_visualize_sketch_returns_png():
     response = await mcp.call_tool(
         "visualize_sketch",
@@ -1854,6 +1878,43 @@ async def test_visualize_sketch_reports_missing_name():
     result = _meta_result(response)
     assert isinstance(result, str)
     assert "no sketch named `missingSketch`" in result
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_first_solid_helper_instance(tmp_path: Path) -> None:
+    source = """
+@settings(kclVersion = 2.0)
+fn makePad(r) {
+  profile = sketch(on = XY) {
+    edge = circle(center = [0mm, 0mm], start = [var 3mm, var 0mm])
+    radius(edge) == r
+  }
+  solid = extrude(region(segments = [profile.edge]), length = 5mm)
+  hide(profile)
+  return solid
+}
+first = makePad(r = 3mm)
+second = makePad(r = 7mm)
+"""
+    full = await kcl.execute_code(source)
+    expected = bytes(full.render_sketch_png("profile", instance_index=0))
+    # Native eligibility is checked explicitly: an unintended full-execution
+    # fallback must not make this test pass.
+    native_png = await kcl.try_render_sketch_instance_code(source, "profile", 0)
+    assert native_png is not None and bytes(native_png) == expected
+    assert await kcl.try_render_sketch_instance_code(source, "profile", 1) is None
+    path = tmp_path / "main.kcl"
+    path.write_text(source)
+    for png in (
+        await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_code=source, instance_index=0
+        ),
+        await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_path=path, instance_index=0
+        ),
+    ):
+        assert png == expected
+    assert path.read_text() == source
 
 
 @pytest.mark.asyncio
