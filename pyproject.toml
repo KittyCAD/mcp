@@ -51,7 +51,7 @@ zoo-mcp = "zoo_mcp.server:main"
 
 [tool.uv.sources]
 # Temporary pin to modeling-app#13734 for explicit sketch-instance selection.
-zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "1327cf2bd19445b3448e6d8f321ab4afd7d57fd0", subdirectory = "rust/kcl-python-bindings" }
+zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "a8f5598f3835231886ffb2028394b35b738c7924", subdirectory = "rust/kcl-python-bindings" }
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
