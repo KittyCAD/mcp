@@ -1124,7 +1124,7 @@ wheels = [
 [[package]]
 name = "zoo-kcl"
 version = "0.3.184"
-source = { git = "https://github.com/KittyCAD/modeling-app?subdirectory=rust%2Fkcl-python-bindings&rev=f5bb4d5bc4d37b6c4651ad2802ddd2caf4b41238#f5bb4d5bc4d37b6c4651ad2802ddd2caf4b41238" }
+source = { git = "https://github.com/KittyCAD/modeling-app?subdirectory=rust%2Fkcl-python-bindings&rev=3fb5629d888595bccb770de90f998bc90067c9bb#3fb5629d888595bccb770de90f998bc90067c9bb" }
 
 [[package]]
 name = "zoo-mcp"
@@ -1165,7 +1165,7 @@ requires-dist = [
     { name = "truststore", specifier = "<1.0" },
     { name = "typing-extensions", specifier = ">=4.12" },
     { name = "websockets", specifier = ">=14.1,<17.0" },
-    { name = "zoo-kcl", git = "https://github.com/KittyCAD/modeling-app?subdirectory=rust%2Fkcl-python-bindings&rev=f5bb4d5bc4d37b6c4651ad2802ddd2caf4b41238" },
+    { name = "zoo-kcl", git = "https://github.com/KittyCAD/modeling-app?subdirectory=rust%2Fkcl-python-bindings&rev=3fb5629d888595bccb770de90f998bc90067c9bb" },
 ]
 
 [package.metadata.requires-dev]
