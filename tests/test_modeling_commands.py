@@ -1244,3 +1244,98 @@ async def test_import_waits_within_one_budget(
         await zoo_tools.zoo_import_cad_file("session-id", step)
 
     assert websocket.recv.await_count == 12
+
+
+@pytest.mark.asyncio
+async def test_request_auth_isolated_across_retries_and_late_session_callbacks(
+    monkeypatch,
+):
+    import kcl
+
+    monkeypatch.setattr(kcl, "ExecutionOptions", SimpleNamespace)
+    monkeypatch.setattr(zoo_tools, "EXECUTION_RETRY_BASE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(zoo_tools, "EXECUTION_RETRY_JITTER_SECONDS", 0)
+    clients = MagicMock()
+    monkeypatch.setattr(zoo_tools, "AsyncKittyCAD", clients)
+    helper_id = "55555555-5555-4555-8555-555555555555"
+
+    async def run(token):
+        events = []
+        callbacks = []
+
+        async def operation(*, options):
+            assert options.token == token
+            callbacks.append(options.on_engine_session)
+            await asyncio.sleep(0)
+            zoo_tools._new_client()
+            assert clients.call_args.kwargs["token"] == token
+            options.on_engine_session(helper_id)
+            if len(callbacks) == 1:
+                raise kcl.KclError("KCL EngineHangup error", True)
+            return "ok"
+
+        with zoo_tools.use_request_auth(token, on_engine_session=events.append):
+            assert await zoo_tools._execute_with_retries(operation) == "ok"
+        # A late reader callback keeps its original attempt after the scope exits.
+        await asyncio.to_thread(callbacks[0], helper_id)
+        assert [event.attempt for event in events] == [1, 2, 1]
+        assert len({event.invocation_id for event in events}) == 1
+        assert token not in repr(events)
+        return events[0].invocation_id
+
+    ids = await asyncio.gather(run("customer-a"), run("customer-b"))
+    assert len(set(ids)) == 2
+    assert zoo_tools.current_request_auth() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", [None, "", " "])
+async def test_bound_missing_auth_never_uses_process_token(monkeypatch, token):
+    monkeypatch.setenv("ZOO_API_TOKEN", "shared-account")
+    client = MagicMock()
+    operation = AsyncMock()
+    monkeypatch.setattr(zoo_tools, "AsyncKittyCAD", client)
+    with zoo_tools.use_request_auth(token):
+        with pytest.raises(ZooMCPException, match="Customer authorization"):
+            zoo_tools._new_client()
+        with pytest.raises(ZooMCPException, match="Customer authorization"):
+            await zoo_tools._execute_with_retries(operation)
+    client.assert_not_called()
+    operation.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_renderer_session_owner_and_acquisition_before_command_completes(
+    monkeypatch,
+):
+    websocket = AsyncMock()
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
+    monkeypatch.setattr(zoo_tools, "AsyncKittyCAD", MagicMock(return_value=AsyncMock()))
+    events = []
+    helper_id = "55555555-5555-4555-8555-555555555555"
+    websocket.recv.return_value = _session_frame().replace("api-call-id", helper_id)
+    with zoo_tools.use_request_auth(
+        "customer-a", scope_id="turn-a", on_engine_session=events.append
+    ):
+        session_id = await zoo_tools.zoo_start_modeling_session()
+        async with zoo_tools._modeling_websocket(session_id) as ws:
+            await zoo_tools._recv_modeling_frame(ws, zoo_tools._Deadline(), "test")
+            assert [(event.api_call_id, event.outcome) for event in events] == [
+                (helper_id, "acquired")
+            ]
+    with zoo_tools.use_request_auth("customer-b", scope_id="turn-b"):
+        assert zoo_tools.zoo_get_modeling_sessions() == []
+        with pytest.raises(ZooMCPException, match="Unknown modeling session"):
+            async with zoo_tools._modeling_websocket(session_id):
+                pytest.fail("A foreign customer must not acquire this websocket")
+    reused = []
+    with zoo_tools.use_request_auth(
+        "customer-a", scope_id="turn-a", on_engine_session=reused.append
+    ):
+        async with zoo_tools._modeling_websocket(session_id):
+            assert [(event.api_call_id, event.outcome) for event in reused] == [
+                (helper_id, "used")
+            ]
+    assert len(events) == 1

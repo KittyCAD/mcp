@@ -12,7 +12,7 @@ from tempfile import NamedTemporaryFile
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import urlencode, urlsplit, urlunsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import aiofiles
 import bson
@@ -120,7 +120,10 @@ from kittycad.models.ok_modeling_cmd_response import (
 from kittycad.models.ok_modeling_cmd_response import (
     OptionZoomToFit as ResponseZoomToFit,
 )
-from kittycad.models.ok_web_socket_response_data import OptionModeling
+from kittycad.models.ok_web_socket_response_data import (
+    OptionModeling,
+    OptionModelingSessionData,
+)
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
@@ -396,6 +399,74 @@ EXECUTION_RETRY_BASE_DELAY_SECONDS = 0.25
 EXECUTION_RETRY_MAX_DELAY_SECONDS = 2.0
 EXECUTION_RETRY_JITTER_SECONDS = 0.25
 
+
+@dataclass(frozen=True, slots=True)
+class EngineSessionEvent:
+    api_call_id: str
+    operation: str
+    invocation_id: str
+    attempt: int
+    max_attempts: int
+    outcome: Literal["acquired", "used"] = "acquired"
+
+
+@dataclass(frozen=True, slots=True)
+class RequestAuth:
+    token: str | None = field(repr=False)
+    scope_id: str | None = None
+    on_engine_session: Callable[[EngineSessionEvent], None] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def require_token(self) -> str:
+        if self.token is None or not self.token.strip():
+            raise ZooMCPException(
+                "Customer authorization is required for this operation"
+            )
+        return self.token
+
+
+_request_auth: ContextVar[RequestAuth | None] = ContextVar(
+    "zoo_request_auth", default=None
+)
+
+
+@contextmanager
+def use_request_auth(
+    token: str | None,
+    *,
+    scope_id: str | None = None,
+    on_engine_session: Callable[[EngineSessionEvent], None] | None = None,
+) -> Iterator[None]:
+    """Bind customer auth to this task; never fall back to process auth when set."""
+    marker = _request_auth.set(RequestAuth(token, scope_id, on_engine_session))
+    try:
+        yield
+    finally:
+        _request_auth.reset(marker)
+
+
+def current_request_auth() -> RequestAuth | None:
+    return _request_auth.get()
+
+
+def _new_client() -> AsyncKittyCAD:
+    auth = current_request_auth()
+    if auth is None:
+        return AsyncKittyCAD(verify_ssl=ctx)
+    return AsyncKittyCAD(token=auth.require_token(), verify_ssl=ctx)
+
+
+def _report_engine_session(auth: RequestAuth, event: EngineSessionEvent) -> None:
+    if auth.on_engine_session is not None:
+        try:
+            UUID(event.api_call_id)
+            auth.on_engine_session(event)
+        except Exception:
+            # Neither customer content nor callback exceptions belong in telemetry.
+            logger.debug("Engine session observer failed")
+
+
 ExecutionRetryOutcome: TypeAlias = Literal[
     "succeeded",
     "retry_scheduled",
@@ -524,9 +595,32 @@ async def _execute_with_retries(
     started_at = monotonic()
     operation = _operation or getattr(async_fn, "__name__", type(async_fn).__name__)
 
+    auth = current_request_auth()
+    invocation_id = str(uuid4())
     for attempt in range(1, MAX_EXECUTION_ATTEMPTS + 1):
+        attempt_kwargs = kwargs
+        if auth is not None:
+            # Bind the attempt before Rust moves the callback to its reader thread.
+            def acquired(api_call_id: str, attempt: int = attempt) -> None:
+                _report_engine_session(
+                    auth,
+                    EngineSessionEvent(
+                        api_call_id,
+                        operation,
+                        invocation_id,
+                        attempt,
+                        MAX_EXECUTION_ATTEMPTS,
+                    ),
+                )
+
+            attempt_kwargs = {
+                **kwargs,
+                "options": kcl.ExecutionOptions(
+                    token=auth.require_token(), on_engine_session=acquired
+                ),
+            }
         try:
-            result = await async_fn(*args, **kwargs)
+            result = await async_fn(*args, **attempt_kwargs)
         except Exception as error:
             is_retryable = getattr(error, "is_retryable", None)
             retryable = callable(is_retryable) and is_retryable()
@@ -749,7 +843,7 @@ async def zoo_calculate_center_of_mass(
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         result = await client.file.create_file_center_of_mass(
             src_format=src_format,
             body=data,
@@ -799,7 +893,7 @@ async def zoo_calculate_mass(
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         result = await client.file.create_file_mass(
             output_unit=UnitMass(unit_mass),
             src_format=src_format,
@@ -842,7 +936,7 @@ async def zoo_calculate_surface_area(file_path: Path | str, unit_area: str) -> f
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         result = await client.file.create_file_surface_area(
             output_unit=UnitArea(unit_area),
             src_format=src_format,
@@ -885,7 +979,7 @@ async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         result = await client.file.create_file_volume(
             output_unit=UnitVolume(unit_vol),
             src_format=src_format,
@@ -1074,7 +1168,7 @@ async def zoo_calculate_cad_physical_properties(
     src_format = FileImportFormat(normalized_ext)
     deadline = monotonic() + FILE_API_CALL_TIMEOUT
 
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         volume_result = await client.file.create_file_volume(
             output_unit=UnitVolume(unit_vol),
             src_format=src_format,
@@ -1359,7 +1453,7 @@ async def zoo_calculate_bounding_box_cad(
     src_format = FileImportFormat(normalized_ext)
 
     # Convert to STL to get mesh data for bounding box computation
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         stl_result = await client.file.create_file_conversion(
             src_format=src_format,
             output_format=FileExportFormat.STL,
@@ -1450,7 +1544,7 @@ async def zoo_convert_cad_file(
     async with aiofiles.open(input_file, "rb") as inp:
         data = await inp.read()
 
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         export_response = await client.file.create_file_conversion(
             src_format=FileImportFormat(_normalize_ext(input_ext)),
             output_format=FileExportFormat(export_format),
@@ -2008,6 +2102,13 @@ async def _exec_kcl_project(
             response = json.loads(raw_response)
         except (TypeError, json.JSONDecodeError):
             continue
+        payload = response.get("resp")
+        if isinstance(payload, dict) and payload.get("type") == "modeling_session_data":
+            try:
+                frame = WebSocketResponse.model_validate(response)
+            except ValueError:
+                continue
+            _capture_modeling_session(ws, frame)
         if response.get("request_id") != request_id:
             continue
         if not response.get("success", False):
@@ -2045,6 +2146,8 @@ class _ModelingSession:
     websocket: ClientConnection
     lock: asyncio.Lock
     artifact_graph_paths: set[Path] = field(default_factory=set)
+    request_auth: RequestAuth | None = field(default=None, repr=False)
+    api_call_id: str | None = None
 
 
 @dataclass
@@ -2180,7 +2283,7 @@ async def zoo_start_modeling_session() -> str:
 
     client: AsyncKittyCAD | None = None
     try:
-        client = AsyncKittyCAD(verify_ssl=ctx)
+        client = _new_client()
         websocket = await _open_modeling_websocket(client)
     except BaseException:
         if _modeling_session is starting:
@@ -2197,6 +2300,7 @@ async def zoo_start_modeling_session() -> str:
         client=client,
         websocket=websocket,
         lock=asyncio.Lock(),
+        request_auth=current_request_auth(),
     )
     if _modeling_session is starting:
         _modeling_session = session
@@ -2209,7 +2313,10 @@ async def zoo_start_modeling_session() -> str:
 
 def zoo_get_modeling_sessions() -> list[str]:
     """Return the IDs of modeling sessions owned by this server process."""
-    if not isinstance(_modeling_session, _ModelingSession):
+    if (
+        not isinstance(_modeling_session, _ModelingSession)
+        or _modeling_session.request_auth != current_request_auth()
+    ):
         return []
     return [_modeling_session.session_id]
 
@@ -2295,6 +2402,7 @@ async def _modeling_websocket(session_id: str) -> AsyncIterator[ClientConnection
     if (
         not isinstance(active_session, _ModelingSession)
         or active_session.session_id != session_id
+        or active_session.request_auth != current_request_auth()
     ):
         raise ZooMCPException(f"Unknown modeling session '{session_id}'")
     session = active_session
@@ -2302,6 +2410,8 @@ async def _modeling_websocket(session_id: str) -> AsyncIterator[ClientConnection
     # Session state has no awaits around its reads and writes, while this lock
     # serializes commands that yield during websocket I/O.
     async with session.lock:
+        if session.api_call_id is not None:
+            _report_renderer_session(session, "used")
         try:
             yield session.websocket
         except ZooMCPTimeoutError:
@@ -2499,6 +2609,44 @@ def _modeling_timeout(deadline: _Deadline, description: str) -> ZooMCPTimeoutErr
     )
 
 
+def _report_renderer_session(
+    session: _ModelingSession, outcome: Literal["acquired", "used"]
+) -> None:
+    auth = current_request_auth()
+    if auth is not None and session.api_call_id is not None:
+        _report_engine_session(
+            auth,
+            EngineSessionEvent(
+                session.api_call_id,
+                "modeling_session",
+                session.session_id,
+                1,
+                1,
+                outcome,
+            ),
+        )
+
+
+def _capture_modeling_session(
+    ws: ClientConnection, response: WebSocketResponse
+) -> None:
+    session = _modeling_session
+    if not isinstance(session, _ModelingSession) or session.websocket is not ws:
+        return
+    message = response.root
+    if not isinstance(message, SuccessWebSocketResponse):
+        return
+    payload = message.resp.root
+    if isinstance(payload, OptionModelingSessionData):
+        try:
+            api_call_id = str(UUID(payload.data.session.api_call_id))
+        except ValueError:
+            return
+        if session.api_call_id != api_call_id:
+            session.api_call_id = api_call_id
+            _report_renderer_session(session, "acquired")
+
+
 async def _recv_modeling_frame(
     ws: ClientConnection,
     deadline: _Deadline,
@@ -2518,7 +2666,9 @@ async def _recv_modeling_frame(
         raw_response = await asyncio.wait_for(ws.recv(), timeout=remaining)
     except TimeoutError as error:
         raise _modeling_timeout(deadline, description) from error
-    return WebSocketResponse.model_validate_json(raw_response)
+    response = WebSocketResponse.model_validate_json(raw_response)
+    _capture_modeling_session(ws, response)
+    return response
 
 
 async def _send_modeling_frame(
@@ -2832,7 +2982,7 @@ async def zoo_list_org_datasets(
         entries, possibly empty.
     """
     logger.info("Listing org datasets (lookup_enabled=%s)", lookup_enabled)
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         use_raw_fallback = False
         datasets = []
         try:
@@ -2873,7 +3023,7 @@ async def zoo_list_org_skills() -> list[dict[str, str]]:
         "markdown": <str>} entries, possibly empty.
     """
     logger.info("Listing org skills")
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         try:
             skills = await client.orgs.list_org_skills()
         except KittyCADClientError as exc:
@@ -2911,7 +3061,7 @@ async def zoo_search_org_dataset_semantic(
     logger.info(
         "Semantic search in dataset %s for query of length %d", dataset_id, len(query)
     )
-    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+    async with _new_client() as client:
         try:
             matches = await client.orgs.search_org_dataset_semantic(
                 id=Uuid(dataset_id), q=query, limit=limit
