@@ -4,6 +4,7 @@ import io
 import json
 import os
 from collections.abc import AsyncIterator, Sequence
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1634,6 +1635,83 @@ broken = missingValue
     assert isolated is not None
     assert "edge = line" in isolated
     assert "broken = missingValue" not in isolated
+
+
+@pytest.mark.parametrize("assignment", ["profile =", "profile\n    ="])
+def test_source_through_sketch_rejects_helper_local_declaration(
+    assignment: str,
+) -> None:
+    source = f"""
+fn make() {{
+  {assignment} sketch(on = XY) {{
+    edge = line(start = [0mm, 0mm], end = [10mm, 0mm])
+  }}
+  return profile
+}}
+made = make()
+"""
+    kcl.parse_code(source)
+    assert zoo_mcp.zoo_tools._source_through_sketch(source, "profile") is None
+
+
+def test_source_through_sketch_scope_ignores_comments_and_strings() -> None:
+    source = """
+fn previous() { return 1 }
+label = "unmatched delimiters {[(:"
+/* unmatched delimiters {[(: */
+// unmatched delimiters {[(:
+profile = sketch(on = XY) {
+  edge = line(start = [0mm, 0mm], end = [10mm, 0mm])
+}
+broken =
+"""
+    prefix = zoo_mcp.zoo_tools._source_through_sketch(source, "profile")
+    assert prefix is not None
+    kcl.parse_code(prefix)
+    assert "edge = line" in prefix
+    assert "broken =" not in prefix
+
+
+@pytest.fixture
+def flanges_rail_profile_source() -> str:
+    # Exact source at eval trace 01a09886-20db-7bcb-b214-627a342be681,
+    # visualize_sketch span 01a0988d-771c-7fc2-9d83-9246198674b0.
+    source = (
+        Path(__file__).parent / "data" / "flanges_rail_profile_downstream_error.kcl"
+    ).read_text()
+    assert sha256(source.encode()).hexdigest() == (
+        "9ea4ce9a2198de37e7c3a35ef2a86280da60ed342c4a6585beb376669643c0d3"
+    )
+    return source
+
+
+@pytest.mark.asyncio
+async def test_source_through_sketch_rejects_flanges_helper_checkpoint(
+    flanges_rail_profile_source: str,
+) -> None:
+    kcl.parse_code(flanges_rail_profile_source)
+    with zoo_mcp.zoo_tools.capture_execution_retry_events() as events:
+        isolated = await zoo_mcp.zoo_tools._execute_through_sketch(
+            "railProfile", flanges_rail_profile_source, None
+        )
+    assert isolated is None
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_preserves_error_when_helper_cannot_be_isolated(
+    flanges_rail_profile_source: str,
+) -> None:
+    # A syntax error exercises native failure and recovery without an engine.
+    source = flanges_rail_profile_source + "\nbroken =\n"
+    with pytest.raises(kcl.KclError) as original:
+        await kcl.execute_code(source)
+    with pytest.raises(zoo_mcp.ZooMCPException) as recovered:
+        await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+            "railProfile", kcl_code=source, instance_index=0
+        )
+    assert str(original.value) in str(recovered.value)
+    assert "no sketch named" not in str(recovered.value)
 
 
 def test_copy_project_with_entrypoint_preserves_project_manifest(tmp_path: Path):
