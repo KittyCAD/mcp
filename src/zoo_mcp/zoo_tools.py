@@ -1976,6 +1976,12 @@ def _source_through_sketch(kcl_code: str, sketch_name: str) -> str | None:
     declaration_match = declaration.search(searchable_source)
     if declaration_match is None:
         return None
+    before = searchable_source[: declaration_match.start()]
+    if any(
+        before.count(left) != before.count(right) for left, right in ("()", "[]", "{}")
+    ):
+        # Executing a helper definition does not create its sketch instances.
+        return None
     declaration_end_line = searchable_source.count("\n", 0, declaration_match.end())
 
     for end in range(declaration_end_line + 1, len(lines) + 1):
