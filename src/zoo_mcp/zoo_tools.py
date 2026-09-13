@@ -159,7 +159,6 @@ FileApiCall: TypeAlias = (
     FileCenterOfMass | FileConversion | FileMass | FileSurfaceArea | FileVolume
 )
 _FileApiCallT = TypeVar("_FileApiCallT", bound=FileApiCall)
-_FileOperationT = TypeVar("_FileOperationT")
 
 _ASYNC_FILE_API_CALL_TYPES: dict[type[FileApiCall], str] = {
     FileCenterOfMass: "file_center_of_mass",
@@ -191,79 +190,6 @@ _EXT_ALIASES = {
 }
 
 
-async def _resolve_file_operation(
-    client: AsyncKittyCAD,
-    result: object,
-    operation_name: str,
-    expected_async_type: str,
-    parse_result: Callable[[object], _FileOperationT],
-    *,
-    parse_async_result: Callable[[object], _FileOperationT] | None = None,
-    deadline: float | None = None,
-) -> _FileOperationT:
-    """Resolve one file operation without resubmitting work while polling."""
-    current = parse_result(result)
-    if deadline is None:
-        deadline = monotonic() + FILE_API_CALL_TIMEOUT
-
-    status = getattr(current, "status", ApiCallStatus.COMPLETED)
-    while status in _PENDING_API_CALL_STATUSES:
-        operation_id = getattr(current, "id", None)
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise ZooMCPTimeoutError(
-                f"Timed out waiting for {operation_name} operation {operation_id}"
-            )
-
-        logger.info(
-            "Waiting for %s operation %s (status=%s)",
-            operation_name,
-            operation_id,
-            status.value,
-        )
-        try:
-            async with asyncio.timeout(remaining):
-                polled = await client.api_calls.get_async_operation(
-                    id=str(operation_id)
-                )
-        except TimeoutError as error:
-            raise ZooMCPTimeoutError(
-                f"Timed out waiting for {operation_name} operation {operation_id}"
-            ) from error
-
-        async_result = polled.root
-        if getattr(async_result, "type", None) != expected_async_type:
-            raise ZooMCPException(
-                f"Failed to {operation_name}, async operation {operation_id} "
-                f"returned {getattr(async_result, 'type', type(async_result))}"
-            )
-
-        current = (parse_async_result or parse_result)(async_result)
-        status = getattr(current, "status", ApiCallStatus.COMPLETED)
-        if status in _PENDING_API_CALL_STATUSES:
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                continue
-            await asyncio.sleep(min(FILE_API_CALL_POLL_INTERVAL, remaining))
-
-    if status == ApiCallStatus.FAILED:
-        operation_id = getattr(current, "id", None)
-        detail = getattr(current, "error", None) or (
-            "the worker returned no error detail"
-        )
-        raise ZooMCPException(
-            f"Failed to {operation_name}, operation {operation_id} failed: {detail}"
-        )
-    if status != ApiCallStatus.COMPLETED:
-        operation_id = getattr(current, "id", None)
-        raise ZooMCPException(
-            f"Failed to {operation_name}, operation {operation_id} returned "
-            f"unexpected status {status.value}"
-        )
-
-    return current
-
-
 async def _resolve_file_api_call(
     client: AsyncKittyCAD,
     result: object,
@@ -273,31 +199,67 @@ async def _resolve_file_api_call(
     deadline: float | None = None,
 ) -> _FileApiCallT:
     """Resolve a synchronous or asynchronous Zoo file API response."""
+    if not isinstance(result, expected_type):
+        raise ZooMCPException(
+            f"Failed to {operation_name}, incorrect return type {type(result)}"
+        )
 
-    def parse_result(value: object) -> _FileApiCallT:
-        if not isinstance(value, expected_type):
-            raise ZooMCPException(
-                f"Failed to {operation_name}, incorrect return type {type(value)}"
+    current = result
+    if deadline is None:
+        deadline = monotonic() + FILE_API_CALL_TIMEOUT
+
+    status = getattr(current, "status", ApiCallStatus.COMPLETED)
+    while status in _PENDING_API_CALL_STATUSES:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for {operation_name} operation {current.id}"
             )
-        return value
 
-    def parse_async_result(value: object) -> _FileApiCallT:
-        model_dump = getattr(value, "model_dump", None)
-        if not callable(model_dump):
+        logger.info(
+            "Waiting for %s operation %s (status=%s)",
+            operation_name,
+            current.id,
+            status.value,
+        )
+        try:
+            async with asyncio.timeout(remaining):
+                polled = await client.api_calls.get_async_operation(id=str(current.id))
+        except TimeoutError as error:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for {operation_name} operation {current.id}"
+            ) from error
+
+        async_result = polled.root
+        expected_async_type = _ASYNC_FILE_API_CALL_TYPES[expected_type]
+        if getattr(async_result, "type", None) != expected_async_type:
             raise ZooMCPException(
-                f"Failed to {operation_name}, incorrect return type {type(value)}"
+                f"Failed to {operation_name}, async operation {current.id} "
+                f"returned {getattr(async_result, 'type', type(async_result))}"
             )
-        return expected_type.model_construct(**model_dump(exclude={"type"}))
 
-    return await _resolve_file_operation(
-        client,
-        result,
-        operation_name,
-        _ASYNC_FILE_API_CALL_TYPES[expected_type],
-        parse_result,
-        parse_async_result=parse_async_result,
-        deadline=deadline,
-    )
+        current = expected_type.model_construct(
+            **async_result.model_dump(exclude={"type"})
+        )
+        status = current.status
+        if status in _PENDING_API_CALL_STATUSES:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                continue
+            await asyncio.sleep(min(FILE_API_CALL_POLL_INTERVAL, remaining))
+
+    if status == ApiCallStatus.FAILED:
+        detail = current.error or "the worker returned no error detail"
+        raise ZooMCPException(
+            f"Failed to {operation_name}, operation {current.id} failed: {detail}"
+        )
+    if status != ApiCallStatus.COMPLETED:
+        raise ZooMCPException(
+            f"Failed to {operation_name}, operation {current.id} returned "
+            f"unexpected status {status.value}"
+        )
+
+    return current
 
 
 def _file_physical_properties_result(
@@ -330,14 +292,47 @@ async def _resolve_file_physical_properties_call(
     deadline: float,
 ) -> _FilePhysicalPropertiesResult:
     """Resolve one composite file-analysis operation without resubmitting it."""
-    return await _resolve_file_operation(
-        client,
-        result,
-        "calculate physical properties",
-        "file_physical_properties",
-        _file_physical_properties_result,
-        deadline=deadline,
-    )
+    current = _file_physical_properties_result(result)
+
+    while current.status in _PENDING_API_CALL_STATUSES:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for physical properties operation {current.id}"
+            )
+
+        try:
+            async with asyncio.timeout(remaining):
+                polled = await client.api_calls.get_async_operation(id=str(current.id))
+        except TimeoutError as error:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for physical properties operation {current.id}"
+            ) from error
+
+        async_result = polled.root
+        if getattr(async_result, "type", None) != "file_physical_properties":
+            raise ZooMCPException(
+                f"Physical properties operation {current.id} returned "
+                f"{getattr(async_result, 'type', type(async_result))}"
+            )
+        current = _file_physical_properties_result(async_result)
+        if current.status in _PENDING_API_CALL_STATUSES:
+            await asyncio.sleep(
+                min(FILE_API_CALL_POLL_INTERVAL, max(0.0, deadline - monotonic()))
+            )
+
+    if current.status == ApiCallStatus.FAILED:
+        detail = current.error or "the worker returned no error detail"
+        raise ZooMCPException(
+            f"Physical properties operation {current.id} failed: {detail}"
+        )
+    if current.status != ApiCallStatus.COMPLETED:
+        raise ZooMCPException(
+            f"Physical properties operation {current.id} returned "
+            f"unexpected status {current.status.value}"
+        )
+
+    return current
 
 
 def _enum_value(value: object) -> str:
@@ -1207,7 +1202,7 @@ async def zoo_calculate_cad_physical_properties(
 
         result = await create_file_physical_properties(
             src_format=src_format,
-            properties=("volume,mass,surface_area,center_of_mass,bounding_box"),
+            properties="volume,mass,surface_area,center_of_mass,bounding_box",
             material_density=density,
             material_density_unit=material_density_unit,
             volume_output_unit=volume_output_unit,

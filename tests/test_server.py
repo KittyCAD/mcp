@@ -554,7 +554,17 @@ async def test_calculate_cad_physical_properties_uses_one_composite_request(
     async_kittycad_client: AsyncKittyCAD,
 ):
     create_file_physical_properties = AsyncMock(
-        return_value=_physical_properties_result()
+        return_value=_physical_properties_result(
+            mass=None,
+            property_statuses={
+                "volume": "completed",
+                "mass": "failed",
+                "surface_area": "completed",
+                "center_of_mass": "completed",
+                "bounding_box": "completed",
+            },
+            property_errors={"mass": "could not compute mass"},
+        )
     )
     monkeypatch.setattr(
         async_kittycad_client.file,
@@ -593,7 +603,7 @@ async def test_calculate_cad_physical_properties_uses_one_composite_request(
     result = _meta_result(response)
     assert isinstance(result, dict)
     assert result["volume"] == pytest.approx(1.0)
-    assert result["mass"] == pytest.approx(1.0)
+    assert result["mass"] is None
     assert result["surface_area"] == pytest.approx(600.0)
     com = result["center_of_mass"]
     assert com["x"] == pytest.approx(5.0)
@@ -604,8 +614,8 @@ async def test_calculate_cad_physical_properties_uses_one_composite_request(
     assert bbox["dimensions"]["x"] == pytest.approx(10.0, abs=0.1)
     assert bbox["dimensions"]["y"] == pytest.approx(10.0, abs=0.1)
     assert bbox["dimensions"]["z"] == pytest.approx(10.0, abs=0.1)
-    assert result["property_statuses"]["mass"] == "completed"
-    assert result["property_errors"] == {}
+    assert result["property_statuses"]["mass"] == "failed"
+    assert result["property_errors"]["mass"] == "could not compute mass"
 
     create_file_physical_properties.assert_awaited_once_with(
         src_format=zoo_mcp.zoo_tools.FileImportFormat.STL,
@@ -739,51 +749,6 @@ async def test_calculate_cad_physical_properties_surfaces_worker_failure(
     result = _meta_result(response)
     assert f"operation {operation_id} failed" in result
     assert "unsupported topology" in result
-
-
-@pytest.mark.asyncio
-async def test_calculate_cad_physical_properties_preserves_partial_failures(
-    monkeypatch: pytest.MonkeyPatch,
-    cube_stl: str,
-    async_kittycad_client: AsyncKittyCAD,
-):
-    monkeypatch.setattr(
-        async_kittycad_client.file,
-        "create_file_physical_properties",
-        AsyncMock(
-            return_value=_physical_properties_result(
-                mass=None,
-                property_statuses={
-                    "volume": "completed",
-                    "mass": "failed",
-                    "surface_area": "completed",
-                    "center_of_mass": "completed",
-                    "bounding_box": "completed",
-                },
-                property_errors={"mass": "could not compute mass"},
-            )
-        ),
-        raising=False,
-    )
-
-    response = await mcp.call_tool(
-        "calculate_cad_physical_properties",
-        arguments={
-            "input_file": cube_stl,
-            "unit_length": "mm",
-            "unit_mass": "g",
-            "unit_density": "kg:m3",
-            "density": 1000.0,
-            "unit_area": "mm2",
-            "unit_volume": "cm3",
-        },
-    )
-
-    result = _meta_result(response)
-    assert result["volume"] == pytest.approx(1.0)
-    assert result["mass"] is None
-    assert result["property_statuses"]["mass"] == "failed"
-    assert result["property_errors"]["mass"] == "could not compute mass"
 
 
 @pytest.mark.asyncio
