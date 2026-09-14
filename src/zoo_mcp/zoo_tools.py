@@ -1410,13 +1410,13 @@ async def zoo_convert_cad_file(
         logger.warning("No export format provided, defaulting to step")
         export_format = FileExportFormat.STEP
     else:
-        if export_format not in FileExportFormat:
+        try:
+            export_format = FileExportFormat(export_format)
+        except ValueError:
             logger.warning(
                 "Invalid export format %s provided, defaulting to step", export_format
             )
             export_format = FileExportFormat.STEP
-        else:
-            export_format = FileExportFormat(export_format)
 
     if export_path is None:
         logger.warning("No export path provided, creating a temporary file")
