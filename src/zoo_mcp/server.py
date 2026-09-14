@@ -502,6 +502,11 @@ async def execute_kcl(
 ) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
+    Executing kcl_code does not save a .kcl source file. For model creation,
+    save the source and required project files with the client's authorized
+    file-editing tools, then validate the saved project using kcl_path and
+    include the editable KCL files in the handoff.
+
       Session executions save the artifact graph to a temporary JSON file and
       return its path. Local executions do not produce an artifact graph and can
       have large network overhead depending on the model.
@@ -635,6 +640,10 @@ async def export_kcl(
     export_format: str | None = None,
 ) -> str:
     """Export KCL code to a CAD file. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
+
+    This tool does not save editable KCL source. For model creation, include
+    the saved KCL project alongside any requested CAD exports unless the user
+    explicitly requests export-only output.
 
     Args:
         kcl_code (str | None): The KCL code to export to a CAD file.
