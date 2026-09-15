@@ -4,6 +4,20 @@ An [MCP server](https://modelcontextprotocol.io/docs/getting-started/intro) hous
 
 <!-- mcp-name: io.github.KittyCAD/zoo-mcp -->
 
+## Hosted MCP
+
+The hosted service is designed for `https://api.zoo.dev/mcp`, using OAuth with your
+Zoo account. The API proxies stateless Streamable HTTP requests to a private
+service. Long operations return jobs that can be polled; no SSE subscriptions
+or separate public domain are needed.
+
+The workspace at `https://api.zoo.dev/mcp/workspace` provides uploads, project
+browsing, downloads, and a 3D viewer. Temporary files expire after seven days;
+saving a project creates a separate durable copy. CAD operations use existing
+Zoo billing. Hosted rollout and catalog publication are separate from installing
+the local package below; see [the deployment guide](docs/hosted.md) and
+[catalog materials](docs/catalog/submission.md).
+
 ## Prerequisites
 
 1. An API key for Zoo, get one [here](https://zoo.dev/account)

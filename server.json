@@ -6,12 +6,12 @@
     "url": "https://github.com/KittyCAD/mcp",
     "source": "github"
   },
-  "version": "0.27.0",
+  "version": "0.28.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "zoo_mcp",
-      "version": "0.27.0",
+      "version": "0.28.0",
       "transport": {
         "type": "stdio"
       },
@@ -21,9 +21,15 @@
           "isRequired": true,
           "format": "string",
           "isSecret": true,
-          "name": "ZOO_TOKEN"
+          "name": "ZOO_API_TOKEN"
         }
       ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.zoo.dev/mcp"
     }
   ]
 }

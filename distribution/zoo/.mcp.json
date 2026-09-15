@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "zoo": {
+      "type": "http",
+      "url": "https://api.zoo.dev/mcp"
+    }
+  }
+}

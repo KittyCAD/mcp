@@ -208,3 +208,9 @@ __marimo__/
 
 CLAUDE.local.md
 .mcp.json
+!distribution/zoo/.mcp.json
+
+# Hosted workspace UI dependencies
+node_modules/
+test-results/
+playwright-report/
