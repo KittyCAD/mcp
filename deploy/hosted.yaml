@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zoo-mcp
+  labels: {app: zoo-mcp}
+data:
+  ZOO_MCP_RESOURCE: https://api.zoo.dev/mcp
+  ZOO_API_URL: https://api.zoo.dev
+  ZOO_MCP_MAX_WORKERS: "8"
+  # Exact attachment hosts are opt-in; the upload picker works without them.
+  ZOO_MCP_FILE_HOSTS: ""
+  ZOO_MCP_ALLOWED_ORIGINS: https://chatgpt.com,https://claude.ai
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zoo-mcp
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app: zoo-mcp}
+  template:
+    metadata:
+      labels: {app: zoo-mcp}
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mcp
+          image: ghcr.io/kittycad/zoo-mcp:hosted
+          imagePullPolicy: Always
+          ports: [{name: http, containerPort: 8080}]
+          envFrom:
+            - configMapRef: {name: zoo-mcp}
+            - secretRef: {name: zoo-mcp}
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef: {fieldPath: status.podIP}
+            - name: ZOO_MCP_NODE_URL
+              value: http://$(POD_IP):8080
+          resources:
+            requests: {cpu: "2", memory: 2Gi, ephemeral-storage: 2Gi}
+            limits: {cpu: "4", memory: 8Gi, ephemeral-storage: 12Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: scratch, mountPath: /tmp}
+          startupProbe:
+            httpGet: {path: /readyz, port: http}
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+      volumes:
+        - name: scratch
+          emptyDir: {sizeLimit: 10Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zoo-mcp
+spec:
+  type: ClusterIP
+  selector: {app: zoo-mcp}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zoo-mcp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: zoo-mcp}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: zoo-mcp
+spec:
+  podSelector:
+    matchLabels: {app: zoo-mcp}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {zoo.dev/component: api}}
+        - podSelector: {matchLabels: {app: zoo-mcp}}
+      ports: [{port: 8080, protocol: TCP}]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - to:
+        - podSelector: {matchLabels: {app: zoo-mcp}}
+      ports: [{port: 8080, protocol: TCP}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16]
+      ports: [{port: 443, protocol: TCP}]

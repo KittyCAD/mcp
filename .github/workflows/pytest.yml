@@ -24,6 +24,14 @@ jobs:
       - name: Install the project
         run: uv sync --dev
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Build hosted workspace
+        working-directory: src/zoo_mcp/hosted/web
+        run: npm ci --ignore-scripts && npm run build
+
       - name: Run pytest
         shell: bash
         env:
