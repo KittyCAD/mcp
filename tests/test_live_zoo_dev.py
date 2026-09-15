@@ -8,7 +8,7 @@ when offline.
 """
 
 import json
-from typing import Any, cast
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -21,20 +21,16 @@ from zoo_mcp.utils.data_retrieval_utils import ZOO_BASE_URL
 
 pytestmark = [pytest.mark.live, pytest.mark.asyncio]
 
-# What MCPServer.call_tool returns in mcp 2.x.
-ToolResponse = CallToolResult | InputRequiredResult
 
-
-def _content_list(response: ToolResponse) -> list[Any]:
+def _content_list(response: CallToolResult | InputRequiredResult) -> list[Any]:
     assert isinstance(response, CallToolResult)
     return list(response.content)
 
 
-def _meta_result(response: ToolResponse) -> Any:
+def _meta_result(response: CallToolResult | InputRequiredResult) -> Any:
     assert isinstance(response, CallToolResult)
-    structured = response.structured_content
-    assert isinstance(structured, dict)
-    return cast(dict[str, Any], structured)["result"]
+    assert response.structured_content is not None
+    return response.structured_content["result"]
 
 
 @pytest_asyncio.fixture(scope="module")

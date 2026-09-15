@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -37,30 +38,28 @@ from kittycad.models.modeling_cmd import (
     OptionSetSelectionFilter,
 )
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import CallToolResult, ImageContent, InputRequiredResult
+from mcp.types import CallToolResult, ImageContent, InputRequiredResult, TextContent
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
-from zoo_mcp.zoo_tools import CameraView
-
-# What MCPServer.call_tool returns in mcp 2.x.
-ToolResponse = CallToolResult | InputRequiredResult
+from zoo_mcp.zoo_tools import CameraView, ResultZooExecuteKclRemote
 
 
-def _result(response: ToolResponse) -> Any:
-    return _structured_result(response)["result"]
-
-
-def _structured_result(response: ToolResponse) -> dict[str, Any]:
+def _result(response: CallToolResult | InputRequiredResult) -> Any:
     assert isinstance(response, CallToolResult)
-    structured = response.structured_content
-    assert isinstance(structured, dict)
-    return cast(dict[str, Any], structured)
+    if response.structured_content is None:
+        assert len(response.content) == 1
+        assert isinstance(response.content[0], TextContent)
+        return response.content[0].text
+    return response.structured_content["result"]
 
 
-def _content_list(response: ToolResponse) -> list[Any]:
+def _structured_result(
+    response: CallToolResult | InputRequiredResult,
+) -> dict[str, Any]:
     assert isinstance(response, CallToolResult)
-    return list(response.content)
+    assert response.structured_content is not None
+    return response.structured_content
 
 
 @pytest.mark.asyncio
@@ -82,8 +81,38 @@ async def test_modeling_tools_are_registered():
         "highlight_set_entities",
         "snapshot",
         "start_modeling_session",
+        "get_modeling_sessions",
+        "import_cad_file",
         "stop_modeling_session",
     } <= names
+
+
+@pytest.mark.asyncio
+async def test_get_modeling_sessions_tool(monkeypatch: pytest.MonkeyPatch):
+    get_modeling_sessions = MagicMock(return_value=["session-id"])
+    monkeypatch.setattr(server, "zoo_get_modeling_sessions", get_modeling_sessions)
+
+    response = await mcp.call_tool("get_modeling_sessions", arguments={})
+
+    assert _result(response) == ["session-id"]
+    get_modeling_sessions.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_import_cad_file_tool(monkeypatch: pytest.MonkeyPatch):
+    import_cad_file = AsyncMock(return_value="object-id")
+    monkeypatch.setattr(server, "zoo_import_cad_file", import_cad_file)
+
+    response = await mcp.call_tool(
+        "import_cad_file",
+        arguments={"session_id": "session-id", "input_file": "part.step"},
+    )
+
+    assert _result(response) == "object-id"
+    import_cad_file.assert_awaited_once_with(
+        session_id="session-id",
+        input_file="part.step",
+    )
 
 
 @pytest.mark.asyncio
@@ -218,25 +247,38 @@ async def test_modeling_tool_builds_expected_command(
     request_fields: dict[str, object],
     response_data: object,
 ):
-    mock = MagicMock(return_value=SimpleNamespace(data=response_data))
+    mock = AsyncMock(return_value=SimpleNamespace(data=response_data))
     monkeypatch.setattr(server, "zoo_execute_modeling_command", mock)
+    arguments["session_id"] = "session-id"
 
     response = await mcp.call_tool(tool_name, arguments=arguments)
 
     assert _structured_result(response) == cast(Any, response_data).model_dump()
-    command = cast(ModelingCmd, mock.call_args.args[2])
+    command = cast(ModelingCmd, mock.call_args.args[0])
     assert isinstance(command.root, request_type)
     assert command.root.model_dump(exclude={"type"}) == request_fields
+    assert mock.call_args.args[3] == "session-id"
 
 
 @pytest.mark.asyncio
-async def test_selection_tools_require_a_session():
-    """Selection state is discarded without a session, so it must be required."""
+async def test_scene_tools_require_a_session():
     for tool_name, arguments in (
+        ("get_face_info", {"face_id": "face-id"}),
+        ("entity_distance", {"entity_id1": "a", "entity_id2": "b"}),
+        ("curve_get_end_points", {"curve_id": "curve-id"}),
+        ("engine_util_evaluate_path", {"path_json": "{}", "t": 0.5}),
+        ("curve_get_type", {"curve_id": "curve-id"}),
+        ("edge_get_length", {"edge_id": "edge-id"}),
+        ("entity_get_all_child_uuids", {"entity_id": "entity-id"}),
+        ("entity_get_index", {"entity_id": "entity-id"}),
+        ("entity_get_parent_id", {"entity_id": "entity-id"}),
+        ("entity_get_sketch_paths", {"entity_id": "entity-id"}),
         ("set_selection_filter", {"entity_types": ["face"]}),
         ("select_entities", {"entity_ids": ["entity-1"]}),
         ("highlight_set_entities", {"entity_ids": ["entity-1"]}),
         ("center_camera_on_selection", {}),
+        ("snapshot", {}),
+        ("exec_kcl_project", {"kcl_code": "code"}),
     ):
         with pytest.raises(ToolError):
             await mcp.call_tool(tool_name, arguments=arguments)
@@ -247,10 +289,26 @@ async def test_selection_tools_require_a_session():
         "select_entities",
         "highlight_set_entities",
         "center_camera_on_selection",
+        "get_face_info",
+        "entity_distance",
+        "curve_get_end_points",
+        "engine_util_evaluate_path",
+        "curve_get_type",
+        "edge_get_length",
+        "entity_get_all_child_uuids",
+        "entity_get_index",
+        "entity_get_parent_id",
+        "entity_get_sketch_paths",
+        "snapshot",
+        "exec_kcl_project",
     ):
         schema = tools[tool_name].input_schema
         assert "session_id" in schema.get("required", []), tool_name
-        assert "kcl_code" not in schema.get("properties", {}), tool_name
+        if tool_name != "exec_kcl_project":
+            properties = schema.get("properties", {})
+            assert "kcl_code" not in properties, tool_name
+            assert "kcl_path" not in properties, tool_name
+            assert "input_file" not in properties, tool_name
 
 
 @pytest.mark.asyncio
@@ -274,25 +332,17 @@ async def test_only_one_selection_tool_is_exposed():
 
 
 @pytest.mark.asyncio
-async def test_query_tool_forwards_kcl_and_session(monkeypatch: pytest.MonkeyPatch):
-    mock = MagicMock(
+async def test_query_tool_forwards_session(monkeypatch: pytest.MonkeyPatch):
+    mock = AsyncMock(
         return_value=SimpleNamespace(data=EntityGetIndex(entity_index=3)),
     )
     monkeypatch.setattr(server, "zoo_execute_modeling_command", mock)
 
     await mcp.call_tool(
         "entity_get_index",
-        arguments={"entity_id": "entity-id", "kcl_code": "code"},
-    )
-    assert mock.call_args.args[0] == "code"
-    assert mock.call_args.args[5] is None
-
-    await mcp.call_tool(
-        "entity_get_index",
         arguments={"entity_id": "entity-id", "session_id": "session-id"},
     )
-    assert mock.call_args.args[0] is None
-    assert mock.call_args.args[5] == "session-id"
+    assert mock.call_args.args[3] == "session-id"
 
 
 @pytest.mark.asyncio
@@ -300,22 +350,25 @@ async def test_modeling_tool_returns_error(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         server,
         "zoo_execute_modeling_command",
-        MagicMock(side_effect=RuntimeError("boom")),
+        AsyncMock(side_effect=RuntimeError("boom")),
     )
 
-    with pytest.raises(ToolError, match="Error executing tool entity_get_index: boom"):
+    with pytest.raises(
+        ToolError, match="^Error executing tool entity_get_index$"
+    ) as error:
         await mcp.call_tool(
             "entity_get_index",
-            arguments={"entity_id": "entity-id", "kcl_code": "code"},
+            arguments={"entity_id": "entity-id", "session_id": "session-id"},
         )
+    assert isinstance(error.value.__cause__, RuntimeError)
 
 
 @pytest.mark.asyncio
 async def test_start_and_stop_modeling_session_tools(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    start = MagicMock(return_value="session-id")
-    stop = MagicMock()
+    start = AsyncMock(return_value="session-id")
+    stop = AsyncMock()
     monkeypatch.setattr(server, "zoo_start_modeling_session", start)
     monkeypatch.setattr(server, "zoo_stop_modeling_session", stop)
 
@@ -327,15 +380,15 @@ async def test_start_and_stop_modeling_session_tools(
 
     assert _result(start_response) == "session-id"
     assert _result(stop_response) is None
-    start.assert_called_once_with()
-    stop.assert_called_once_with("session-id")
+    start.assert_awaited_once_with()
+    stop.assert_awaited_once_with("session-id")
 
 
 @pytest.mark.asyncio
 async def test_snapshot_tool_forwards_session_and_zoom(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    mock = MagicMock(return_value=b"jpeg")
+    mock = AsyncMock(return_value=b"jpeg")
     monkeypatch.setattr(server, "zoo_snapshot", mock)
 
     response = await mcp.call_tool(
@@ -343,13 +396,12 @@ async def test_snapshot_tool_forwards_session_and_zoom(
         arguments={"session_id": "session-id", "max_image_dimension": 256},
     )
 
-    content = _content_list(response)
+    assert isinstance(response, CallToolResult)
+    content = response.content
+    assert isinstance(content, list)
     assert len(content) == 1
     assert isinstance(content[0], ImageContent)
-    mock.assert_called_once_with(
-        kcl_code=None,
-        kcl_path=None,
-        input_file=None,
+    mock.assert_awaited_once_with(
         session_id="session-id",
         views=None,
         max_image_dimension=256,
@@ -396,7 +448,7 @@ async def test_snapshot_tool_resolves_camera_views(
     camera_view: object,
     expected_views: list[str] | None,
 ):
-    mock = MagicMock(return_value=b"jpeg")
+    mock = AsyncMock(return_value=b"jpeg")
     monkeypatch.setattr(server, "zoo_snapshot", mock)
 
     arguments: dict[str, Any] = {"session_id": "session-id"}
@@ -448,7 +500,7 @@ async def test_snapshot_tool_accepts_an_explicit_camera(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """An explicit camera reaches the engine in the frame the caller gave it."""
-    mock = MagicMock(return_value=b"jpeg")
+    mock = AsyncMock(return_value=b"jpeg")
     monkeypatch.setattr(server, "zoo_snapshot", mock)
 
     await mcp.call_tool(
@@ -504,7 +556,7 @@ async def test_snapshot_tool_writes_to_output_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
     """output_path returns the saved path instead of an inline image."""
-    monkeypatch.setattr(server, "zoo_snapshot", MagicMock(return_value=b"jpeg-bytes"))
+    monkeypatch.setattr(server, "zoo_snapshot", AsyncMock(return_value=b"jpeg-bytes"))
     output_path = tmp_path / "snap.jpg"
 
     response = await mcp.call_tool(
@@ -521,7 +573,7 @@ async def test_snapshot_tool_writes_to_output_path(
 async def test_snapshot_tool_output_path_accepts_a_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ):
-    monkeypatch.setattr(server, "zoo_snapshot", MagicMock(return_value=b"jpeg-bytes"))
+    monkeypatch.setattr(server, "zoo_snapshot", AsyncMock(return_value=b"jpeg-bytes"))
 
     response = await mcp.call_tool(
         "snapshot",
@@ -537,20 +589,30 @@ async def test_snapshot_tool_output_path_accepts_a_directory(
 async def test_snapshot_tool_returns_image_when_output_path_omitted(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(server, "zoo_snapshot", MagicMock(return_value=b"jpeg-bytes"))
+    monkeypatch.setattr(server, "zoo_snapshot", AsyncMock(return_value=b"jpeg-bytes"))
 
     response = await mcp.call_tool("snapshot", arguments={"session_id": "session-id"})
 
-    content = _content_list(response)
+    assert isinstance(response, CallToolResult)
+    content = response.content
+    assert isinstance(content, list)
     assert isinstance(content[0], ImageContent)
 
 
 @pytest.mark.asyncio
 async def test_kcl_execution_tools_forward_session_id(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ):
-    execute = AsyncMock(return_value=(True, "KCL code executed successfully"))
-    exec_project = MagicMock(return_value={"item_count": 1})
+    artifact_graph_path = tmp_path / "artifact-graph.json"
+    execute = AsyncMock(
+        return_value=ResultZooExecuteKclRemote(
+            ok=True,
+            message="KCL code executed successfully",
+            path_artifact_graph=artifact_graph_path,
+        )
+    )
+    exec_project = AsyncMock(return_value=artifact_graph_path)
     monkeypatch.setattr(server, "zoo_execute_kcl", execute)
     monkeypatch.setattr(server, "zoo_exec_kcl_project", exec_project)
 
@@ -563,14 +625,18 @@ async def test_kcl_execution_tools_forward_session_id(
         arguments={"kcl_code": "code", "session_id": "session-id"},
     )
 
-    assert _result(execute_response) == [True, "KCL code executed successfully"]
-    assert _structured_result(project_response) == {"item_count": 1}
+    assert _result(execute_response) == {
+        "ok": True,
+        "message": "KCL code executed successfully",
+        "path_artifact_graph": str(artifact_graph_path),
+    }
+    assert _result(project_response) == str(artifact_graph_path)
     execute.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,
         session_id="session-id",
     )
-    exec_project.assert_called_once_with(
+    exec_project.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,
         session_id="session-id",
@@ -590,7 +656,72 @@ async def test_query_tools_document_their_arguments():
         "entity_get_sketch_paths",
         "curve_get_end_points",
         "entity_distance",
+        "engine_util_evaluate_path",
+        "get_face_info",
     ):
         description = tools[tool_name].description or ""
         assert "Args:" in description, tool_name
         assert "session_id:" in description, tool_name
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_modeling_call_does_not_starve_other_tools(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A pending async modeling read must leave MCP dispatch responsive."""
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def blocking_import(session_id: str, input_file: str) -> str:
+        entered.set()
+        await release.wait()
+        return "object-id"
+
+    monkeypatch.setattr(server, "zoo_import_cad_file", blocking_import)
+    monkeypatch.setattr(server, "zoo_get_modeling_sessions", lambda: ["session-id"])
+
+    stalled = asyncio.create_task(
+        mcp.call_tool(
+            "import_cad_file",
+            arguments={"session_id": "session-id", "input_file": "part.step"},
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    # The loop is still live, so an unrelated tool completes while the import hangs.
+    other = await mcp.call_tool("get_modeling_sessions", arguments={})
+    assert _result(other) == ["session-id"]
+
+    # And the stalled call is a real task, so it is cancellable from the loop.
+    assert not stalled.done()
+    release.set()
+    assert _result(await stalled) == "object-id"
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_modeling_call_can_be_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def blocking_import(session_id: str, input_file: str) -> str:
+        entered.set()
+        await release.wait()
+        return "object-id"
+
+    monkeypatch.setattr(server, "zoo_import_cad_file", blocking_import)
+
+    stalled = asyncio.create_task(
+        mcp.call_tool(
+            "import_cad_file",
+            arguments={"session_id": "session-id", "input_file": "part.step"},
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    stalled.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stalled
+
+    assert not release.is_set()
