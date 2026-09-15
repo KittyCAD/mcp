@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal
 
-from mcp.server.fastmcp.utilities.types import Image
+from mcp.server.mcpserver.utilities.types import Image
 from mcp.types import ImageContent
 from PIL import Image as PILImage
 
@@ -178,9 +178,9 @@ def save_image_to_disk(image: ImageContent, output_path: str | None = None) -> s
         "image/jpeg": "jpeg",
         "image/png": "png",
     }
-    image_format = image_formats.get(image.mimeType)
+    image_format = image_formats.get(image.mime_type)
     if image_format is None:
-        raise ValueError(f"Unsupported image media type: {image.mimeType}")
+        raise ValueError(f"Unsupported image media type: {image.mime_type}")
     return save_image_bytes_to_disk(
         base64.b64decode(image.data), output_path, image_format
     )

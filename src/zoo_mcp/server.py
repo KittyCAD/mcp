@@ -83,7 +83,8 @@ from kittycad.models.ok_modeling_cmd_response import (
     OptionSetSelectionFilter as ResponseSetSelectionFilter,
 )
 from kittycad.models.uuid import Uuid
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ImageContent
 
 from zoo_mcp import ZooMCPException, logger
@@ -177,7 +178,7 @@ async def _ensure_kcl_indexes() -> None:
 
 
 @asynccontextmanager
-async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
+async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
     """Eagerly start index population when the server starts.
 
     Tools still ``await _ensure_kcl_indexes()`` so they wait for completion
@@ -197,7 +198,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
         KCLSamples._instance = None
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     name="Zoo MCP Server",
     log_level="INFO",
     lifespan=_lifespan,
@@ -1376,9 +1377,13 @@ async def snapshot(
     """
     logger.info("snapshot tool called")
 
+    try:
+        views = _resolve_camera_views(camera_view)
+    except ZooMCPException as error:
+        raise ToolError(str(error)) from error
     image = await zoo_snapshot(
         session_id=session_id,
-        views=_resolve_camera_views(camera_view),
+        views=views,
         max_image_dimension=max_image_dimension,
         padding=padding,
         zoom=zoom,
@@ -1730,7 +1735,7 @@ def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:
 
 
 def _abort_modeling_sessions_at_exit() -> None:
-    """Best-effort fallback for exits outside the FastMCP lifespan."""
+    """Best-effort fallback for exits outside the MCPServer lifespan."""
     _abort_all_modeling_sessions()
 
 

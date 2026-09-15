@@ -24,8 +24,8 @@ from kittycad.models import (
     Point3d,
 )
 from kittycad.models.async_api_call_output import OptionFileMass, OptionFileVolume
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent, TextContent
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, ImageContent, InputRequiredResult, TextContent
 from PIL import Image as PILImage
 
 import zoo_mcp
@@ -58,28 +58,26 @@ def async_kittycad_client(monkeypatch: pytest.MonkeyPatch) -> AsyncKittyCAD:
     return client
 
 
-def _meta_result(response: Sequence[Any] | dict[str, Any]) -> Any:
-    """Extract response[1]["result"] with proper typing for ty."""
-    assert isinstance(response, Sequence)
-    meta = response[1]
-    assert isinstance(meta, dict)
-    return cast(dict[str, Any], meta)["result"]
+def _meta_result(response: CallToolResult | InputRequiredResult) -> Any:
+    assert isinstance(response, CallToolResult)
+    if response.structured_content is None:
+        assert len(response.content) == 1
+        assert isinstance(response.content[0], TextContent)
+        return response.content[0].text
+    return response.structured_content["result"]
 
 
-def _structured_result(response: Sequence[Any] | dict[str, Any]) -> dict[str, Any]:
-    """Extract structured content with proper typing for ty."""
-    assert isinstance(response, Sequence)
-    result = response[1]
-    assert isinstance(result, dict)
-    return cast(dict[str, Any], result)
+def _structured_result(
+    response: CallToolResult | InputRequiredResult,
+) -> dict[str, Any]:
+    assert isinstance(response, CallToolResult)
+    assert response.structured_content is not None
+    return response.structured_content
 
 
-def _content_list(response: Sequence[Any] | dict[str, Any]) -> list[Any]:
-    """Extract response[0] as a typed list for ty."""
-    assert isinstance(response, Sequence)
-    content = response[0]
-    assert isinstance(content, list)
-    return cast(list[Any], content)
+def _content_list(response: CallToolResult | InputRequiredResult) -> list[Any]:
+    assert isinstance(response, CallToolResult)
+    return list(response.content)
 
 
 @pytest_asyncio.fixture
@@ -1464,7 +1462,7 @@ async def test_visualize_sketch_returns_png():
 
     image = _content_list(response)[0]
     assert isinstance(image, ImageContent)
-    assert image.mimeType == "image/png"
+    assert image.mime_type == "image/png"
     png_bytes = base64.b64decode(image.data)
     assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
     with PILImage.open(io.BytesIO(png_bytes)) as png:
@@ -1844,7 +1842,7 @@ async def test_search_kcl_docs(live_docs_index):
     response = await mcp.call_tool(
         "search_kcl_docs", arguments={"query": "extrude", "max_results": 5}
     )
-    # FastMCP returns list results as [list_of_TextContent]
+    # MCPServer returns list results as [list_of_TextContent]
     inner_list = _content_list(response)
     assert len(inner_list) > 0, "Should find results for 'extrude'"
 
@@ -2235,7 +2233,7 @@ async def test_save_png_image_to_directory(tmp_path: Path):
     image = ImageContent(
         type="image",
         data=base64.b64encode(png_buffer.getvalue()).decode(),
-        mimeType="image/png",
+        mime_type="image/png",
     )
 
     response = await mcp.call_tool(
