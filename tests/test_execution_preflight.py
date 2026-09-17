@@ -17,6 +17,9 @@ from zoo_mcp.server import mcp
 class Issue:
     severity: str
 
+    def message(self):
+        return "PRIVATE_CUSTOMER_CONTENT"
+
     def is_fatal(self):
         return self.severity == "fatal"
 
@@ -200,10 +203,10 @@ async def test_both_stages_use_captured_project_after_original_files_change(
     project = tmp_path / "project"
     project.mkdir()
     original = {
-        entrypoint: b"import x from 'library.kcl'\ny = x\n",
+        entrypoint: b"import x from 'library.kcl'\nimport 'assets/model.stl' as model\ny = x\n",
         "library.kcl": b"export x = 1\n",
         "project.toml": b"[settings]\n",
-        "assets/model.bin": b"\x00\xff",
+        "assets/model.stl": b"\x00\xff",
     }
     for name, contents in original.items():
         path = project / name
@@ -449,6 +452,127 @@ async def test_actual_mock_resolves_imports_from_captured_project(
     assert result.ok, result
     assert result.mock_preflight.status == "succeeded"
     real.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_code_error", [False, True])
+async def test_plane_of_mock_limitation_allows_real_execution(
+    monkeypatch, execution_route, cube_kcl, has_code_error
+):
+    code = Path(cube_kcl).read_text() + "\np = planeOf(cube, face = END)\n"
+    if has_code_error:
+        code += "x = sqrt(4, unexpected = 1)\n"
+    real = AsyncMock(
+        return_value=Outcome() if execution_route == "local" else Path("graph.json")
+    )
+    monkeypatch.setattr(kcl, "execute_code", real)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
+
+    result = await execute(execution_route, {"kcl_code": code})
+
+    assert result.ok is not has_code_error
+    assert (
+        "The engine isn't available" in result.mock_preflight.diagnostics["warning"][0]
+    )
+    assert real.await_count == (0 if has_code_error else 1)
+    if has_code_error:
+        assert result.mock_preflight.status == "failed"
+        assert "`unexpected`" in result.mock_preflight.diagnostics["error"][0]
+        assert result.real_execution.status == "not_run"
+    else:
+        assert result.mock_preflight.status == "succeeded"
+        assert result.real_execution.status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_mock_limitation_text_in_source_cannot_hide_an_error(
+    monkeypatch, execution_route
+):
+    code = (
+        "x = sqrt(4, unexpected = \"The engine isn't available, "
+        'so returning an arbitrary incorrect plane")'
+    )
+    real = AsyncMock(side_effect=AssertionError("must not execute"))
+    monkeypatch.setattr(kcl, "execute_code", real)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
+    result = await execute(execution_route, {"kcl_code": code})
+    assert not result.ok
+    assert result.mock_preflight.diagnostics["error"]
+    assert result.real_execution.status == "not_run"
+    real.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_is_directory", [False, True])
+async def test_capture_ignores_unrelated_files(
+    monkeypatch, tmp_path, execution_route, input_is_directory
+):
+    entry = tmp_path / "main.kcl"
+    entry.write_text("x = 1\n")
+    # Even a supported CAD extension must not cause an unrelated file read.
+    unrelated = tmp_path / "unrelated.step"
+    unrelated.write_bytes(b"not a dependency")
+    read_bytes = Path.read_bytes
+
+    def guarded_read(path):
+        if path == unrelated:
+            raise PermissionError("unrelated file is unreadable")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read)
+    real = AsyncMock(
+        return_value=Outcome() if execution_route == "local" else Path("graph.json")
+    )
+    monkeypatch.setattr(kcl, "execute", real)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
+    result = await execute(
+        execution_route,
+        {"kcl_path": str(tmp_path if input_is_directory else entry)},
+    )
+    assert result.ok, result
+    real.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_capture_materializes_linked_modules(
+    monkeypatch, tmp_path, execution_route
+):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    library = shared / "library.kcl"
+    library.write_text("export x = 1\n")
+    (shared / "main.kcl").write_text('export import x from "library.kcl"\n')
+    project = tmp_path / "project"
+    project.mkdir()
+    try:
+        (project / "shared").symlink_to(shared, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    (project / "main.kcl").write_text('import x from "shared/main.kcl"\ny = x + 1\n')
+    original_mock = kcl.mock_execute
+    captured = []
+
+    async def preflight(path):
+        captured.append(Path(path).parent)
+        outcome = await original_mock(path)
+        library.write_text("changed after preflight")
+        return outcome
+
+    async def run(*args):
+        assert (captured[0] / "shared/library.kcl").read_text() == "export x = 1\n"
+        assert not (captured[0] / "shared").is_symlink()
+        if execution_route != "local":
+            files = {file["path"]: bytes(file["contents"]) for file in args[2]}
+            assert files["shared/library.kcl"] == b"export x = 1\n"
+            return Path("graph.json")
+        return Outcome()
+
+    monkeypatch.setattr(kcl, "mock_execute", preflight)
+    monkeypatch.setattr(kcl, "execute", run)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", run)
+    result = await execute(execution_route, {"kcl_path": str(project)})
+    assert result.ok, result
+    assert not captured[0].exists()
 
 
 @pytest.mark.asyncio

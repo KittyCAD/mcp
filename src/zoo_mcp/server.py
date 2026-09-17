@@ -521,6 +521,7 @@ async def execute_kcl(
                             each with status, message, and diagnostics. Mock errors
                             return immediately with real_execution not_run; mock
                             warnings remain visible and allow real execution.
+                            Known mock-engine limitations are warnings.
                             Session successes include path_artifact_graph.
                             Transient local failures may retry real execution
                             without repeating preflight.
@@ -545,6 +546,7 @@ async def exec_kcl_project(
 
     Both stages use the same captured project. Mock errors return immediately
     without starting real execution. Mock warnings remain visible and allow it.
+    Known mock-engine limitations are reported as warnings for real execution.
 
     Args:
         kcl_code (str | None): KCL code to run as a single-file project.

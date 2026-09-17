@@ -918,6 +918,9 @@ class _FakeIssue:
     def is_fatal(self) -> bool:
         return self.severity == "fatal"
 
+    def message(self) -> str:
+        return f"{self.severity} report"
+
 
 class _FakeOutcome:
     """Stand-in for kcl.ExecOutcome."""

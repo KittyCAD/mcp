@@ -133,12 +133,16 @@ Each contains `status` (`succeeded`, `failed`, or `not_run`), `message`, and
 `diagnostics` grouped by severity. Mock errors or an aborted mock execution
 return immediately with `ok: false` and `real_execution.status: "not_run"`.
 Mock warnings remain in `mock_preflight.diagnostics` even if real execution fails.
+The known `planeOf` mock-engine limitation is reported as a warning so the real
+engine can evaluate it; other mock errors still block execution.
 Session responses expose mock diagnostics; the engine does not return real-stage
 diagnostics for session execution.
 
-Path inputs are captured once, including project files, and both stages use that
-copy. Transient local real-execution failures retain their bounded retries using
-the same copy without repeating mock execution. `exec_kcl_project` now returns
+Path inputs capture the entrypoint, its transitive imports (including linked
+modules and glTF buffers), and `project.toml` once. Both stages use that copy
+without scanning unrelated files in the containing directory. Transient local
+real-execution failures retain their bounded retries using the same copy without
+repeating mock execution. `exec_kcl_project` now returns
 this structured result instead of a path string: check `ok`, then read
 `path_artifact_graph` on session success. The standalone `mock_execute_kcl` tool
 continues to return its existing boolean/message pair.

@@ -134,6 +134,7 @@ from zoo_mcp import (
     logger,
 )
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
+from zoo_mcp.utils.kcl_project import load_kcl_project
 
 SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 
@@ -244,24 +245,6 @@ async def _resolve_file_api_call(
         )
 
     return current
-
-
-def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[int]]]]:
-    """Load a KCL project into the shape expected by exec_kcl_project."""
-    path = Path(path).resolve()
-    root = path if path.is_dir() else path.parent
-    entrypoint = "main.kcl" if path.is_dir() else path.name
-
-    files: list[dict[str, str | list[int]]] = [
-        {
-            "path": file.relative_to(root).as_posix(),
-            "contents": list(file.read_bytes()),
-        }
-        for file in sorted(root.rglob("*"))
-        if file.is_file()
-    ]
-
-    return entrypoint, files
 
 
 # Mappings from user-facing short strings to kcl PyO3 enum members.
@@ -593,7 +576,17 @@ _EXECUTION_ISSUE_SEVERITIES = (
 )
 
 
-def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]:
+# zoo-kcl 0.3.184 reports this mock-engine limitation as an error even for valid
+# planeOf calls. Match the raw diagnostic exactly, never its rendered source
+# excerpt, and leave all other errors (including fatal issues) blocking.
+_MOCK_ENGINE_LIMITATIONS = frozenset(
+    {"The engine isn't available, so returning an arbitrary incorrect plane"}
+)
+
+
+def _format_execution_issues(
+    outcome: "kcl.ExecOutcome", *, mock: bool = False
+) -> dict[str, list[str]]:
     """Render compilation issues from an execution outcome, grouped by severity.
 
     ``kcl.execute`` / ``kcl.execute_code`` return an ``ExecOutcome`` whose
@@ -604,6 +597,8 @@ def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]
 
     Args:
         outcome: The outcome returned by a kcl execution call.
+        mock: Report known engine-unavailable diagnostics as warnings. This
+            applies only to mock outcomes; real execution keeps its severities.
 
     Returns:
         A mapping of severity label (``"fatal"``, ``"error"``, ``"warning"``)
@@ -614,6 +609,12 @@ def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]
     for issue in outcome.issues():
         for severity, predicate in _EXECUTION_ISSUE_SEVERITIES:
             if getattr(issue, predicate)():
+                if (
+                    mock
+                    and severity == "error"
+                    and issue.message() in _MOCK_ENGINE_LIMITATIONS
+                ):
+                    severity = "warning"
                 issues.setdefault(severity, []).append(outcome.report(issue))
                 break
     return issues
@@ -1613,7 +1614,7 @@ async def _mock_execution_stage(
         outcome = await kcl.mock_execute_code(kcl_code)
     else:
         outcome = await kcl.mock_execute(str(kcl_path))
-    issues = _format_execution_issues(outcome)
+    issues = _format_execution_issues(outcome, mock=True)
     return KclExecutionStage(
         status="failed" if "fatal" in issues or "error" in issues else "succeeded",
         message=(
@@ -2121,8 +2122,9 @@ async def zoo_mock_execute_kcl(
 
     Returns:
         tuple(bool, str): Returns ``False`` when execution aborts or reports an
-        error/fatal compilation issue. Warning-only outcomes remain successful
-        and include their rendered diagnostics in the message.
+        error/fatal compilation issue. Known mock-engine limitations are treated
+        as warnings. Warning-only outcomes remain successful and include their
+        rendered diagnostics in the message.
     """
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
