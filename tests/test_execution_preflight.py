@@ -10,7 +10,7 @@ import kcl
 import pytest
 from mcp.types import CallToolResult
 
-from zoo_mcp import zoo_tools
+from zoo_mcp import ZooMCPTimeoutError, zoo_tools
 from zoo_mcp.server import mcp
 
 
@@ -153,7 +153,9 @@ async def test_preflight_order_counts_and_separate_outcomes(
     assert result.mock_preflight.status == "succeeded"
     assert bool(result.mock_preflight.diagnostics.get("warning")) is warning
     assert result.real_execution.status == ("failed" if real_failure else "succeeded")
-    assert result.real_execution.diagnostics == {}
+    assert result.real_execution.diagnostics == (
+        {"error": ["engine rejected execution"]} if real_failure else {}
+    )
     assert [event.stage for event in events] == ["mock_preflight", "real_execution"]
     assert [event.attempts for event in events] == [1, 1]
     if execution_route != "local" and not real_failure:
@@ -436,6 +438,126 @@ async def test_invalid_input_returns_failed_preflight(monkeypatch, execution_rou
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code",
+    [
+        'import x from "library.kcl"\ny = x\n',
+        'import "../assets/model.stl" as model\n',
+        'import "C:\\assets\\model.gltf" as model\n',
+    ],
+)
+async def test_inline_filesystem_imports_require_an_explicit_project(
+    monkeypatch, execution_route, code
+):
+    mock = AsyncMock(side_effect=AssertionError("must not read live imports"))
+    real = AsyncMock(side_effect=AssertionError("must not execute or upload"))
+    mock_bindings(monkeypatch, mock, real)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
+
+    result = await execute(execution_route, {"kcl_code": code})
+
+    assert not result.ok
+    assert "Filesystem imports require kcl_path" in result.message
+    assert result.real_execution.status == "not_run"
+    mock.assert_not_called()
+    real.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code",
+    [
+        '// import "library.kcl"\nx = 1\n',
+        '/* import "library.kcl" */\nx = 1\n',
+        "x = \"import 'library.kcl'\"\n",
+        'import sqrt from "std::math"\nx = sqrt(4)\n',
+    ],
+)
+async def test_inline_comments_strings_and_standard_imports_are_allowed(
+    monkeypatch, execution_route, code
+):
+    mock = AsyncMock(return_value=Outcome())
+    real = AsyncMock(
+        return_value=Outcome() if execution_route == "local" else Path("graph.json")
+    )
+    mock_bindings(monkeypatch, mock, real)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
+
+    result = await execute(execution_route, {"kcl_code": code})
+
+    assert result.ok
+    mock.assert_awaited_once()
+    real.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["mock", "real"])
+@pytest.mark.parametrize("thrown", [False, True])
+@pytest.mark.parametrize("imported", [False, True])
+async def test_diagnostics_use_original_source_paths_after_capture_cleanup(
+    monkeypatch, tmp_path, stage, thrown, imported
+):
+    project = tmp_path / "source"
+    project.mkdir()
+    entry = project / "part.kcl"
+    # Imported-module errors are raised by the binding rather than returned.
+    code = (
+        "x = missingThing\n" if thrown or imported else "x = sqrt(4, unexpected = 1)\n"
+    )
+    if imported:
+        (project / "library.kcl").write_text(code)
+        entry.write_text('import "library.kcl" as library\n')
+    else:
+        entry.write_text(code)
+    captured = []
+    original_mock = kcl.mock_execute
+
+    async def run(path):
+        captured.append(Path(path))
+        return await original_mock(path)
+
+    monkeypatch.setattr(
+        kcl,
+        "mock_execute",
+        run if stage == "mock" else AsyncMock(return_value=Outcome()),
+    )
+    monkeypatch.setattr(
+        kcl,
+        "execute",
+        run
+        if stage == "real"
+        else AsyncMock(side_effect=AssertionError("must not execute")),
+    )
+
+    result = await zoo_tools.zoo_execute_kcl(kcl_path=entry)
+
+    current = result.mock_preflight if stage == "mock" else result.real_execution
+    report = "\n".join(current.diagnostics["error"])
+    assert "zoo-mcp-preflight-" not in result.message + report
+    assert str(project / ("library.kcl" if imported else "part.kcl")) in report
+    assert report in result.message
+    assert report not in current.message
+    assert captured and not captured[0].exists()
+
+
+@pytest.mark.asyncio
+async def test_session_timeout_preserves_its_error_family(monkeypatch):
+    mock = AsyncMock(return_value=Outcome())
+    error = ZooMCPTimeoutError("modeling session deadline expired")
+    real = AsyncMock(side_effect=error)
+    mock_bindings(monkeypatch, mock, real)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
+
+    result = await execute("project", {"kcl_code": "x = 1"})
+
+    assert not result.ok
+    assert result.real_execution.error_family == "ZooMCPTimeoutError"
+    assert result.real_execution.diagnostics == {"error": [str(error)]}
+    assert str(error) in result.message
+    assert str(error) not in result.real_execution.message
+
+
+@pytest.mark.asyncio
 async def test_actual_mock_resolves_imports_from_captured_project(
     monkeypatch,
     tmp_path,
@@ -570,7 +692,7 @@ async def test_external_gltf_buffer_blocks_preflight_and_upload(
     result = await execute(execution_route, {"kcl_path": str(project)})
 
     assert not result.ok
-    assert "outside the project directory" in result.mock_preflight.message
+    assert "outside the project directory" in result.message
     assert result.real_execution.status == "not_run"
     mock.assert_not_called()
     real.assert_not_called()

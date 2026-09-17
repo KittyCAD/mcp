@@ -634,11 +634,13 @@ async def test_kcl_execution_tools_forward_session_id(
             "status": "succeeded",
             "message": "mock ok",
             "diagnostics": {},
+            "error_family": None,
         },
         "real_execution": {
             "status": "succeeded",
             "message": "real ok",
             "diagnostics": {},
+            "error_family": None,
         },
         "path_artifact_graph": str(artifact_graph_path),
     }

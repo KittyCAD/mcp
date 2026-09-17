@@ -4,6 +4,7 @@ import json
 import os
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from zoo_mcp import ZooMCPException
@@ -51,7 +52,20 @@ def _dependency(parent: Path, path: str) -> Path:
     return _absolute(parent / path.replace("\\", "/"))
 
 
-def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[int]]]]:
+def check_inline_imports(code: str) -> None:
+    """Require an explicit project directory for filesystem dependencies."""
+    if next(_imports(code), None) is not None:
+        raise ZooMCPException("Filesystem imports require kcl_path instead of kcl_code")
+
+
+@dataclass
+class CapturedKclProject:
+    entrypoint: str
+    source_root: Path
+    files: dict[str, bytes]
+
+
+def load_kcl_project(path: Path | str) -> CapturedKclProject:
     """Read the entrypoint, transitive imports, glTF buffers, and project config.
 
     Reading linked files through their logical paths materializes their bytes
@@ -141,7 +155,11 @@ def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[i
     # This root only preserves logical paths in the payload (including aliases).
     # File access is always bounded by the fixed project_root above.
     root = Path(os.path.commonpath([str(file.parent) for file in contents]))
-    return entry.relative_to(root).as_posix(), [
-        {"path": file.relative_to(root).as_posix(), "contents": list(data)}
-        for file, data in sorted(contents.items())
-    ]
+    return CapturedKclProject(
+        entry.relative_to(root).as_posix(),
+        root,
+        {
+            file.relative_to(root).as_posix(): data
+            for file, data in sorted(contents.items())
+        },
+    )

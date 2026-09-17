@@ -512,7 +512,7 @@ async def execute_kcl(
       have large network overhead depending on the model.
 
     Args:
-        kcl_code (str | None): The KCL code to execute.
+        kcl_code (str | None): Self-contained KCL code to execute. Standard-library imports are allowed; filesystem imports require kcl_path.
         kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: An open modeling session in which to execute the KCL.
 
@@ -549,7 +549,7 @@ async def exec_kcl_project(
     Known mock-engine limitations are reported as warnings for real execution.
 
     Args:
-        kcl_code (str | None): KCL code to run as a single-file project.
+        kcl_code (str | None): Self-contained KCL code to run as a single-file project. Standard-library imports are allowed; filesystem imports require kcl_path.
         kcl_path (str | None): A .kcl file or project directory containing main.kcl. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: The modeling session in which to execute the project.
 

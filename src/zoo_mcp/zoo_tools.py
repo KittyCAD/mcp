@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import os
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -134,7 +135,7 @@ from zoo_mcp import (
     logger,
 )
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
-from zoo_mcp.utils.kcl_project import load_kcl_project
+from zoo_mcp.utils.kcl_project import check_inline_imports, load_kcl_project
 
 SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 
@@ -1481,6 +1482,7 @@ class KclExecutionStage:
     status: Literal["succeeded", "failed", "not_run"]
     message: str
     diagnostics: dict[str, list[str]] = field(default_factory=dict)
+    error_family: str | None = None
 
 
 @dataclass
@@ -1559,18 +1561,45 @@ class _ResolvedKclExecution:
     code: str | None
     path: str | None
     entrypoint: str
-    files: list[dict[str, str | list[int]]]
+    files: dict[str, bytes]
+    source_paths: dict[str, str] = field(default_factory=dict)
+
+    def source_report(self, report: str) -> str:
+        for captured, original in self.source_paths.items():
+            report = report.replace(captured, original)
+        return report
+
+    def remap_diagnostics(self, stage: KclExecutionStage) -> None:
+        stage.diagnostics = {
+            severity: [self.source_report(report) for report in reports]
+            for severity, reports in stage.diagnostics.items()
+        }
 
 
 def _capture_execution_project(
     path: Path | str, destination: Path
 ) -> _ResolvedKclExecution:
-    entrypoint, files = load_kcl_project(path)
-    for file in files:
-        target = destination / cast(str, file["path"])
+    project = load_kcl_project(path)
+    for name, contents in project.files.items():
+        target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(bytes(cast(list[int], file["contents"])))
-    return _ResolvedKclExecution(None, str(destination / entrypoint), entrypoint, files)
+        target.write_bytes(contents)
+    source_paths = {}
+    for captured_root in (destination, destination.resolve()):
+        for captured, original in (
+            (str(captured_root) + os.sep, str(project.source_root) + os.sep),
+            (captured_root.as_posix() + "/", project.source_root.as_posix() + "/"),
+        ):
+            source_paths[captured] = original
+            # KclError renders reports inside a repr, escaping Windows separators.
+            source_paths[repr(captured)[1:-1]] = repr(original)[1:-1]
+    return _ResolvedKclExecution(
+        None,
+        str(destination / project.entrypoint),
+        project.entrypoint,
+        project.files,
+        source_paths,
+    )
 
 
 @asynccontextmanager
@@ -1581,11 +1610,12 @@ async def _resolve_kcl_execution(
     """Capture input once and retain it through mock, real execution, and retries."""
     _check_kcl_code_or_path(kcl_code, kcl_path)
     if kcl_code:
+        check_inline_imports(kcl_code)
         yield _ResolvedKclExecution(
             kcl_code,
             None,
             "main.kcl",
-            [{"path": "main.kcl", "contents": list(kcl_code.encode())}],
+            {"main.kcl": kcl_code.encode()},
         )
         return
 
@@ -1615,14 +1645,26 @@ async def _mock_execution_stage(
     else:
         outcome = await kcl.mock_execute(str(kcl_path))
     issues = _format_execution_issues(outcome, mock=True)
+    failed = "fatal" in issues or "error" in issues
     return KclExecutionStage(
-        status="failed" if "fatal" in issues or "error" in issues else "succeeded",
+        status="failed" if failed else "succeeded",
         message=(
-            _execution_issues_message(issues)
+            "Mock preflight failed"
+            if failed
+            else "Mock preflight succeeded with diagnostics"
             if issues
             else "KCL code mock executed successfully"
         ),
         diagnostics=issues,
+        error_family="CompilationIssue" if failed else None,
+    )
+
+
+def _execution_result_message(stage: KclExecutionStage) -> str:
+    return (
+        _execution_issues_message(stage.diagnostics)
+        if stage.diagnostics
+        else stage.message
     )
 
 
@@ -1638,10 +1680,12 @@ async def _execute_kcl_with_preflight(
     stage: Literal["mock_preflight", "real_execution"] = "mock_preflight"
     started_at = monotonic()
     attempts = 0
+    resolved: _ResolvedKclExecution | None = None
     try:
         async with _resolve_kcl_execution(kcl_code, kcl_path) as resolved:
             attempts = 1
             mock = await _mock_execution_stage(resolved.code, resolved.path)
+            resolved.remap_diagnostics(mock)
             _report_execution_stage_event(
                 operation,
                 stage,
@@ -1658,7 +1702,9 @@ async def _execute_kcl_with_preflight(
                     started_at,
                     0,
                 )
-                return ResultZooExecuteKclLocal(False, mock.message, mock, real)
+                return ResultZooExecuteKclLocal(
+                    False, _execution_result_message(mock), mock, real
+                )
 
             stage = "real_execution"
             started_at = monotonic()
@@ -1669,7 +1715,10 @@ async def _execute_kcl_with_preflight(
                 artifact_graph = await _execute_resolved_kcl_project(
                     session_id,
                     resolved.entrypoint,
-                    resolved.files,
+                    [
+                        {"path": name, "contents": list(contents)}
+                        for name, contents in resolved.files.items()
+                    ],
                 )
                 real = KclExecutionStage(
                     "succeeded",
@@ -1691,11 +1740,12 @@ async def _execute_kcl_with_preflight(
                 issues = _format_execution_issues(outcome)
                 real = KclExecutionStage(
                     "succeeded",
-                    _execution_issues_message(issues)
+                    "KCL code executed with diagnostics"
                     if issues
                     else "KCL code executed successfully",
                     issues,
                 )
+                resolved.remap_diagnostics(real)
             _report_execution_stage_event(
                 operation,
                 stage,
@@ -1711,7 +1761,9 @@ async def _execute_kcl_with_preflight(
                     real,
                     artifact_graph,
                 )
-            return ResultZooExecuteKclLocal(True, real.message, mock, real)
+            return ResultZooExecuteKclLocal(
+                True, _execution_result_message(real), mock, real
+            )
     except asyncio.CancelledError:
         _report_execution_stage_event(
             operation,
@@ -1722,17 +1774,19 @@ async def _execute_kcl_with_preflight(
         )
         raise
     except Exception as error:
+        detail = resolved.source_report(str(error)) if resolved else str(error)
+        error_family = _execution_error_family(error)
         _report_execution_stage_event(
             operation,
             stage,
             "failed",
             started_at,
             attempts,
-            _execution_error_family(error),
+            error_family,
         )
         if stage == "mock_preflight":
             mock = KclExecutionStage(
-                "failed", f"Failed to mock execute KCL code: {error}"
+                "failed", "Mock preflight failed", {"error": [detail]}, error_family
             )
             _report_execution_stage_event(
                 operation,
@@ -1741,9 +1795,15 @@ async def _execute_kcl_with_preflight(
                 started_at,
                 0,
             )
-            return ResultZooExecuteKclLocal(False, mock.message, mock, real)
-        real = KclExecutionStage("failed", f"Failed to execute KCL code: {error}")
-        return ResultZooExecuteKclLocal(False, real.message, mock, real)
+            return ResultZooExecuteKclLocal(
+                False, f"Failed to mock execute KCL code: {detail}", mock, real
+            )
+        real = KclExecutionStage(
+            "failed", "Real execution failed", {"error": [detail]}, error_family
+        )
+        return ResultZooExecuteKclLocal(
+            False, f"Failed to execute KCL code: {detail}", mock, real
+        )
 
 
 async def zoo_execute_kcl(
@@ -1754,7 +1814,7 @@ async def zoo_execute_kcl(
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
     Args:
-        kcl_code (str | None): KCL code
+        kcl_code (str | None): Self-contained KCL code. Standard-library imports are allowed; filesystem imports require kcl_path.
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
         session_id (str | None): An open modeling session in which to execute the KCL.
 
@@ -2130,7 +2190,7 @@ async def zoo_mock_execute_kcl(
 
     try:
         result = await _mock_execution_stage(kcl_code, kcl_path)
-        return result.status == "succeeded", result.message
+        return result.status == "succeeded", _execution_result_message(result)
     except Exception as e:
         logger.info(
             "Failed to mock execute KCL code (error_family=%s)",

@@ -776,7 +776,9 @@ async def test_execute_kcl_error():
     )
     result = _meta_result(response)
     assert result["ok"] is False
-    assert "Failed to mock execute KCL code" in result["mock_preflight"]["message"]
+    assert "Failed to mock execute KCL code" in result["message"]
+    assert result["mock_preflight"]["message"] == "Mock preflight failed"
+    assert result["mock_preflight"]["error_family"] == "KclError"
     assert result["real_execution"]["status"] == "not_run"
 
 
@@ -885,7 +887,9 @@ async def test_execute_kcl_surfaces_error_issues(error_kcl: str):
     result = _meta_result(response)
     assert result["ok"] is False
     assert "KCL code execution completed with the following issues" in result["message"]
-    assert "Errors:" in result["mock_preflight"]["message"]
+    assert "Errors:" in result["message"]
+    assert result["mock_preflight"]["message"] == "Mock preflight failed"
+    assert result["mock_preflight"]["error_family"] == "CompilationIssue"
     assert result["real_execution"]["status"] == "not_run"
 
 

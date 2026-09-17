@@ -1,6 +1,6 @@
 import json
+import tracemalloc
 from pathlib import Path
-from typing import cast
 
 import kcl
 import pytest
@@ -126,10 +126,8 @@ def test_capture_reads_the_validated_physical_file(monkeypatch, tmp_path):
         return original_read(file)
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes)
-    _, files = load_kcl_project(project)
-    assert next(
-        file["contents"] for file in files if file["path"] == "alias.kcl"
-    ) == list(b"export x = 1\n")
+    captured = load_kcl_project(project)
+    assert captured.files["alias.kcl"] == b"export x = 1\n"
 
 
 @pytest.mark.asyncio
@@ -162,7 +160,7 @@ async def test_capture_follows_imports_but_ignores_comments_and_strings(
     destination = tmp_path / "captured"
     resolved = zoo_tools._capture_execution_project(source, destination)
 
-    assert {file["path"] for file in resolved.files} == {
+    assert set(resolved.files) == {
         "main.kcl",
         "library.kcl",
         "nested/main.kcl",
@@ -198,10 +196,7 @@ async def test_capture_includes_gltf_buffers_without_unrelated_assets(
     (assets / "unrelated.bin").write_bytes(b"not referenced")
     resolved = zoo_tools._capture_execution_project(source, tmp_path / "captured")
     buffer.unlink()
-    files = {
-        file["path"]: bytes(cast(list[int], file["contents"]))
-        for file in resolved.files
-    }
+    files = resolved.files
 
     assert set(files) == {"main.kcl", "assets/model.gltf", "assets/mesh.bin"}
     assert files["assets/mesh.bin"] == b"\x00\x01\xfe\xff"
@@ -225,7 +220,7 @@ async def test_capture_preserves_cad_imports_inside_project(
     asset.unlink()
 
     assert resolved.entrypoint == "main.kcl"
-    assert {file["path"] for file in resolved.files} == {"main.kcl", "cube.stl"}
+    assert set(resolved.files) == {"main.kcl", "cube.stl"}
     assert resolved.path is not None
     outcome = await kcl.mock_execute(resolved.path)
     assert not any(issue.is_err() for issue in outcome.issues())
@@ -248,7 +243,7 @@ async def test_linked_entrypoint_uses_imports_from_its_logical_directory(tmp_pat
     resolved = zoo_tools._capture_execution_project(entry, tmp_path / "captured")
 
     assert resolved.entrypoint == "main.kcl"
-    assert {file["path"] for file in resolved.files} == {"main.kcl", "library.kcl"}
+    assert set(resolved.files) == {"main.kcl", "library.kcl"}
     assert resolved.path is not None
     outcome = await kcl.mock_execute(resolved.path)
     assert not any(issue.is_err() for issue in outcome.issues())
@@ -278,3 +273,22 @@ async def test_capture_leaves_missing_import_diagnostics_to_kcl(tmp_path):
     assert resolved.path is not None
     with pytest.raises(kcl.KclError, match="missing.kcl"):
         await kcl.mock_execute(resolved.path)
+
+
+def test_local_capture_does_not_expand_asset_bytes_into_integer_lists(tmp_path):
+    source = tmp_path / "project"
+    source.mkdir()
+    (source / "main.kcl").write_text('import "model.stl" as model\n')
+    size = 8 * 1024 * 1024
+    (source / "model.stl").write_bytes(b"a" * size)
+
+    tracemalloc.start()
+    try:
+        resolved = zoo_tools._capture_execution_project(source, tmp_path / "captured")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # A list of byte values alone used 8x the input size on a 64-bit runtime.
+    assert peak < size * 4
+    assert resolved.files["model.stl"] == (source / "model.stl").read_bytes()

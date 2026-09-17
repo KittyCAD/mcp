@@ -130,7 +130,10 @@ same `session_id` to `snapshot` and modeling tools; then call
 As of 0.28.0, `execute_kcl` and `exec_kcl_project` run mock execution before real
 execution and return separate `mock_preflight` and `real_execution` objects.
 Each contains `status` (`succeeded`, `failed`, or `not_run`), `message`, and
-`diagnostics` grouped by severity. Mock errors or an aborted mock execution
+`diagnostics` grouped by severity. Stage messages are short summaries; the
+top-level `message` retains the full report for existing callers. Failed stages
+also expose `error_family`, including `ZooMCPTimeoutError` for session timeouts.
+Mock errors or an aborted mock execution
 return immediately with `ok: false` and `real_execution.status: "not_run"`.
 Mock warnings remain in `mock_preflight.diagnostics` even if real execution fails.
 The known `planeOf` mock-engine limitation is reported as a warning so the real
@@ -143,8 +146,11 @@ modules and glTF buffers), and `project.toml` once. Both stages use that copy
 without scanning unrelated files in the containing directory. Dependencies and
 symlink targets must stay inside the entrypoint's directory; external paths are
 rejected before file reads or execution. Transient local real-execution failures
-retain their bounded retries using the same copy without
-repeating mock execution. `exec_kcl_project` now returns
+retain their bounded retries using the same copy without repeating mock execution.
+Diagnostics refer to the original source paths. Inline `kcl_code` accepts
+self-contained code and standard-library imports; filesystem imports require
+`kcl_path` so their dependencies can be captured within an explicit directory.
+`exec_kcl_project` now returns
 this structured result instead of a path string: check `ok`, then read
 `path_artifact_graph` on session success. The standalone `mock_execute_kcl` tool
 continues to return its existing boolean/message pair.
