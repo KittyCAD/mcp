@@ -11,20 +11,18 @@ from zoo_mcp.utils.kcl_project import load_kcl_project
 
 def _reject_external_access(monkeypatch, external: Path) -> None:
     """Fail if capture even looks up or reads a file beyond the boundary."""
-    original_is_file = Path.is_file
-    original_read_bytes = Path.read_bytes
     external = external.resolve()
 
-    def is_file(file):
-        assert not file.resolve().is_relative_to(external), "external file lookup"
-        return original_is_file(file)
+    for method_name in ("is_file", "read_bytes"):
+        original = getattr(Path, method_name)
 
-    def read_bytes(file):
-        assert not file.resolve().is_relative_to(external), "external file read"
-        return original_read_bytes(file)
+        def guarded(file, original=original, method_name=method_name):
+            assert not file.resolve().is_relative_to(external), (
+                f"external {method_name}"
+            )
+            return original(file)
 
-    monkeypatch.setattr(Path, "is_file", is_file)
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+        monkeypatch.setattr(Path, method_name, guarded)
 
 
 @pytest.mark.parametrize("source_kind", ["kcl", "cad", "gltf"])
