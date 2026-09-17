@@ -57,22 +57,30 @@ def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[i
     Reading linked files through their logical paths materializes their bytes
     under the same module names in the captured project. No directory scan is
     needed, including for a directory argument (whose entrypoint is main.kcl).
+    All file accesses must resolve inside the entrypoint's directory.
     """
     path = _absolute(Path(path))
     entry = path / "main.kcl" if path.is_dir() else path
+    project_root = entry.parent.resolve()
     contents: dict[Path, bytes] = {}
     # Avoid reading the same file twice through different symlink aliases.
     source_bytes: dict[Path, bytes] = {}
     active: set[Path] = set()
 
-    def read(file: Path) -> None:
+    def checked_path(file: Path) -> Path:
         physical = file.resolve()
+        if not physical.is_relative_to(project_root):
+            raise ZooMCPException("Dependency is outside the project directory")
+        return physical
+
+    def read(file: Path) -> None:
+        physical = checked_path(file)
         if physical in active:
             raise ZooMCPException(f"Circular KCL import involving '{file}'")
         if file in contents:
             return
         if physical not in source_bytes:
-            source_bytes[physical] = file.read_bytes()
+            source_bytes[physical] = physical.read_bytes()
         data = source_bytes[physical]
         contents[file] = data
         active.add(physical)
@@ -82,14 +90,15 @@ def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[i
                 replacements = []
                 for start, end, imported in _imports(code):
                     import_path = Path(imported.replace("\\", "/"))
+                    dependency = _dependency(file.parent, imported)
+                    physical_dependency = checked_path(dependency)
                     if imported.endswith(".kcl") and (
                         imported.startswith("..") or import_path.is_absolute()
                     ):
                         continue  # Invalid KCL imports belong to the compiler.
-                    dependency = _dependency(file.parent, imported)
                     # Leave missing inputs to the compiler for a source-located
                     # diagnostic, rather than replacing it with a filesystem error.
-                    if dependency.is_file():
+                    if physical_dependency.is_file():
                         read(dependency)
                     if import_path.is_absolute():
                         relative = Path(os.path.relpath(dependency, file.parent))
@@ -113,12 +122,12 @@ def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[i
                         uri = buffer.get("uri") if isinstance(buffer, dict) else None
                         if isinstance(uri, str) and not uri.startswith("data:"):
                             dependency = _dependency(file.parent, uri)
-                            if dependency.is_file():
+                            if checked_path(dependency).is_file():
                                 read(dependency)
-                            if Path(uri.replace("\\", "/")).is_absolute():
-                                buffer["uri"] = Path(
-                                    os.path.relpath(dependency, file.parent)
-                                ).as_posix()
+                            if os.path.isabs(uri.replace("\\", "/")):
+                                buffer["uri"] = os.path.relpath(
+                                    dependency, file.parent
+                                ).replace(os.sep, "/")
                                 rewritten = True
                     if rewritten:
                         contents[file] = json.dumps(gltf).encode("utf-8")
@@ -127,10 +136,10 @@ def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[i
 
     read(entry)
     config = entry.parent / "project.toml"
-    if config.is_file():
+    if checked_path(config).is_file():
         read(config)
-    # Relative CAD imports and glTF buffers may live above the entrypoint's
-    # directory. Keep their layout without walking or copying that ancestor.
+    # This root only preserves logical paths in the payload (including aliases).
+    # File access is always bounded by the fixed project_root above.
     root = Path(os.path.commonpath([str(file.parent) for file in contents]))
     return entry.relative_to(root).as_posix(), [
         {"path": file.relative_to(root).as_posix(), "contents": list(data)}

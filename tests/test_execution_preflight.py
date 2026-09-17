@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -534,16 +535,58 @@ async def test_capture_ignores_unrelated_files(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reference_kind", ["parent", "absolute", "symlink"])
+async def test_external_gltf_buffer_blocks_preflight_and_upload(
+    monkeypatch, tmp_path, execution_route, reference_kind
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    sentinel = tmp_path / "outside.bin"
+    sentinel.write_bytes(b"outside-project sentinel")
+    if reference_kind == "absolute":
+        reference = sentinel.as_posix()
+    elif reference_kind == "symlink":
+        try:
+            (project / "linked.bin").symlink_to(sentinel)
+        except OSError:
+            pytest.skip("symlinks are unavailable")
+        reference = "linked.bin"
+    else:
+        reference = "../outside.bin"
+    (project / "main.kcl").write_text('import "model.gltf" as model\n')
+    (project / "model.gltf").write_text(
+        json.dumps(
+            {
+                "asset": {"version": "2.0"},
+                "buffers": [{"uri": reference, "byteLength": 24}],
+            }
+        )
+    )
+    mock = AsyncMock(side_effect=AssertionError("must not run preflight"))
+    real = AsyncMock(side_effect=AssertionError("must not run or upload"))
+    mock_bindings(monkeypatch, mock, real)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
+
+    result = await execute(execution_route, {"kcl_path": str(project)})
+
+    assert not result.ok
+    assert "outside the project directory" in result.mock_preflight.message
+    assert result.real_execution.status == "not_run"
+    mock.assert_not_called()
+    real.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_capture_materializes_linked_modules(
     monkeypatch, tmp_path, execution_route
 ):
-    shared = tmp_path / "shared"
+    project = tmp_path / "project"
+    project.mkdir()
+    shared = project / "library"
     shared.mkdir()
     library = shared / "library.kcl"
     library.write_text("export x = 1\n")
     (shared / "main.kcl").write_text('export import x from "library.kcl"\n')
-    project = tmp_path / "project"
-    project.mkdir()
     try:
         (project / "shared").symlink_to(shared, target_is_directory=True)
     except OSError:

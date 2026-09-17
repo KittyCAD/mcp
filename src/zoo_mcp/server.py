@@ -513,7 +513,7 @@ async def execute_kcl(
 
     Args:
         kcl_code (str | None): The KCL code to execute.
-        kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file.
+        kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: An open modeling session in which to execute the KCL.
 
     Returns:
@@ -550,7 +550,7 @@ async def exec_kcl_project(
 
     Args:
         kcl_code (str | None): KCL code to run as a single-file project.
-        kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+        kcl_path (str | None): A .kcl file or project directory containing main.kcl. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: The modeling session in which to execute the project.
 
     Returns:

@@ -140,8 +140,10 @@ diagnostics for session execution.
 
 Path inputs capture the entrypoint, its transitive imports (including linked
 modules and glTF buffers), and `project.toml` once. Both stages use that copy
-without scanning unrelated files in the containing directory. Transient local
-real-execution failures retain their bounded retries using the same copy without
+without scanning unrelated files in the containing directory. Dependencies and
+symlink targets must stay inside the entrypoint's directory; external paths are
+rejected before file reads or execution. Transient local real-execution failures
+retain their bounded retries using the same copy without
 repeating mock execution. `exec_kcl_project` now returns
 this structured result instead of a path string: check `ok`, then read
 `path_artifact_graph` on session success. The standalone `mock_execute_kcl` tool
