@@ -92,7 +92,9 @@ async def populated_modeling_session(cube_kcl: str):
             "exec_kcl_project",
             arguments={"kcl_path": cube_kcl, "session_id": session_id},
         )
-        artifact_graph_path = Path(_meta_result(response))
+        execution = _meta_result(response)
+        assert execution["ok"], execution
+        artifact_graph_path = Path(execution["path_artifact_graph"])
         yield session_id
     except BaseException as error:
         failure = error
@@ -774,7 +776,8 @@ async def test_execute_kcl_error():
     )
     result = _meta_result(response)
     assert result["ok"] is False
-    assert "Failed to execute KCL code" in result["message"]
+    assert "Failed to mock execute KCL code" in result["mock_preflight"]["message"]
+    assert result["real_execution"]["status"] == "not_run"
 
 
 @pytest.mark.asyncio
@@ -827,7 +830,15 @@ async def test_exec_kcl_project_tool(monkeypatch, tmp_path):
     }
     artifact_graph_path = tmp_path / "artifact-graph.json"
     artifact_graph_path.write_text(json.dumps(artifact_graph))
-    mock = AsyncMock(return_value=artifact_graph_path)
+    mock = AsyncMock(
+        return_value=zoo_mcp.zoo_tools.ResultZooExecuteKclRemote(
+            ok=True,
+            message="KCL code executed successfully",
+            mock_preflight=zoo_mcp.zoo_tools.KclExecutionStage("succeeded", "mock ok"),
+            real_execution=zoo_mcp.zoo_tools.KclExecutionStage("succeeded", "real ok"),
+            path_artifact_graph=artifact_graph_path,
+        )
+    )
     monkeypatch.setattr("zoo_mcp.server.zoo_exec_kcl_project", mock)
 
     response = await mcp.call_tool(
@@ -839,7 +850,7 @@ async def test_exec_kcl_project_tool(monkeypatch, tmp_path):
         },
     )
 
-    assert _meta_result(response) == str(artifact_graph_path)
+    assert _meta_result(response)["path_artifact_graph"] == str(artifact_graph_path)
     mock.assert_awaited_once_with(
         kcl_code="sketch = startSketchOn(XY)",
         kcl_path=None,
@@ -866,15 +877,16 @@ async def test_execute_kcl_surfaces_warning_issue(warning_kcl: str):
 
 @pytest.mark.asyncio
 async def test_execute_kcl_surfaces_error_issues(error_kcl: str):
-    """Non-fatal errors (labelled `extrude` arg) succeed but are reported."""
+    """Error diagnostics from mock execution block real execution."""
     response = await mcp.call_tool(
         "execute_kcl",
         arguments={"kcl_code": None, "kcl_path": error_kcl},
     )
     result = _meta_result(response)
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert "KCL code execution completed with the following issues" in result["message"]
-    assert "Errors:" in result["message"]
+    assert "Errors:" in result["mock_preflight"]["message"]
+    assert result["real_execution"]["status"] == "not_run"
 
 
 @pytest.mark.asyncio
@@ -886,7 +898,8 @@ async def test_execute_kcl_reports_fatal_error(fatal_error_kcl: str):
     )
     result = _meta_result(response)
     assert result["ok"] is False
-    assert "Failed to execute KCL code" in result["message"]
+    assert result["mock_preflight"]["status"] == "failed"
+    assert result["real_execution"]["status"] == "not_run"
 
 
 class _FakeIssue:
@@ -954,6 +967,11 @@ async def test_execute_kcl_surfaces_all_issue_severities(monkeypatch):
         return outcome
 
     monkeypatch.setattr(zoo_mcp.zoo_tools.kcl, "execute_code", fake_execute_code)
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kcl,
+        "mock_execute_code",
+        AsyncMock(return_value=_FakeOutcome([])),
+    )
 
     result = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="anything")
     assert isinstance(result, zoo_mcp.zoo_tools.ResultZooExecuteKclLocal)
@@ -1150,6 +1168,11 @@ async def test_kcl_execution_errors_keep_details_out_of_logs(
         raise ValueError(secret)
 
     monkeypatch.setattr(zoo_mcp.zoo_tools, "_execute_with_retries", fail)
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kcl,
+        "mock_execute_code",
+        AsyncMock(return_value=_FakeOutcome([])),
+    )
 
     with caplog.at_level("INFO", logger="zoo_mcp"):
         execute_result = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="code")

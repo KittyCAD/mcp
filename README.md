@@ -127,6 +127,22 @@ session with `execute_kcl`, `exec_kcl_project`, or `import_cad_file`; pass the
 same `session_id` to `snapshot` and modeling tools; then call
 `stop_modeling_session` when finished.
 
+As of 0.28.0, `execute_kcl` and `exec_kcl_project` run mock execution before real
+execution and return separate `mock_preflight` and `real_execution` objects.
+Each contains `status` (`succeeded`, `failed`, or `not_run`), `message`, and
+`diagnostics` grouped by severity. Mock errors or an aborted mock execution
+return immediately with `ok: false` and `real_execution.status: "not_run"`.
+Mock warnings remain in `mock_preflight.diagnostics` even if real execution fails.
+Session responses expose mock diagnostics; the engine does not return real-stage
+diagnostics for session execution.
+
+Path inputs are captured once, including project files, and both stages use that
+copy. Transient local real-execution failures retain their bounded retries using
+the same copy without repeating mock execution. `exec_kcl_project` now returns
+this structured result instead of a path string: check `ok`, then read
+`path_artifact_graph` on session success. The standalone `mock_execute_kcl` tool
+continues to return its existing boolean/message pair.
+
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request on the [GitHub repository](https://github.com/KittyCAD/mcp)

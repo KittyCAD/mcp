@@ -302,7 +302,7 @@ async def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
     execute_project.assert_not_called()
 
     artifact_graph = await zoo_tools.zoo_exec_kcl_project(
-        kcl_code="code",
+        kcl_code="x = 1",
         session_id=session_id,
     )
     result = await zoo_tools.zoo_execute_modeling_command(
@@ -313,7 +313,9 @@ async def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
     )
 
     assert result == expected_response
-    assert artifact_graph == artifact_graph_path
+    assert artifact_graph.ok
+    assert isinstance(artifact_graph, zoo_tools.ResultZooExecuteKclRemote)
+    assert artifact_graph.path_artifact_graph == artifact_graph_path
     assert artifact_graph_path.exists()
     execute_project.assert_awaited_once()
     assert execute_project.call_args.args[0] is websocket
@@ -550,10 +552,10 @@ async def test_execute_kcl_executes_in_modeling_session(
 ):
     artifact_graph_path = Path("artifact-graph.json")
     execute_project = AsyncMock(return_value=artifact_graph_path)
-    monkeypatch.setattr(zoo_tools, "zoo_exec_kcl_project", execute_project)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", execute_project)
 
     result = await zoo_tools.zoo_execute_kcl(
-        kcl_code="code",
+        kcl_code="x = 1",
         session_id="session-id",
     )
 
@@ -561,9 +563,9 @@ async def test_execute_kcl_executes_in_modeling_session(
     assert result.ok is True
     assert result.path_artifact_graph == artifact_graph_path
     execute_project.assert_awaited_once_with(
-        kcl_code="code",
-        kcl_path=None,
-        session_id="session-id",
+        "session-id",
+        "main.kcl",
+        [{"path": "main.kcl", "contents": list(b"x = 1")}],
     )
 
 
@@ -574,18 +576,20 @@ async def test_execute_kcl_session_message_states_diagnostics_are_unavailable(
     """The engine's exec response carries no non_fatal list, so say so."""
     monkeypatch.setattr(
         zoo_tools,
-        "zoo_exec_kcl_project",
+        "_execute_resolved_kcl_project",
         AsyncMock(return_value=Path("artifact-graph.json")),
     )
 
     result = await zoo_tools.zoo_execute_kcl(
-        kcl_code="code",
+        kcl_code="x = 1",
         session_id="session-id",
     )
 
     assert isinstance(result, zoo_tools.ResultZooExecuteKclRemote)
-    assert "Non-fatal diagnostics" in result.message
-    assert "not" in result.message
+    assert (
+        "Real-execution diagnostics are not reported" in result.real_execution.message
+    )
+    assert result.mock_preflight.status == "succeeded"
 
 
 @pytest.mark.asyncio

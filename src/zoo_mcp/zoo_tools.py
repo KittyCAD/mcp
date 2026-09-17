@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -1476,19 +1476,273 @@ async def zoo_convert_cad_file(
 
 
 @dataclass
-class ResultZooExecuteKclLocal:
-    ok: bool
+class KclExecutionStage:
+    status: Literal["succeeded", "failed", "not_run"]
     message: str
+    diagnostics: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
-class ResultZooExecuteKclRemote:
+class ResultZooExecuteKclLocal:
     ok: bool
     message: str
+    mock_preflight: KclExecutionStage
+    real_execution: KclExecutionStage
+
+
+@dataclass
+class ResultZooExecuteKclRemote(ResultZooExecuteKclLocal):
     path_artifact_graph: Path
 
 
 ResultZooExecuteKcl: TypeAlias = ResultZooExecuteKclLocal | ResultZooExecuteKclRemote
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionStageEvent:
+    """Stage timing and outcome, without source code or diagnostic details."""
+
+    operation: str
+    stage: Literal["mock_preflight", "real_execution"]
+    outcome: Literal["succeeded", "failed", "not_run", "cancelled"]
+    elapsed_seconds: float
+    attempts: int
+    error_family: str | None
+
+
+_execution_stage_event_buffer: ContextVar[list[ExecutionStageEvent] | None] = (
+    ContextVar("execution_stage_event_buffer", default=None)
+)
+
+
+@contextmanager
+def capture_execution_stage_events() -> Iterator[list[ExecutionStageEvent]]:
+    """Collect execution stage events emitted in the current async context."""
+    events: list[ExecutionStageEvent] = []
+    token = _execution_stage_event_buffer.set(events)
+    try:
+        yield events
+    finally:
+        _execution_stage_event_buffer.reset(token)
+
+
+def _report_execution_stage_event(
+    operation: str,
+    stage: Literal["mock_preflight", "real_execution"],
+    outcome: Literal["succeeded", "failed", "not_run", "cancelled"],
+    started_at: float,
+    attempts: int,
+    error_family: str | None = None,
+) -> None:
+    elapsed = 0.0 if outcome == "not_run" else monotonic() - started_at
+    event = ExecutionStageEvent(
+        operation, stage, outcome, elapsed, attempts, error_family
+    )
+    events = _execution_stage_event_buffer.get()
+    if events is not None:
+        events.append(event)
+    logger.info(
+        "KCL execution operation=%s stage=%s outcome=%s elapsed_seconds=%.3f "
+        "attempts=%d error_family=%s",
+        operation,
+        stage,
+        outcome,
+        elapsed,
+        attempts,
+        error_family,
+    )
+
+
+@dataclass
+class _ResolvedKclExecution:
+    code: str | None
+    path: str | None
+    entrypoint: str
+    files: list[dict[str, str | list[int]]]
+
+
+def _capture_execution_project(
+    path: Path | str, destination: Path
+) -> _ResolvedKclExecution:
+    entrypoint, files = load_kcl_project(path)
+    for file in files:
+        target = destination / cast(str, file["path"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(bytes(cast(list[int], file["contents"])))
+    return _ResolvedKclExecution(None, str(destination / entrypoint), entrypoint, files)
+
+
+@asynccontextmanager
+async def _resolve_kcl_execution(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+) -> AsyncIterator[_ResolvedKclExecution]:
+    """Capture input once and retain it through mock, real execution, and retries."""
+    _check_kcl_code_or_path(kcl_code, kcl_path)
+    if kcl_code:
+        yield _ResolvedKclExecution(
+            kcl_code,
+            None,
+            "main.kcl",
+            [{"path": "main.kcl", "contents": list(kcl_code.encode())}],
+        )
+        return
+
+    assert kcl_path is not None
+    with TemporaryDirectory(prefix="zoo-mcp-preflight-") as directory:
+        pending = asyncio.create_task(
+            asyncio.to_thread(_capture_execution_project, kcl_path, Path(directory))
+        )
+        try:
+            resolved = await asyncio.shield(pending)
+        except asyncio.CancelledError as cancellation:
+            # A filesystem worker cannot be cancelled. Let it finish before the
+            # temporary directory is removed so it cannot recreate leaked files.
+            try:
+                await pending
+            finally:
+                raise cancellation
+        yield resolved
+
+
+async def _mock_execution_stage(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+) -> KclExecutionStage:
+    if kcl_code:
+        outcome = await kcl.mock_execute_code(kcl_code)
+    else:
+        outcome = await kcl.mock_execute(str(kcl_path))
+    issues = _format_execution_issues(outcome)
+    return KclExecutionStage(
+        status="failed" if "fatal" in issues or "error" in issues else "succeeded",
+        message=(
+            _execution_issues_message(issues)
+            if issues
+            else "KCL code mock executed successfully"
+        ),
+        diagnostics=issues,
+    )
+
+
+async def _execute_kcl_with_preflight(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    session_id: str | None,
+    *,
+    operation: str,
+) -> ResultZooExecuteKcl:
+    mock = KclExecutionStage("not_run", "Mock preflight has not run")
+    real = KclExecutionStage("not_run", "Real execution was not started")
+    stage: Literal["mock_preflight", "real_execution"] = "mock_preflight"
+    started_at = monotonic()
+    attempts = 0
+    try:
+        async with _resolve_kcl_execution(kcl_code, kcl_path) as resolved:
+            attempts = 1
+            mock = await _mock_execution_stage(resolved.code, resolved.path)
+            _report_execution_stage_event(
+                operation,
+                stage,
+                mock.status,
+                started_at,
+                attempts,
+                "CompilationIssue" if mock.status == "failed" else None,
+            )
+            if mock.status == "failed":
+                _report_execution_stage_event(
+                    operation,
+                    "real_execution",
+                    "not_run",
+                    started_at,
+                    0,
+                )
+                return ResultZooExecuteKclLocal(False, mock.message, mock, real)
+
+            stage = "real_execution"
+            started_at = monotonic()
+            attempts = 0
+            artifact_graph: Path | None = None
+            if session_id is not None:
+                attempts = 1
+                artifact_graph = await _execute_resolved_kcl_project(
+                    session_id,
+                    resolved.entrypoint,
+                    resolved.files,
+                )
+                real = KclExecutionStage(
+                    "succeeded",
+                    "KCL code executed successfully in the modeling session. "
+                    "Real-execution diagnostics are not reported for session runs; "
+                    "mock-preflight diagnostics are available in mock_preflight.",
+                )
+            else:
+
+                async def execute() -> "kcl.ExecOutcome":
+                    nonlocal attempts
+                    attempts += 1
+                    if resolved.code is not None:
+                        return await kcl.execute_code(resolved.code)
+                    assert resolved.path is not None
+                    return await kcl.execute(resolved.path)
+
+                outcome = await _execute_with_retries(execute, _operation=operation)
+                issues = _format_execution_issues(outcome)
+                real = KclExecutionStage(
+                    "succeeded",
+                    _execution_issues_message(issues)
+                    if issues
+                    else "KCL code executed successfully",
+                    issues,
+                )
+            _report_execution_stage_event(
+                operation,
+                stage,
+                real.status,
+                started_at,
+                attempts,
+            )
+            if artifact_graph is not None:
+                return ResultZooExecuteKclRemote(
+                    True,
+                    real.message,
+                    mock,
+                    real,
+                    artifact_graph,
+                )
+            return ResultZooExecuteKclLocal(True, real.message, mock, real)
+    except asyncio.CancelledError:
+        _report_execution_stage_event(
+            operation,
+            stage,
+            "cancelled",
+            started_at,
+            attempts,
+        )
+        raise
+    except Exception as error:
+        _report_execution_stage_event(
+            operation,
+            stage,
+            "failed",
+            started_at,
+            attempts,
+            _execution_error_family(error),
+        )
+        if stage == "mock_preflight":
+            mock = KclExecutionStage(
+                "failed", f"Failed to mock execute KCL code: {error}"
+            )
+            _report_execution_stage_event(
+                operation,
+                "real_execution",
+                "not_run",
+                started_at,
+                0,
+            )
+            return ResultZooExecuteKclLocal(False, mock.message, mock, real)
+        real = KclExecutionStage("failed", f"Failed to execute KCL code: {error}")
+        return ResultZooExecuteKclLocal(False, real.message, mock, real)
 
 
 async def zoo_execute_kcl(
@@ -1504,69 +1758,18 @@ async def zoo_execute_kcl(
         session_id (str | None): An open modeling session in which to execute the KCL.
 
     Returns:
-        ResultZooExecuteKcl: The execution status and message. Session executions
-        also include the artifact graph's temporary JSON file path. When a local
-        run completes, compilation issues are appended to the message rather than
-        treated as a hard failure. Session runs cannot report non-fatal diagnostics.
+        ResultZooExecuteKcl: Separate mock-preflight and real-execution outcomes.
+        Mock errors block real execution; warnings are retained and allow it.
+        Session successes include the artifact graph's temporary JSON file path.
+        Transient local real-execution failures retry the same captured input
+        without repeating preflight.
     """
-    logger.info("Executing KCL code")
-
-    _check_kcl_code_or_path(kcl_code, kcl_path)
-
-    try:
-        if session_id is not None:
-            path_artifact_graph = await zoo_exec_kcl_project(
-                kcl_code=kcl_code,
-                kcl_path=kcl_path,
-                session_id=session_id,
-            )
-            logger.info("KCL code executed in modeling session")
-            # The engine's exec_kcl_project response carries only an artifact
-            # graph, so warnings the local compiler would surface are not
-            # available here. Say so rather than report an unqualified success.
-            return ResultZooExecuteKclRemote(
-                ok=True,
-                message=(
-                    "KCL code executed successfully in the modeling session. "
-                    "Non-fatal diagnostics (warnings and non-fatal errors) are not "
-                    "reported for session runs; re-run without session_id to check "
-                    "them."
-                ),
-                path_artifact_graph=path_artifact_graph,
-            )
-
-        if kcl_code:
-            outcome = await _execute_with_retries(
-                kcl.execute_code,
-                kcl_code,
-                _operation="execute_kcl",
-            )
-        else:
-            outcome = await _execute_with_retries(
-                kcl.execute,
-                str(kcl_path),
-                _operation="execute_kcl",
-            )
-
-        issues = _format_execution_issues(outcome)
-        if issues:
-            total = sum(len(reports) for reports in issues.values())
-            logger.info("KCL code execution reported %d issue(s)", total)
-            message = _execution_issues_message(issues)
-            return ResultZooExecuteKclLocal(ok=True, message=message)
-
-        logger.info("KCL code executed successfully")
-        return ResultZooExecuteKclLocal(
-            ok=True, message="KCL code executed successfully"
-        )
-    except Exception as e:
-        logger.info(
-            "Failed to execute KCL code (error_family=%s)",
-            _execution_error_family(e),
-        )
-        return ResultZooExecuteKclLocal(
-            ok=False, message=f"Failed to execute KCL code: {e}"
-        )
+    return await _execute_kcl_with_preflight(
+        kcl_code,
+        kcl_path,
+        session_id,
+        operation="execute_kcl",
+    )
 
 
 async def zoo_export_kcl(
@@ -1921,27 +2124,16 @@ async def zoo_mock_execute_kcl(
         error/fatal compilation issue. Warning-only outcomes remain successful
         and include their rendered diagnostics in the message.
     """
-    logger.info("Executing KCL code")
-
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
-        if kcl_code:
-            outcome = await kcl.mock_execute_code(kcl_code)
-        else:
-            outcome = await kcl.mock_execute(str(kcl_path))
-
-        issues = _format_execution_issues(outcome)
-        if issues:
-            total = sum(len(reports) for reports in issues.values())
-            logger.info("KCL mock execution reported %d issue(s)", total)
-            has_blocking_issues = "fatal" in issues or "error" in issues
-            return not has_blocking_issues, _execution_issues_message(issues)
-
-        logger.info("KCL mock executed successfully")
-        return True, "KCL code mock executed successfully"
+        result = await _mock_execution_stage(kcl_code, kcl_path)
+        return result.status == "succeeded", result.message
     except Exception as e:
-        logger.info("Failed to mock execute KCL code: %s", e)
+        logger.info(
+            "Failed to mock execute KCL code (error_family=%s)",
+            _execution_error_family(e),
+        )
         return False, f"Failed to mock execute KCL code: {e}"
 
 
@@ -1950,24 +2142,6 @@ class FaceInfo:
     face_get_position: FaceGetPosition
     face_get_gradient: FaceGetGradient
     face_get_center: FaceGetCenter
-
-
-def _prepare_kcl_project(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-) -> tuple[str, list[dict[str, str | list[int]]]]:
-    _check_kcl_code_or_path(kcl_code, kcl_path)
-
-    if kcl_code:
-        return "main.kcl", [
-            {
-                "path": "main.kcl",
-                "contents": list(kcl_code.encode()),
-            }
-        ]
-
-    assert kcl_path is not None
-    return load_kcl_project(kcl_path)
 
 
 async def _exec_kcl_project(
@@ -2333,11 +2507,22 @@ async def zoo_exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
-) -> Path:
-    entrypoint, files = await asyncio.to_thread(
-        _prepare_kcl_project, kcl_code, kcl_path
+) -> ResultZooExecuteKcl:
+    """Mock preflight a captured project, then execute it in a modeling session."""
+    return await _execute_kcl_with_preflight(
+        kcl_code,
+        kcl_path,
+        session_id,
+        operation="exec_kcl_project",
     )
 
+
+async def _execute_resolved_kcl_project(
+    session_id: str,
+    entrypoint: str,
+    files: list[dict[str, str | list[int]]],
+) -> Path:
+    """Execute already-preflighted input and register its session artifact graph."""
     async with _modeling_websocket(session_id) as ws:
         path = await _exec_kcl_project(ws, entrypoint, files)
         if (
