@@ -14,7 +14,7 @@ dependencies = [
     "trimesh<6.0",
     "truststore<1.0",
     "typing-extensions>=4.12",
-    "zoo-kcl>=0.3.178",
+    "zoo-kcl>=0.3.185",
 ]
 authors = [
     { name = "Ryan Barton", email = "ryan@zoo.dev" },
@@ -76,3 +76,7 @@ dev = [
     "ty",
     "uv-build",
 ]
+
+[tool.uv.sources]
+# Temporary source pin until the session API is released.
+zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "beff2ee485e15ea368d9424b96447695247dd374", subdirectory = "rust/kcl-python-bindings" }

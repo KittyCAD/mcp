@@ -324,6 +324,34 @@ async def _execute_with_retries(
             raise
 
 
+async def _run_kcl_operation(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    operation: Callable[[kcl.Session], Awaitable[_T]],
+    *,
+    allow_partial: bool = False,
+) -> _T:
+    """Own one session per attempt, including cleanup before any explicit retry."""
+
+    async def run_once() -> _T:
+        session = (
+            await kcl.execute_code(kcl_code)
+            if kcl_code is not None
+            else await kcl.execute(str(kcl_path))
+        )
+        async with session:
+            outcome = session.outcome
+            if not allow_partial or outcome.is_retryable():
+                outcome.raise_for_error()
+            return await operation(session)
+
+    return await _execute_with_retries(run_once)
+
+
+async def _session_outcome(session: kcl.Session) -> kcl.ExecOutcome:
+    return session.outcome
+
+
 # Issue severities surfaced from an execution outcome, in descending order of
 # severity. Each entry maps a ``kcl.CompilationIssue`` predicate to the label
 # used when rendering that issue's report. ``is_fatal`` is checked before
@@ -338,8 +366,7 @@ _EXECUTION_ISSUE_SEVERITIES = (
 def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]:
     """Render compilation issues from an execution outcome, grouped by severity.
 
-    ``kcl.execute`` / ``kcl.execute_code`` return an ``ExecOutcome`` whose
-    ``issues()`` may include warning-, error-, and fatal-level
+    A KCL session retains an ``ExecOutcome`` whose ``issues()`` may include warning-, error-, and fatal-level
     ``CompilationIssue``s (e.g. a CSG subtract with no overlap surfaces as a
     warning). Each issue is rendered to a miette report string with the
     relevant source snippet and bucketed by its severity.
@@ -919,14 +946,9 @@ async def zoo_calculate_kcl_physical_properties(
         ),
     )
 
-    if kcl_code:
-        response = await _execute_with_retries(
-            kcl.execute_code_and_measure, kcl_code, request
-        )
-    else:
-        response = await _execute_with_retries(
-            kcl.execute_and_measure, str(kcl_path), request
-        )
+    response = await _run_kcl_operation(
+        kcl_code, kcl_path, lambda session: session.measure(request)
+    )
 
     volume = response.get_volume()
     com = response.get_center_of_mass()
@@ -1003,18 +1025,13 @@ async def zoo_calculate_bounding_box_kcl(
 
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
-    if kcl_code:
-        response = await _execute_with_retries(
-            kcl.execute_code_and_bounding_box,
-            kcl_code,
-            output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
-        )
-    else:
-        response = await _execute_with_retries(
-            kcl.execute_and_bounding_box,
-            str(kcl_path),
-            output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
-        )
+    response = await _run_kcl_operation(
+        kcl_code,
+        kcl_path,
+        lambda session: session.bounding_box(
+            output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length")
+        ),
+    )
 
     center = response.get_center()
     dims = response.get_dimensions()
@@ -1234,10 +1251,7 @@ async def zoo_execute_kcl(
                 path_artifact_graph=path_artifact_graph,
             )
 
-        if kcl_code:
-            outcome = await _execute_with_retries(kcl.execute_code, kcl_code)
-        else:
-            outcome = await _execute_with_retries(kcl.execute, str(kcl_path))
+        outcome = await _run_kcl_operation(kcl_code, kcl_path, _session_outcome)
 
         issues = _format_execution_issues(outcome)
         if issues:
@@ -1322,18 +1336,9 @@ async def zoo_export_kcl(
             logger.info("Using provided export path: %s", str(export_path.name))
 
     async with aiofiles.open(export_path, "wb") as out:
-        if kcl_code:
-            logger.info("Exporting KCL code to %s", str(kcl_code))
-            export_response = await _execute_with_retries(
-                kcl.execute_code_and_export, kcl_code, export_format
-            )
-        else:
-            logger.info("Exporting KCL project to %s", str(kcl_path))
-            assert kcl_path is not None  # _check_kcl_code_or_path ensures this
-            kcl_path_resolved = Path(kcl_path)
-            export_response = await _execute_with_retries(
-                kcl.execute_and_export, str(kcl_path_resolved.resolve()), export_format
-            )
+        export_response = await _run_kcl_operation(
+            kcl_code, kcl_path, lambda session: session.export(export_format)
+        )
         await out.write(bytes(export_response[0].contents))
 
     logger.info("KCL exported successfully to %s", str(export_path))
@@ -1503,16 +1508,10 @@ async def zoo_get_sketch_constraint_status(
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
-        if kcl_code:
-            report = await _execute_with_retries(
-                kcl.get_sketch_constraint_status_code, kcl_code
-            )
-        else:
-            assert kcl_path is not None
-            report = await _execute_with_retries(
-                kcl.get_sketch_constraint_status, str(kcl_path)
-            )
-        return _format_constraint_report(report)
+        outcome = await _run_kcl_operation(
+            kcl_code, kcl_path, _session_outcome, allow_partial=True
+        )
+        return _format_constraint_report(outcome.sketch_constraint_report())
     except Exception as e:
         logger.error(e)
         raise ZooMCPException(f"Failed to get sketch constraint status: {e}")

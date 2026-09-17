@@ -620,11 +620,29 @@ class _FakeOutcome:
     def __init__(self, issues: list[_FakeIssue]) -> None:
         self._issues = issues
 
+    def raise_for_error(self) -> None:
+        pass
+
+    def is_retryable(self) -> bool:
+        return False
+
     def issues(self) -> list[_FakeIssue]:
         return self._issues
 
     def report(self, issue: _FakeIssue) -> str:
         return f"{issue.severity} report"
+
+
+class _FakeSession:
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.closed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        self.closed = True
 
 
 def test_format_execution_issues_groups_by_severity():
@@ -658,14 +676,17 @@ async def test_execute_kcl_surfaces_all_issue_severities(monkeypatch):
         ]
     )
 
+    session = _FakeSession(outcome)
+
     async def fake_execute_code(code: str):
-        return outcome
+        return session
 
     monkeypatch.setattr(zoo_mcp.zoo_tools.kcl, "execute_code", fake_execute_code)
 
     result = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="anything")
     assert isinstance(result, zoo_mcp.zoo_tools.ResultZooExecuteKclLocal)
     assert result.ok is True
+    assert session.closed
     assert result.message.startswith(
         "KCL code execution completed with the following issues:"
     )
