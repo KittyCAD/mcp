@@ -79,3 +79,7 @@ dev = [
     "ty",
     "uv-build",
 ]
+
+[tool.uv.sources]
+# Draft dependency for customer auth; replace with a release before merging.
+zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "76f5c7eb6757fd6030fb323ef840db638847cf71", subdirectory = "rust/kcl-python-bindings" }
