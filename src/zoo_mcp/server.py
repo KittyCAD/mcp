@@ -746,7 +746,9 @@ async def visualize_sketch(
     modeling session. ``sketch_name`` is the variable assigned to the sketch,
     such as ``profile`` in ``profile = sketch(on = XY) { ... }``. Use
     ``get_sketch_constraint_status`` to discover sketch names when needed.
-    A failure in KCL after the named sketch does not block its render.
+    A later execution failure can still leave the completed sketch renderable.
+    Parse errors or failures before it completes cannot be recovered.
+    A returned PNG does not mean the whole project executes successfully.
     If names repeat (for example, a function called twice), select an
     ``instance_index`` from a fresh constraint report for the same entrypoint.
 

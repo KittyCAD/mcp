@@ -3,14 +3,13 @@ import io
 import json
 import os
 import random
-import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from tempfile import NamedTemporaryFile, TemporaryDirectory
+from tempfile import NamedTemporaryFile
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -146,7 +145,7 @@ SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 # retryable error instead of an abandoned request.
 MODELING_COMMAND_TIMEOUT = 300.0
 
-# One budget shared by sketch execution, retries, recovery and rendering.
+# One budget for sketch execution and retries. Native PNG rendering is synchronous.
 SKETCH_VISUALIZATION_TIMEOUT = 120.0
 
 # Large file-analysis requests are asynchronous. Leave enough headroom under
@@ -2132,220 +2131,6 @@ async def zoo_get_sketch_constraint_status(
         raise ZooMCPException(f"Failed to get sketch constraint status: {e}")
 
 
-def _starts_with_pipeline_after_comments(source: str) -> bool:
-    """Return whether the next KCL token is a pipeline continuation."""
-    remaining = source
-    while True:
-        remaining = remaining.lstrip()
-        if remaining.startswith("//"):
-            _, separator, remaining = remaining.partition("\n")
-            if not separator:
-                return False
-            continue
-        if remaining.startswith("/*"):
-            comment_end = remaining.find("*/", 2)
-            if comment_end < 0:
-                return False
-            remaining = remaining[comment_end + 2 :]
-            continue
-        return remaining.startswith("|>")
-
-
-def _mask_kcl_non_code(source: str) -> str:
-    """Mask KCL comments and strings while preserving source positions."""
-    masked = list(source)
-    index = 0
-    in_string = False
-    while index < len(source):
-        if in_string:
-            if source[index] == "\\":
-                masked[index] = " "
-                if index + 1 < len(source) and source[index + 1] != "\n":
-                    masked[index + 1] = " "
-                index += 2
-                continue
-            if source[index] == '"':
-                in_string = False
-            if source[index] != "\n":
-                masked[index] = " "
-            index += 1
-            continue
-
-        if source[index] == '"':
-            in_string = True
-            masked[index] = " "
-            index += 1
-            continue
-        if source.startswith("//", index):
-            comment_end = source.find("\n", index + 2)
-            if comment_end < 0:
-                comment_end = len(source)
-            masked[index:comment_end] = " " * (comment_end - index)
-            index = comment_end
-            continue
-        if source.startswith("/*", index):
-            comment_end = source.find("*/", index + 2)
-            if comment_end < 0:
-                comment_end = len(source)
-            else:
-                comment_end += 2
-            for comment_index in range(index, comment_end):
-                if masked[comment_index] != "\n":
-                    masked[comment_index] = " "
-            index = comment_end
-            continue
-        index += 1
-    return "".join(masked)
-
-
-def _source_through_sketch(kcl_code: str, sketch_name: str) -> str | None:
-    """Return a parseable source prefix ending after a named top-level value.
-
-    KCL evaluates top-level declarations in source order. Keeping the program
-    through the requested sketch lets the sketch renderer ignore failures in
-    later consumers such as regions, extrudes, and booleans. Pipeline lines
-    must stay attached to the declaration: ``startSketchOn`` alone is valid
-    KCL but would render an incomplete sketch before its ``|>`` operations.
-    """
-    if not sketch_name:
-        return None
-
-    lines = kcl_code.splitlines(keepends=True)
-    searchable_source = _mask_kcl_non_code(kcl_code)
-    declaration = re.compile(
-        rf"^[ \t]*(?:export[ \t]+)?{re.escape(sketch_name)}[ \t\r\n]*=",
-        re.MULTILINE,
-    )
-    declaration_match = declaration.search(searchable_source)
-    if declaration_match is None:
-        return None
-    before = searchable_source[: declaration_match.start()]
-    if any(
-        before.count(left) != before.count(right) for left, right in ("()", "[]", "{}")
-    ):
-        # Executing a helper definition does not create its sketch instances.
-        return None
-    declaration_end_line = searchable_source.count("\n", 0, declaration_match.end())
-
-    for end in range(declaration_end_line + 1, len(lines) + 1):
-        candidate = "".join(lines[:end])
-        try:
-            kcl.parse_code(candidate)
-        except kcl.KclError:
-            continue
-
-        if _starts_with_pipeline_after_comments("".join(lines[end:])):
-            continue
-        return candidate
-
-    return None
-
-
-def _copy_project_with_entrypoint(
-    kcl_path: Path | str, entrypoint_code: str, destination: Path
-) -> Path:
-    """Copy KCL-relevant project files and replace the entrypoint source."""
-    path = Path(kcl_path).resolve()
-    root = path if path.is_dir() else path.parent
-    entrypoint = root / "main.kcl" if path.is_dir() else path
-    relevant_extensions = {f".{ext}" for ext in kcl.relevant_file_extensions()}
-    copied_entrypoint = destination / entrypoint.relative_to(root)
-
-    for source in root.rglob("*"):
-        if not source.is_file() or source.suffix.lower() not in relevant_extensions:
-            continue
-        copied = destination / source.relative_to(root)
-        copied.parent.mkdir(parents=True, exist_ok=True)
-        if source == entrypoint:
-            copied.write_text(entrypoint_code)
-        else:
-            copied.write_bytes(source.read_bytes())
-
-    project_manifest = root / "project.toml"
-    if project_manifest.is_file():
-        (destination / project_manifest.name).write_bytes(project_manifest.read_bytes())
-
-    return copied_entrypoint
-
-
-def _source_for_sketch_first(source: str, sketch_name: str) -> str | None:
-    """Conservatively isolate a unique, directly declared solver sketch.
-
-    Imports, function instances, aliases and later whole-sketch operations
-    need full execution to preserve name resolution and placement. Segment
-    references in downstream regions and hiding the sketch are safe to omit.
-    This is a source prefix, not dependency slicing: earlier work stays intact.
-    """
-    masked = _mask_kcl_non_code(source)
-    if not sketch_name or re.search(r"\bimport\b|\bfn\s+hide\b|\bhide\s*=", masked):
-        return None
-    name = re.escape(sketch_name)
-    declarations = list(re.finditer(rf"\b{name}\s*=(?!=)", masked))
-    if len(declarations) != 1:
-        return None
-    declaration = declarations[0]
-    before = masked[: declaration.start()]
-    if any(
-        before.count(left) != before.count(right) for left, right in ("()", "[]", "{}")
-    ):
-        return None
-    if not re.match(r"\s*sketch\s*\(", masked[declaration.end() :]):
-        return None
-
-    prefix = _source_through_sketch(source, sketch_name)
-    if prefix is None or not _mask_kcl_non_code(prefix).rstrip().endswith("}"):
-        return None
-    if "|>" in masked[declaration.end() : len(prefix)]:
-        return None
-    suffix = masked[len(prefix) :]
-    if not suffix.strip() or re.search(r"@\s*settings\b", suffix):
-        return None
-    suffix = re.sub(r"\bhide\s*\([^()]*\)", "", suffix)
-    if re.search(rf"\b{name}\b(?!\s*\.)", suffix):
-        return None
-    return prefix
-
-
-async def _execute_through_sketch(
-    sketch_name: str,
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-    *,
-    sketch_first: bool = False,
-) -> "kcl.ExecOutcome | None":
-    """Execute a sketch prefix, guarded when used before full execution."""
-    if kcl_code:
-        source = kcl_code
-    else:
-        assert kcl_path is not None
-        path = Path(kcl_path)
-        entrypoint = path / "main.kcl" if path.is_dir() else path
-        source = entrypoint.read_text()
-
-    isolated_source = (
-        _source_for_sketch_first(source, sketch_name)
-        if sketch_first
-        else _source_through_sketch(source, sketch_name)
-    )
-    if isolated_source is None or isolated_source.rstrip() == source.rstrip():
-        return None
-
-    logger.info("Executing visualization with KCL isolated through %s", sketch_name)
-    if kcl_code:
-        return await _execute_with_retries(
-            kcl.execute_code, isolated_source, _operation="visualize_sketch"
-        )
-
-    assert kcl_path is not None
-    with TemporaryDirectory(prefix="zoo-mcp-sketch-") as temporary_directory:
-        isolated_path = _copy_project_with_entrypoint(
-            kcl_path, isolated_source, Path(temporary_directory)
-        )
-        return await _execute_with_retries(
-            kcl.execute, str(isolated_path), _operation="visualize_sketch"
-        )
-
-
 async def zoo_visualize_sketch(
     sketch_name: str,
     kcl_code: str | None = None,
@@ -2354,13 +2139,11 @@ async def zoo_visualize_sketch(
 ) -> bytes:
     """Execute KCL and render one named sketch as a PNG.
 
-    The renderer is provided by ``zoo-kcl`` on ``ExecOutcome``. Sketch names
-    are the variable names assigned to sketch expressions and are also exposed
-    by :func:`zoo_get_sketch_constraint_status`. Safely isolated top-level
-    solver sketches execute first without downstream consumers. Other cases
-    use full execution, retaining prefix recovery for downstream failures.
-    Function-generated sketches use full execution and explicit instance selection.
-    All attempts share ``SKETCH_VISUALIZATION_TIMEOUT`` seconds.
+    Native outcomes and execution errors can render completed sketches. Recovery
+    uses the failed execution's retained geometry without rerunning or changing
+    the source. A recovered PNG does not mean the whole project is valid.
+    Execution and retries share ``SKETCH_VISUALIZATION_TIMEOUT`` seconds;
+    synchronous PNG rendering is outside that execution budget.
 
     Args:
         sketch_name: Variable name of the sketch to render.
@@ -2380,21 +2163,8 @@ async def zoo_visualize_sketch(
         raise ZooMCPException("instance_index must be non-negative")
 
     try:
-        async with asyncio.timeout(SKETCH_VISUALIZATION_TIMEOUT):
-            sketch_first_failed = False
-            if instance_index is None:
-                try:
-                    isolated_outcome = await _execute_through_sketch(
-                        sketch_name, kcl_code, kcl_path, sketch_first=True
-                    )
-                    if isolated_outcome is not None:
-                        return bytes(isolated_outcome.render_sketch_png(sketch_name))
-                except Exception:
-                    sketch_first_failed = True
-                    logger.info(
-                        "Sketch-first visualization unavailable; trying full KCL"
-                    )
-            try:
+        try:
+            async with asyncio.timeout(SKETCH_VISUALIZATION_TIMEOUT):
                 if kcl_code:
                     outcome = await _execute_with_retries(
                         kcl.execute_code,
@@ -2408,32 +2178,36 @@ async def zoo_visualize_sketch(
                         str(kcl_path),
                         _operation="visualize_sketch",
                     )
-            except Exception:
-                if sketch_first_failed:
-                    raise
-                isolated_outcome = await _execute_through_sketch(
-                    sketch_name=sketch_name,
-                    kcl_code=kcl_code,
-                    kcl_path=kcl_path,
+        except kcl.KclError as execution_error:
+            try:
+                png = bytes(
+                    execution_error.render_sketch_png(
+                        sketch_name, instance_index=instance_index
+                    )
                 )
-                if isolated_outcome is None:
-                    raise
-                outcome = isolated_outcome
-            if instance_index is None:
-                return bytes(outcome.render_sketch_png(sketch_name))
-            return bytes(
-                outcome.render_sketch_png(sketch_name, instance_index=instance_index)
+            except Exception as render_error:
+                raise ZooMCPException(
+                    f"{execution_error}\nSketch recovery failed: {render_error}"
+                ) from execution_error
+            logger.info(
+                "Rendered retained sketch after failed KCL execution "
+                "(error_family=%s); project execution remains unsuccessful",
+                _execution_error_family(execution_error),
             )
+            return png
+        return bytes(
+            outcome.render_sketch_png(sketch_name, instance_index=instance_index)
+        )
     except TimeoutError as e:
         raise ZooMCPTimeoutError(
-            f"Sketch visualization exceeded its {SKETCH_VISUALIZATION_TIMEOUT:g}-second budget"
+            f"Sketch execution exceeded its {SKETCH_VISUALIZATION_TIMEOUT:g}-second budget"
         ) from e
     except Exception as e:
         logger.error(
             "Failed to visualize sketch (error_family=%s)",
             _execution_error_family(e),
         )
-        raise ZooMCPException(f"Failed to visualize sketch: {e}")
+        raise ZooMCPException(f"Failed to visualize sketch: {e}") from e
 
 
 async def zoo_mock_execute_kcl(

@@ -51,8 +51,8 @@ Repository = "https://github.com/KittyCAD/mcp"
 zoo-mcp = "zoo_mcp.server:main"
 
 [tool.uv.sources]
-# Merged point colours, instance selection and cancellation; awaiting a release.
-zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "1d45e85281132c47e11b625dfbe1b7bde24e699a", subdirectory = "rust/kcl-python-bindings" }
+# Native sketch recovery (modeling-app #14005); replace with a release before merging.
+zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "21d11b163edac50f86646c89b9253f001652c873", subdirectory = "rust/kcl-python-bindings" }
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
