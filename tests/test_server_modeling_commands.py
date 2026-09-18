@@ -380,7 +380,7 @@ async def test_start_and_stop_modeling_session_tools(
 
     assert _result(start_response) == "session-id"
     assert _result(stop_response) is None
-    start.assert_awaited_once_with()
+    start.assert_awaited_once_with(geometry_only=False)
     stop.assert_awaited_once_with("session-id")
 
 

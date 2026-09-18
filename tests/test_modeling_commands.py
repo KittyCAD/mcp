@@ -196,7 +196,9 @@ async def test_modeling_websocket_routes_geometry_only_sessions_to_cpu(
     )
 
     assert result is connection
-    websocket_url = open_websocket.await_args.args[0]
+    await_args = open_websocket.await_args
+    assert await_args is not None
+    websocket_url = await_args.args[0]
     assert "pool=cpu" in websocket_url
     assert "geometry_only=true" in websocket_url
 
@@ -368,7 +370,9 @@ async def test_modeling_session_start_does_not_execute_kcl(
 
     execute_project.assert_not_called()
     open_websocket.assert_awaited_once()
-    assert open_websocket.await_args.args[1] is True
+    await_args = open_websocket.await_args
+    assert await_args is not None
+    assert await_args.args[1] is True
     await zoo_tools.zoo_stop_modeling_session(session_id)
     websocket.close.assert_awaited_once_with()
 
