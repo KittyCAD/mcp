@@ -33,7 +33,7 @@ def _imports(code: str) -> Iterator[tuple[int, int, str]]:
             value = tokens[index].group()
             if value.startswith(('"', "'")):
                 path = value[1:-1]  # KCL preserves escapes in string literals.
-                if not path.startswith("std::"):
+                if path != "std" and not path.startswith("std::"):
                     yield tokens[index].start(), tokens[index].end(), path
                 break
             if not (value.isidentifier() or value in (",", "*")):

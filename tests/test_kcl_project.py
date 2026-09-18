@@ -172,6 +172,45 @@ async def test_capture_follows_imports_but_ignores_comments_and_strings(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("linked", [False, True])
+async def test_capture_standard_library_import_ignores_unrelated_std_file(
+    monkeypatch, tmp_path, linked
+):
+    source = tmp_path / "project"
+    source.mkdir()
+    code = (
+        "@settings(experimentalFeatures = allow)\n"
+        'import sqrt from "std"\n'
+        'import x from "std.kcl"\n'
+        "y = sqrt(x)\n"
+    )
+    (source / "main.kcl").write_text(code)
+    (source / "std.kcl").write_text("export x = 4\n")
+    if linked:
+        external = tmp_path / "external"
+        external.mkdir()
+        target = external / "unrelated.txt"
+        target.write_bytes(b"not a KCL dependency")
+        try:
+            (source / "std").symlink_to(target)
+        except OSError:
+            pytest.skip("file symlinks are unavailable")
+        _reject_external_access(monkeypatch, external)
+    else:
+        (source / "std").write_bytes(b"not a KCL dependency")
+
+    resolved = zoo_tools._capture_execution_project(source, tmp_path / "captured")
+
+    assert resolved.files == {
+        "main.kcl": code.encode(),
+        "std.kcl": b"export x = 4\n",
+    }
+    assert resolved.path is not None
+    outcome = await kcl.mock_execute(resolved.path)
+    assert not any(issue.is_err() for issue in outcome.issues())
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("absolute_buffer", [False, True])
 async def test_capture_includes_gltf_buffers_without_unrelated_assets(
     tmp_path, absolute_buffer

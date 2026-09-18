@@ -442,6 +442,7 @@ async def test_invalid_input_returns_failed_preflight(monkeypatch, execution_rou
     "code",
     [
         'import x from "library.kcl"\ny = x\n',
+        'import x from "std.kcl"\ny = x\n',
         'import "../assets/model.stl" as model\n',
         'import "C:\\assets\\model.gltf" as model\n',
     ],
@@ -470,10 +471,9 @@ async def test_inline_filesystem_imports_require_an_explicit_project(
         '// import "library.kcl"\nx = 1\n',
         '/* import "library.kcl" */\nx = 1\n',
         "x = \"import 'library.kcl'\"\n",
-        'import sqrt from "std::math"\nx = sqrt(4)\n',
     ],
 )
-async def test_inline_comments_strings_and_standard_imports_are_allowed(
+async def test_inline_comments_and_strings_are_allowed(
     monkeypatch, execution_route, code
 ):
     mock = AsyncMock(return_value=Outcome())
@@ -487,6 +487,29 @@ async def test_inline_comments_strings_and_standard_imports_are_allowed(
 
     assert result.ok
     mock.assert_awaited_once()
+    real.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("module", ["std", "std::math"])
+async def test_inline_standard_library_imports_pass_native_preflight(
+    monkeypatch, execution_route, module
+):
+    code = (
+        "@settings(experimentalFeatures = allow)\n"
+        f'import sqrt from "{module}"\nx = sqrt(4)\n'
+    )
+    real = AsyncMock(
+        return_value=Outcome() if execution_route == "local" else Path("graph.json")
+    )
+    monkeypatch.setattr(kcl, "execute_code", real)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
+
+    result = await execute(execution_route, {"kcl_code": code})
+
+    assert result.ok, result.message
+    assert result.mock_preflight.status == "succeeded"
+    assert result.mock_preflight.diagnostics == {}
     real.assert_awaited_once()
 
 
