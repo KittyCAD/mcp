@@ -42,7 +42,7 @@ from mcp.types import CallToolResult, ImageContent, InputRequiredResult, TextCon
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
-from zoo_mcp.zoo_tools import CameraView, ResultZooExecuteKclRemote
+from zoo_mcp.zoo_tools import CameraView, KclExecutionStage, ResultZooExecuteKclRemote
 
 
 def _result(response: CallToolResult | InputRequiredResult) -> Any:
@@ -609,10 +609,12 @@ async def test_kcl_execution_tools_forward_session_id(
         return_value=ResultZooExecuteKclRemote(
             ok=True,
             message="KCL code executed successfully",
+            mock_preflight=KclExecutionStage("succeeded", "mock ok"),
+            real_execution=KclExecutionStage("succeeded", "real ok"),
             path_artifact_graph=artifact_graph_path,
         )
     )
-    exec_project = AsyncMock(return_value=artifact_graph_path)
+    exec_project = AsyncMock(return_value=execute.return_value)
     monkeypatch.setattr(server, "zoo_execute_kcl", execute)
     monkeypatch.setattr(server, "zoo_exec_kcl_project", exec_project)
 
@@ -628,9 +630,21 @@ async def test_kcl_execution_tools_forward_session_id(
     assert _result(execute_response) == {
         "ok": True,
         "message": "KCL code executed successfully",
+        "mock_preflight": {
+            "status": "succeeded",
+            "message": "mock ok",
+            "diagnostics": {},
+            "error_family": None,
+        },
+        "real_execution": {
+            "status": "succeeded",
+            "message": "real ok",
+            "diagnostics": {},
+            "error_family": None,
+        },
         "path_artifact_graph": str(artifact_graph_path),
     }
-    assert _result(project_response) == str(artifact_graph_path)
+    assert _result(project_response) == _result(execute_response)
     execute.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,

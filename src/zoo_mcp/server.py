@@ -110,7 +110,6 @@ from zoo_mcp.zoo_tools import (
     CameraView,
     FaceInfo,
     ResultZooExecuteKcl,
-    ResultZooExecuteKclLocal,
     _abort_all_modeling_sessions,
     zoo_calculate_bounding_box_cad,
     zoo_calculate_bounding_box_kcl,
@@ -513,27 +512,28 @@ async def execute_kcl(
       have large network overhead depending on the model.
 
     Args:
-        kcl_code (str | None): The KCL code to execute.
-        kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file.
+        kcl_code (str | None): Self-contained KCL code to execute. Standard-library imports are allowed; filesystem imports require kcl_path.
+        kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: An open modeling session in which to execute the KCL.
 
     Returns:
-        ResultZooExecuteKcl: The execution status and message. Session executions
-                            also include the artifact graph's JSON file path.
+        ResultZooExecuteKcl: Separate mock_preflight and real_execution outcomes,
+                            each with status, message, and diagnostics. Mock errors
+                            return immediately with real_execution not_run; mock
+                            warnings remain visible and allow real execution.
+                            Known mock-engine limitations are warnings.
+                            Session successes include path_artifact_graph.
+                            Transient local failures may retry real execution
+                            without repeating preflight.
     """
 
     logger.info("execute_kcl tool called")
 
-    try:
-        return await zoo_execute_kcl(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            session_id=session_id,
-        )
-    except Exception as e:
-        return ResultZooExecuteKclLocal(
-            ok=False, message=f"Failed to execute KCL code: {e}"
-        )
+    return await zoo_execute_kcl(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -541,23 +541,28 @@ async def exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
-) -> str:
-    """Run a KCL project on the server side and save its artifact graph.
+) -> ResultZooExecuteKcl:
+    """Mock preflight a KCL project, then run it in the session and save its artifact graph.
+
+    Both stages use the same captured project. Mock errors return immediately
+    without starting real execution. Mock warnings remain visible and allow it.
+    Known mock-engine limitations are reported as warnings for real execution.
 
     Args:
-        kcl_code (str | None): KCL code to run as a single-file project.
-        kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+        kcl_code (str | None): Self-contained KCL code to run as a single-file project. Standard-library imports are allowed; filesystem imports require kcl_path.
+        kcl_path (str | None): A .kcl file or project directory containing main.kcl. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: The modeling session in which to execute the project.
 
     Returns:
-        str: The path to the JSON file containing the artifact graph.
+        ResultZooExecuteKcl: Separate mock_preflight and real_execution outcomes,
+                            each with status, message, and diagnostics. Session
+                            success includes path_artifact_graph. Mock failures
+                            set real_execution.status to not_run.
     """
     logger.info("exec_kcl_project tool called")
 
-    return str(
-        await zoo_exec_kcl_project(
-            kcl_code=kcl_code, kcl_path=kcl_path, session_id=session_id
-        )
+    return await zoo_exec_kcl_project(
+        kcl_code=kcl_code, kcl_path=kcl_path, session_id=session_id
     )
 
 

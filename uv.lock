@@ -1168,23 +1168,25 @@ wheels = [
 
 [[package]]
 name = "zoo-kcl"
-version = "0.3.184"
+version = "0.3.185"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ad/41/81397bdcc27019e6ac17e9233b5187cf709afaef70595a0816f78a69d5c2/zoo_kcl-0.3.184.tar.gz", hash = "sha256:ad2983af46d975d0416345213ad8444f03246b48db039ae031f036e1bd42479f", size = 1287549, upload-time = "2026-09-11T14:37:21.445Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/ce/d23e6932928f8dba56ff284b558d38706dbb5d5b978144f236bebb60fbe5/zoo_kcl-0.3.185.tar.gz", hash = "sha256:5bcf548908a2526e6494e873ad63b6943aa7f6a4e93ae2caba7dcfb1619a79b1", size = 1320722, upload-time = "2026-09-16T18:53:54.996Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/f1/295c7bcee3c768f35883531700f0a6d453de7ef476d720faecc716ebd050/zoo_kcl-0.3.184-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e3236487f364698eadcbb3deadb1a357943e441798245d5599749d454d0dfafe", size = 9835213, upload-time = "2026-09-11T14:37:02.399Z" },
-    { url = "https://files.pythonhosted.org/packages/d3/39/f80ed632dd7ee9bfbda79596baaa39e12461994780547472e7df4b66f1df/zoo_kcl-0.3.184-cp311-cp311-win_amd64.whl", hash = "sha256:5df743193184439cdd02f24cf2763c2101e30514c02211ec46d7374b2b5328eb", size = 9681983, upload-time = "2026-09-11T14:37:23.17Z" },
-    { url = "https://files.pythonhosted.org/packages/40/3e/1a4db609ff3e44758033bab3cc4e5494dc0f56c0d7a8c8099ae56123c533/zoo_kcl-0.3.184-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:37250f353060241e9dbf5f693c9412e35b34e5a74033213d756d8e4827b58245", size = 9828567, upload-time = "2026-09-11T14:37:04.527Z" },
-    { url = "https://files.pythonhosted.org/packages/9a/11/922c7d3c4317f076b10d5f2142bd629c60eba562f65aa49e5eb9c7e4253f/zoo_kcl-0.3.184-cp312-cp312-win_amd64.whl", hash = "sha256:415181973e3e67ca1d3ca02052277d391b3f53114a6cba7fc0391757406ca494", size = 9672413, upload-time = "2026-09-11T14:37:25.123Z" },
-    { url = "https://files.pythonhosted.org/packages/b1/57/5e8fa3b9d1bb5a52a2c0688fa9574b0a7f5dc7febd18a7a84b50350bbcc1/zoo_kcl-0.3.184-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:9f0af09a58c45e9e62dc0a24f7772f051f4f9c6267ddc8d546c069d7d14dd926", size = 8499541, upload-time = "2026-09-11T14:37:17.871Z" },
-    { url = "https://files.pythonhosted.org/packages/43/3c/1223d9ad72365b4c5578bde532e04c9a8addcbe4ab93d4412e09fffb8de6/zoo_kcl-0.3.184-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ea55042d80596d70d7da88154a2f72b6a53886bfc8502e018fc62372c0aa7092", size = 9825307, upload-time = "2026-09-11T14:37:06.289Z" },
-    { url = "https://files.pythonhosted.org/packages/9e/93/72e4a4995aabc830292fe538d93403d536bce6fcce80aef8a841c40fa880/zoo_kcl-0.3.184-cp313-cp313-win_amd64.whl", hash = "sha256:3441a177789755a50b7f1754b10131ca05a49de042cbaa21e0e51cf41c032d65", size = 9673546, upload-time = "2026-09-11T14:37:26.97Z" },
-    { url = "https://files.pythonhosted.org/packages/c8/e2/bae9df14ae6023d9c2fa9fc7d6755b9c5b26b8c27d41e363fdc90f8c7615/zoo_kcl-0.3.184-pp311-pypy311_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:eb32b3febc2aa953b5cb7712c75d155c414388a9f4cfbd6549b0de6e72cc4bff", size = 9846467, upload-time = "2026-09-11T14:37:15.875Z" },
+    { url = "https://files.pythonhosted.org/packages/21/9f/6b5940da38dc183e14e8191386bd570de2c161b4ee85aa8246ab237a3c57/zoo_kcl-0.3.185-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:36f45bbd26d64263d3917c6455eca4ad8432146e86038912e341cd6b1f5bc969", size = 8242303, upload-time = "2026-09-16T18:53:48.407Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/ca/e30d5a6185493232508745280773c50c423928b2622ae66c633e108b96cc/zoo_kcl-0.3.185-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:4c93e03d656f4175110758fc6e6532da7512cf5ee84cac4cc294aaa346be80e3", size = 9903720, upload-time = "2026-09-16T18:53:31.197Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/90/98e3262414341c85f1d677bcc759bfffe87ba6dbcc57348c26c8f2aff305/zoo_kcl-0.3.185-cp311-cp311-win_amd64.whl", hash = "sha256:5be288d24aa5551fa7f15227a684b2045c969dfdac8618bb9cc005c69164a5a0", size = 9776269, upload-time = "2026-09-16T18:53:56.325Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/09/3c05db29f9decc20ba8b64aa3372235cbb90ef3f2a8d0132ea8fa600726b/zoo_kcl-0.3.185-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:427361e4f4b131ec14a0cb1f94f3a977de11ef36b87815bf3d9f637c58020312", size = 8233900, upload-time = "2026-09-16T18:53:50.07Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/cc/b7dfe1dc5fefe0ed9edd83e17b070ed8ad8460a7790778b930f0c232f998/zoo_kcl-0.3.185-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:67f8a1e33abfd45eb1324844dc761ddfb75dae92ef9e016a551544fbdd445fb1", size = 9894895, upload-time = "2026-09-16T18:53:33.617Z" },
+    { url = "https://files.pythonhosted.org/packages/21/6d/b7046ce43320ce3945a84e660a7cf1d3f6dc7f5e7d6a535b8fa084c7a209/zoo_kcl-0.3.185-cp312-cp312-win_amd64.whl", hash = "sha256:1c8c01157826859df759737fe27ec14d4aff4edff7624a0c7a9578a18f867955", size = 9771005, upload-time = "2026-09-16T18:53:58.234Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/e8/ae870eb9082aece60adf3adc7c3278783564160a50929e0ea781e1ef8ada/zoo_kcl-0.3.185-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:2b62956320d9bc3351cbb1c2a77980eb9159af12ef7d72ffab64e4d712fec00d", size = 8230442, upload-time = "2026-09-16T18:53:51.762Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/a1/b1e4ed42d1ea91825cf2558618ab1eba38339729fce6e39174057ac66c38/zoo_kcl-0.3.185-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0eaec10441c2275ecfd81cdbfa39d515620221ffc23f8c0455d252ac6b2addbc", size = 9893916, upload-time = "2026-09-16T18:53:35.628Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/95/2835b9742dcb3ed6c64dddd540f2028f799b8b403e890951039f4fc8b563/zoo_kcl-0.3.185-cp313-cp313-win_amd64.whl", hash = "sha256:fa9b9b82907ef1ee447d6c16cd53d4a5b0d71f8ebd0861907f3d3de4c9851e08", size = 9771101, upload-time = "2026-09-16T18:54:00.227Z" },
+    { url = "https://files.pythonhosted.org/packages/58/77/dce841f87435952363c5453b57a97af09974f22e077cbfa8f9004b58e0c4/zoo_kcl-0.3.185-pp311-pypy311_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2bd5948f965aef3f9299d47986eda5ba00cece7a14453e39de08bd783b67f178", size = 9915168, upload-time = "2026-09-16T18:53:46.575Z" },
 ]
 
 [[package]]
 name = "zoo-mcp"
-version = "0.27.0"
+version = "0.28.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -1223,7 +1225,7 @@ requires-dist = [
     { name = "truststore", specifier = "<1.0" },
     { name = "typing-extensions", specifier = ">=4.12" },
     { name = "websockets", specifier = ">=14.1,<17.0" },
-    { name = "zoo-kcl", specifier = ">=0.3.184" },
+    { name = "zoo-kcl", specifier = ">=0.3.185" },
 ]
 
 [package.metadata.requires-dev]
