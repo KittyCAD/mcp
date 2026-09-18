@@ -562,7 +562,7 @@ async def exec_kcl_project(
 
 
 @mcp.tool()
-async def start_modeling_session() -> str:
+async def start_modeling_session(geometry_only: bool = False) -> str:
     """Open an empty modeling websocket for subsequent tools.
 
     Only one modeling session can be open at a time. Stop the current session
@@ -572,15 +572,22 @@ async def start_modeling_session() -> str:
     The server does not expire sessions after an idle or lifetime timeout.
     Callers are responsible for tracking and enforcing their desired timeout.
 
+    Pass geometry_only=True for nonvisual execution and geometry queries. That
+    routes the session to the CPU pool and cannot be used by snapshot, camera,
+    or other renderer-dependent tools.
+
     Pass the returned session_id to execute_kcl or exec_kcl_project to populate
-    the scene, then reuse it with modeling query, selection, and highlight tools.
-    Stop the session explicitly with stop_modeling_session when finished.
+    the session, then reuse it with compatible modeling query tools. Stop the
+    session explicitly with stop_modeling_session when finished.
+
+    Args:
+        geometry_only: Route a nonvisual session to the CPU Engine pool.
 
     Returns:
         str: The session ID to pass to session-aware modeling tools.
     """
     logger.info("start_modeling_session tool called")
-    return await zoo_start_modeling_session()
+    return await zoo_start_modeling_session(geometry_only=geometry_only)
 
 
 @mcp.tool()
