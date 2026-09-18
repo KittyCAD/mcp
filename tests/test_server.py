@@ -1879,7 +1879,7 @@ async def test_visualize_sketch_ignores_downstream_execution_error():
 
     image = _content_list(response)[0]
     assert isinstance(image, ImageContent)
-    assert image.mimeType == "image/png"
+    assert image.mime_type == "image/png"
     assert base64.b64decode(image.data).startswith(b"\x89PNG\r\n\x1a\n")
 
 
@@ -1943,7 +1943,7 @@ async def test_visualize_sketch_path_ignores_downstream_execution_error(
 
     image = _content_list(response)[0]
     assert isinstance(image, ImageContent)
-    assert image.mimeType == "image/png"
+    assert image.mime_type == "image/png"
     assert base64.b64decode(image.data).startswith(b"\x89PNG\r\n\x1a\n")
     assert kcl_path.read_text() == project_code
 
