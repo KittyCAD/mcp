@@ -572,16 +572,18 @@ async def start_modeling_session(geometry_only: bool = False) -> str:
     The server does not expire sessions after an idle or lifetime timeout.
     Callers are responsible for tracking and enforcing their desired timeout.
 
-    Pass geometry_only=True for nonvisual execution and geometry queries. That
-    routes the session to the CPU pool and cannot be used by snapshot, camera,
-    or other renderer-dependent tools.
+    Pass geometry_only=True to request a CPU session for nonvisual execution
+    and geometry queries. The API may fall back to the GPU pool. CPU sessions
+    do not support snapshot, camera, or other renderer-dependent tools; use
+    geometry_only=False when those tools are needed.
 
     Pass the returned session_id to execute_kcl or exec_kcl_project to populate
     the session, then reuse it with compatible modeling query tools. Stop the
     session explicitly with stop_modeling_session when finished.
 
     Args:
-        geometry_only: Route a nonvisual session to the CPU Engine pool.
+        geometry_only: Request CPU routing for nonvisual work; the API may
+            fall back to GPU.
 
     Returns:
         str: The session ID to pass to session-aware modeling tools.
