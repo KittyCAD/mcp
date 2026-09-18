@@ -479,29 +479,7 @@ def _execution_retry_delay(attempt: int) -> float:
     return backoff + random.uniform(0, EXECUTION_RETRY_JITTER_SECONDS)
 
 
-# The native zoo-kcl client supplies its bearer token on the WebSocket HTTP
-# upgrade. The API can nevertheless intermittently report that this particular
-# socket did not receive the header. zoo-kcl does not currently classify that
-# response as retryable, but a fresh execution creates a fresh authenticated
-# socket and recovers. Match the server's distinctive instruction rather than
-# broad authentication text so invalid or expired credentials still fail fast.
-_TRANSIENT_WEBSOCKET_AUTH_ERROR_MARKERS = (
-    "Authorization",
-    "Bearer <token>",
-    "over this websocket",
-)
-
 _KclCoro = Callable[..., Awaitable[_T]]
-
-
-def _is_retryable_execution_error(error: Exception) -> bool:
-    """Return whether a KCL execution should be retried on a fresh socket."""
-    message = str(error)
-    if all(marker in message for marker in _TRANSIENT_WEBSOCKET_AUTH_ERROR_MARKERS):
-        return True
-
-    is_retryable = getattr(error, "is_retryable", None)
-    return callable(is_retryable) and is_retryable()
 
 
 async def _execute_with_retries(
@@ -517,8 +495,8 @@ async def _execute_with_retries(
     ``is_retryable()`` so transient errors (e.g. an engine hangup) can be
     retried instead of bubbling up. Each attempt invokes the binding again;
     whether the binding opens a connection depends on its pre-execution
-    validation. Errors not classified as retryable are re-raised immediately.
-    The retry count and backoff delays are bounded.
+    validation. Non-retryable errors are re-raised immediately. The retry count
+    and backoff delays are bounded.
 
     Args:
         async_fn: The kcl coroutine function to call (e.g. ``kcl.execute_code``).
@@ -538,7 +516,8 @@ async def _execute_with_retries(
         try:
             result = await async_fn(*args, **kwargs)
         except Exception as error:
-            retryable = _is_retryable_execution_error(error)
+            is_retryable = getattr(error, "is_retryable", None)
+            retryable = callable(is_retryable) and is_retryable()
             if retryable and attempt < MAX_EXECUTION_ATTEMPTS:
                 delay = _execution_retry_delay(attempt)
                 await _report_execution_retry_event(
