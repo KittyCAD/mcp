@@ -2062,24 +2062,27 @@ class _StartingModelingSession:
 _modeling_session: _ModelingSession | _StartingModelingSession | None = None
 
 
-async def _open_modeling_websocket(client: AsyncKittyCAD) -> ClientConnection:
+async def _open_modeling_websocket(
+    client: AsyncKittyCAD, geometry_only: bool = False
+) -> ClientConnection:
     """Open the async modeling transport using an async client's credentials.
 
     KittyCAD 1.5.0's generated ``AsyncModelingAPI.modeling_commands_ws``
     currently returns ``None`` and constructs a relative websocket URL. Keep
     connection setup here until that generated method is usable.
     """
-    query = urlencode(
-        {
-            "fps": 30,
-            "post_effect": PostEffectType.SSAO,
-            "show_grid": "false",
-            "unlocked_framerate": "false",
-            "video_res_height": 1024,
-            "video_res_width": 1024,
-            "webrtc": "false",
-        }
-    )
+    query_params = {
+        "fps": 30,
+        "post_effect": PostEffectType.SSAO,
+        "show_grid": "false",
+        "unlocked_framerate": "false",
+        "video_res_height": 1024,
+        "video_res_width": 1024,
+        "webrtc": "false",
+    }
+    if geometry_only:
+        query_params.update({"pool": "cpu", "geometry_only": "true"})
+    query = urlencode(query_params)
     url = f"{client.base_url.rstrip('/')}/ws/modeling/commands?{query}"
     parsed_url = urlsplit(url)
     if parsed_url.scheme == "https":
@@ -2163,7 +2166,7 @@ def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
     session.artifact_graph_paths.clear()
 
 
-async def zoo_start_modeling_session() -> str:
+async def zoo_start_modeling_session(geometry_only: bool = False) -> str:
     global _modeling_session
 
     session_id = str(uuid4())
@@ -2181,7 +2184,7 @@ async def zoo_start_modeling_session() -> str:
     client: AsyncKittyCAD | None = None
     try:
         client = AsyncKittyCAD(verify_ssl=ctx)
-        websocket = await _open_modeling_websocket(client)
+        websocket = await _open_modeling_websocket(client, geometry_only)
     except BaseException:
         if _modeling_session is starting:
             _modeling_session = None

@@ -179,6 +179,31 @@ async def test_modeling_websocket_omits_tls_for_an_http_host(
 
 
 @pytest.mark.asyncio
+async def test_modeling_websocket_routes_geometry_only_sessions_to_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    connection = AsyncMock()
+    open_websocket = AsyncMock(return_value=connection)
+    monkeypatch.setattr(zoo_tools, "connect", open_websocket)
+    client = SimpleNamespace(
+        base_url="https://api.example.test",
+        get_headers=MagicMock(return_value={"Authorization": "Bearer token"}),
+        verify_ssl=True,
+    )
+
+    result = await zoo_tools._open_modeling_websocket(
+        cast(Any, client), geometry_only=True
+    )
+
+    assert result is connection
+    await_args = open_websocket.await_args
+    assert await_args is not None
+    websocket_url = await_args.args[0]
+    assert "pool=cpu" in websocket_url
+    assert "geometry_only=true" in websocket_url
+
+
+@pytest.mark.asyncio
 async def test_send_modeling_command_returns_matching_typed_response():
     websocket = AsyncMock()
     response_data = EntityGetIndex(entity_index=4)
@@ -337,14 +362,17 @@ async def test_modeling_session_start_does_not_execute_kcl(
 ):
     websocket = AsyncMock()
     execute_project = AsyncMock()
-    monkeypatch.setattr(
-        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
-    )
+    open_websocket = AsyncMock(return_value=websocket)
+    monkeypatch.setattr(zoo_tools, "_open_modeling_websocket", open_websocket)
     monkeypatch.setattr(zoo_tools, "_exec_kcl_project", execute_project)
 
-    session_id = await zoo_tools.zoo_start_modeling_session()
+    session_id = await zoo_tools.zoo_start_modeling_session(geometry_only=True)
 
     execute_project.assert_not_called()
+    open_websocket.assert_awaited_once()
+    await_args = open_websocket.await_args
+    assert await_args is not None
+    assert await_args.args[1] is True
     await zoo_tools.zoo_stop_modeling_session(session_id)
     websocket.close.assert_awaited_once_with()
 
@@ -373,7 +401,7 @@ async def test_start_handshake_does_not_hold_state_lock_and_shutdown_cancels_it(
     handshake_started = asyncio.Event()
     release_handshake = asyncio.Event()
 
-    async def open_websocket(client: object) -> AsyncMock:
+    async def open_websocket(client: object, _geometry_only: bool) -> AsyncMock:
         handshake_started.set()
         await release_handshake.wait()
         return websocket
@@ -409,7 +437,7 @@ async def test_stop_recovers_the_slot_from_a_start_whose_handshake_hangs(
     release_handshake = asyncio.Event()
     calls = 0
 
-    async def open_websocket(client: object) -> AsyncMock:
+    async def open_websocket(client: object, _geometry_only: bool) -> AsyncMock:
         nonlocal calls
         calls += 1
         if calls == 1:
