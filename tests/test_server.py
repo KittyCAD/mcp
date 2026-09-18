@@ -1987,7 +1987,10 @@ async def test_visualize_sketch_reports_missing_name():
 
 
 @pytest.mark.asyncio
-async def test_visualize_sketch_first_solid_helper_instance(tmp_path: Path) -> None:
+@pytest.mark.parametrize("instance_index", [0, 1])
+async def test_visualize_sketch_solid_helper_instance_matches_full_execution(
+    tmp_path: Path, instance_index: int
+) -> None:
     source = """
 @settings(kclVersion = 2.0)
 fn makePad(r) {
@@ -2003,20 +2006,15 @@ first = makePad(r = 3mm)
 second = makePad(r = 7mm)
 """
     full = await kcl.execute_code(source)
-    expected = bytes(full.render_sketch_png("profile", instance_index=0))
-    # Native eligibility is checked explicitly: an unintended full-execution
-    # fallback must not make this test pass.
-    native_png = await kcl.try_render_sketch_instance_code(source, "profile", 0)
-    assert native_png is not None and bytes(native_png) == expected
-    assert await kcl.try_render_sketch_instance_code(source, "profile", 1) is None
+    expected = bytes(full.render_sketch_png("profile", instance_index=instance_index))
     path = tmp_path / "main.kcl"
     path.write_text(source)
     for png in (
         await zoo_mcp.zoo_tools.zoo_visualize_sketch(
-            "profile", kcl_code=source, instance_index=0
+            "profile", kcl_code=source, instance_index=instance_index
         ),
         await zoo_mcp.zoo_tools.zoo_visualize_sketch(
-            "profile", kcl_path=path, instance_index=0
+            "profile", kcl_path=path, instance_index=instance_index
         ),
     ):
         assert png == expected

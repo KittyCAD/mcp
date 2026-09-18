@@ -2380,7 +2380,7 @@ async def zoo_visualize_sketch(
     by :func:`zoo_get_sketch_constraint_status`. Safely isolated top-level
     solver sketches execute first without downstream consumers. Other cases
     use full execution, retaining prefix recovery for downstream failures.
-    Eligible first instances of solid helpers use the native sketch-only path.
+    Function-generated sketches use full execution and explicit instance selection.
     All attempts share ``SKETCH_VISUALIZATION_TIMEOUT`` seconds.
 
     Args:
@@ -2403,30 +2403,6 @@ async def zoo_visualize_sketch(
     try:
         async with asyncio.timeout(SKETCH_VISUALIZATION_TIMEOUT):
             sketch_first_failed = False
-            if instance_index == 0:
-                instance_started = monotonic()
-                try:
-                    if kcl_code:
-                        instance_png = await kcl.try_render_sketch_instance_code(
-                            kcl_code, sketch_name, instance_index
-                        )
-                    else:
-                        assert kcl_path is not None
-                        instance_png = await kcl.try_render_sketch_instance(
-                            str(kcl_path), sketch_name, instance_index
-                        )
-                    if instance_png is not None:
-                        await _report_execution_retry_event(
-                            "visualize_sketch", "succeeded", 1, instance_started
-                        )
-                        logger.info(
-                            "Rendered sketch instance without unrelated geometry"
-                        )
-                        return bytes(instance_png)
-                except Exception:
-                    logger.info(
-                        "Sketch-instance isolation unavailable; trying full KCL"
-                    )
             if instance_index is None:
                 try:
                     isolated_outcome = await _execute_through_sketch(
