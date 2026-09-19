@@ -4,16 +4,19 @@ build-backend = "uv_build"
 
 [project]
 name = "zoo_mcp"
-version = "0.24.0"
+version = "0.28.0"
 requires-python = ">=3.11, <3.14"
 dependencies = [
     "aiofiles<26.0",
+    "httpx>=0.28,<1",
     "kittycad>=1.5.0,<2.0",
-    "mcp[cli]>=1.27.1,<2.0",
+    "mcp[cli]>=2.2.0,<3",
     "pillow<13.0",
+    "pymongo>=4.6.0,<5.0",
     "trimesh<6.0",
     "truststore<1.0",
     "typing-extensions>=4.12",
+    "websockets>=14.1,<17.0",
     "zoo-kcl>=0.3.185",
 ]
 authors = [
@@ -72,11 +75,7 @@ dev = [
     "pytest-httpx",
     "pytest-rerunfailures",
     "pytest-xdist",
-    "ruff==0.16.3",
+    "ruff==0.16.6",
     "ty",
     "uv-build",
 ]
-
-[tool.uv.sources]
-# Temporary source pin until the session API is released.
-zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "beff2ee485e15ea368d9424b96447695247dd374", subdirectory = "rust/kcl-python-bindings" }

@@ -1,21 +1,25 @@
 import asyncio
 import io
 import json
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+import os
+import random
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from threading import Lock
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 import aiofiles
+import bson
 import kcl
 import trimesh
-from kittycad import WebSocketModelingCommandsWs
+from kittycad import AsyncKittyCAD
 
 if TYPE_CHECKING:
 
@@ -30,6 +34,7 @@ if TYPE_CHECKING:
 
 from kittycad.exceptions import KittyCADClientError
 from kittycad.models import (
+    ApiCallStatus,
     Axis,
     AxisDirectionPair,
     Direction,
@@ -51,6 +56,7 @@ from kittycad.models import (
     Point2d,
     Point3d,
     PostEffectType,
+    StepImportTargetRepresentation,
     System,
     UnitArea,
     UnitDensity,
@@ -77,6 +83,7 @@ from kittycad.models.modeling_cmd import (
     OptionFaceGetGradient,
     OptionFaceGetPosition,
     OptionImportFiles,
+    OptionSetOrderIndependentTransparency,
     OptionTakeSnapshot,
     OptionViewIsometric,
     OptionZoomToFit,
@@ -103,6 +110,9 @@ from kittycad.models.ok_modeling_cmd_response import (
     OptionImportFiles as ResponseImportFiles,
 )
 from kittycad.models.ok_modeling_cmd_response import (
+    OptionSetOrderIndependentTransparency as ResponseSetOrderIndependentTransparency,
+)
+from kittycad.models.ok_modeling_cmd_response import (
     OptionTakeSnapshot as ResponseTakeSnapshot,
 )
 from kittycad.models.ok_modeling_cmd_response import (
@@ -115,23 +125,50 @@ from kittycad.models.ok_web_socket_response_data import OptionModeling
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
 from zoo_mcp import (
     ZooMCPException,
     ZooMCPTimeoutError,
-    kittycad_client,
+    ctx,
     logger,
 )
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
+from zoo_mcp.utils.kcl_project import check_inline_imports, load_kcl_project
 
 SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 
-# The wall-clock budget for one modeling tool call, measured across every read
-# it makes rather than per read. It has to stay under the reconnect budget of
+# The wall-clock budget for one modeling tool call, measured across every
+# websocket send and read. It has to stay under the reconnect budget of
 # the conversations driving these tools, so a stalled engine surfaces as a
 # retryable error instead of an abandoned request.
 MODELING_COMMAND_TIMEOUT = 300.0
+
+# Large file-analysis requests are asynchronous. Leave enough headroom under
+# the enclosing 300-second tool budget to surface a typed timeout instead of
+# letting the caller abandon the request while it is still polling.
+FILE_API_CALL_TIMEOUT = 285.0
+FILE_API_CALL_POLL_INTERVAL = 1.0
+
+_PENDING_API_CALL_STATUSES = {
+    ApiCallStatus.QUEUED,
+    ApiCallStatus.UPLOADED,
+    ApiCallStatus.IN_PROGRESS,
+}
+
+FileApiCall: TypeAlias = (
+    FileCenterOfMass | FileConversion | FileMass | FileSurfaceArea | FileVolume
+)
+_FileApiCallT = TypeVar("_FileApiCallT", bound=FileApiCall)
+
+_ASYNC_FILE_API_CALL_TYPES: dict[type[FileApiCall], str] = {
+    FileCenterOfMass: "file_center_of_mass",
+    FileConversion: "file_conversion",
+    FileMass: "file_mass",
+    FileSurfaceArea: "file_surface_area",
+    FileVolume: "file_volume",
+}
 
 # Map alternative extensions to their canonical FileImportFormat values
 _EXT_ALIASES = {
@@ -139,22 +176,76 @@ _EXT_ALIASES = {
 }
 
 
-def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[int]]]]:
-    """Load a KCL project into the shape expected by exec_kcl_project."""
-    path = Path(path).resolve()
-    root = path if path.is_dir() else path.parent
-    entrypoint = "main.kcl" if path.is_dir() else path.name
+async def _resolve_file_api_call(
+    client: AsyncKittyCAD,
+    result: object,
+    expected_type: type[_FileApiCallT],
+    operation_name: str,
+    *,
+    deadline: float | None = None,
+) -> _FileApiCallT:
+    """Resolve a synchronous or asynchronous Zoo file API response."""
+    if not isinstance(result, expected_type):
+        raise ZooMCPException(
+            f"Failed to {operation_name}, incorrect return type {type(result)}"
+        )
 
-    files: list[dict[str, str | list[int]]] = [
-        {
-            "path": file.relative_to(root).as_posix(),
-            "contents": list(file.read_bytes()),
-        }
-        for file in sorted(root.rglob("*"))
-        if file.is_file()
-    ]
+    current = result
+    if deadline is None:
+        deadline = monotonic() + FILE_API_CALL_TIMEOUT
 
-    return entrypoint, files
+    status = getattr(current, "status", ApiCallStatus.COMPLETED)
+    while status in _PENDING_API_CALL_STATUSES:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for {operation_name} operation {current.id}"
+            )
+
+        logger.info(
+            "Waiting for %s operation %s (status=%s)",
+            operation_name,
+            current.id,
+            status.value,
+        )
+        try:
+            async with asyncio.timeout(remaining):
+                polled = await client.api_calls.get_async_operation(id=str(current.id))
+        except TimeoutError as error:
+            raise ZooMCPTimeoutError(
+                f"Timed out waiting for {operation_name} operation {current.id}"
+            ) from error
+
+        async_result = polled.root
+        expected_async_type = _ASYNC_FILE_API_CALL_TYPES[expected_type]
+        if getattr(async_result, "type", None) != expected_async_type:
+            raise ZooMCPException(
+                f"Failed to {operation_name}, async operation {current.id} "
+                f"returned {getattr(async_result, 'type', type(async_result))}"
+            )
+
+        current = expected_type.model_construct(
+            **async_result.model_dump(exclude={"type"})
+        )
+        status = current.status
+        if status in _PENDING_API_CALL_STATUSES:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                continue
+            await asyncio.sleep(min(FILE_API_CALL_POLL_INTERVAL, remaining))
+
+    if status == ApiCallStatus.FAILED:
+        detail = current.error or "the worker returned no error detail"
+        raise ZooMCPException(
+            f"Failed to {operation_name}, operation {current.id} failed: {detail}"
+        )
+    if status != ApiCallStatus.COMPLETED:
+        raise ZooMCPException(
+            f"Failed to {operation_name}, operation {current.id} returned "
+            f"unexpected status {status.value}"
+        )
+
+    return current
 
 
 # Mappings from user-facing short strings to kcl PyO3 enum members.
@@ -285,71 +376,194 @@ def _check_kcl_code_or_path(
 # errors via ``KclError.is_retryable()`` so callers can retry them. Mirror the
 # retry behavior the bindings' own tests use.
 MAX_EXECUTION_ATTEMPTS = 3
+EXECUTION_RETRY_BASE_DELAY_SECONDS = 0.25
+EXECUTION_RETRY_MAX_DELAY_SECONDS = 2.0
+EXECUTION_RETRY_JITTER_SECONDS = 0.25
+
+ExecutionRetryOutcome: TypeAlias = Literal[
+    "succeeded",
+    "retry_scheduled",
+    "recovered",
+    "exhausted",
+    "terminal_non_retryable",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRetryEvent:
+    """Privacy-safe outcome from one KCL execution attempt."""
+
+    operation: str
+    outcome: ExecutionRetryOutcome
+    attempt: int
+    max_attempts: int
+    delay_seconds: float
+    elapsed_seconds: float
+    error_family: str | None
+    fresh_invocation: bool
+
+
+_execution_retry_event_buffer: ContextVar[list[ExecutionRetryEvent] | None] = (
+    ContextVar("execution_retry_event_buffer", default=None)
+)
+
+
+@contextmanager
+def capture_execution_retry_events() -> Iterator[list[ExecutionRetryEvent]]:
+    """Collect retry events emitted in the current async context."""
+
+    events: list[ExecutionRetryEvent] = []
+    token = _execution_retry_event_buffer.set(events)
+    try:
+        yield events
+    finally:
+        _execution_retry_event_buffer.reset(token)
+
+
+async def _emit_execution_retry_event(event: ExecutionRetryEvent) -> None:
+    """Record an event without invoking external telemetry during execution."""
+
+    events = _execution_retry_event_buffer.get()
+    if events is not None:
+        events.append(event)
+
+
+async def _report_execution_retry_event(
+    operation: str,
+    outcome: ExecutionRetryOutcome,
+    attempt: int,
+    started_at: float,
+    *,
+    delay: float = 0,
+    error: Exception | None = None,
+    error_family: str | None = None,
+) -> None:
+    if error_family is None and error is not None:
+        error_family = _execution_error_family(error)
+    await _emit_execution_retry_event(
+        ExecutionRetryEvent(
+            operation=operation,
+            outcome=outcome,
+            attempt=attempt,
+            max_attempts=MAX_EXECUTION_ATTEMPTS,
+            delay_seconds=delay,
+            elapsed_seconds=monotonic() - started_at,
+            error_family=error_family,
+            fresh_invocation=True,
+        )
+    )
+
+
+def _execution_error_family(error: Exception) -> str:
+    """Return a stable error family without exposing an exception message."""
+
+    if isinstance(error, kcl.KclError):
+        message = error.args[0] if error.args else None
+        if isinstance(message, str) and message.startswith("KCL EngineHangup error"):
+            return "EngineHangup"
+        return "KclError"
+    return type(error).__name__
+
+
+def _execution_retry_delay(attempt: int) -> float:
+    """Calculate capped exponential backoff with additive jitter."""
+
+    backoff = min(
+        EXECUTION_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)),
+        EXECUTION_RETRY_MAX_DELAY_SECONDS,
+    )
+    return backoff + random.uniform(0, EXECUTION_RETRY_JITTER_SECONDS)
+
 
 _KclCoro = Callable[..., Awaitable[_T]]
 
 
 async def _execute_with_retries(
-    async_fn: _KclCoro[_T], *args: object, **kwargs: object
+    async_fn: _KclCoro[_T],
+    *args: object,
+    _operation: str | None = None,
+    _result_error_family: Callable[[_T], str | None] | None = None,
+    **kwargs: object,
 ) -> _T:
-    """Await a KCL execution coroutine, retrying on retryable engine errors.
+    """Run a KCL coroutine with finite, observable retries.
 
     The kcl bindings raise ``kcl.KclError`` for execution failures and expose
     ``is_retryable()`` so transient errors (e.g. an engine hangup) can be
-    retried instead of bubbling up. Non-retryable errors are re-raised
-    immediately.
+    retried instead of bubbling up. Each attempt invokes the binding again;
+    whether the binding opens a connection depends on its pre-execution
+    validation. Non-retryable errors are re-raised immediately. The retry count
+    and backoff delays are bounded.
 
     Args:
         async_fn: The kcl coroutine function to call (e.g. ``kcl.execute_code``).
         *args: Positional arguments forwarded to ``async_fn``.
+        _operation: Stable, privacy-safe operation name for retry events.
+        _result_error_family: Optional classifier for APIs that return failures
+            as values instead of raising them.
         **kwargs: Keyword arguments forwarded to ``async_fn``.
 
     Returns:
         Whatever ``async_fn`` returns on success.
     """
-    retries_remaining = MAX_EXECUTION_ATTEMPTS - 1
-    while True:
+    started_at = monotonic()
+    operation = _operation or getattr(async_fn, "__name__", type(async_fn).__name__)
+
+    for attempt in range(1, MAX_EXECUTION_ATTEMPTS + 1):
         try:
-            return await async_fn(*args, **kwargs)
+            result = await async_fn(*args, **kwargs)
         except Exception as error:
             is_retryable = getattr(error, "is_retryable", None)
-            if retries_remaining > 0 and callable(is_retryable) and is_retryable():
-                logger.warning(
-                    "Retryable KCL execution error, retrying (%d attempt(s) left): %s",
-                    retries_remaining,
-                    error,
+            retryable = callable(is_retryable) and is_retryable()
+            if retryable and attempt < MAX_EXECUTION_ATTEMPTS:
+                delay = _execution_retry_delay(attempt)
+                await _report_execution_retry_event(
+                    operation,
+                    "retry_scheduled",
+                    attempt,
+                    started_at,
+                    delay=delay,
+                    error=error,
                 )
-                retries_remaining -= 1
+                logger.warning(
+                    "Retryable KCL execution error; scheduling attempt %d/%d "
+                    "in %.3fs (error_family=%s)",
+                    attempt + 1,
+                    MAX_EXECUTION_ATTEMPTS,
+                    delay,
+                    _execution_error_family(error),
+                )
+                await asyncio.sleep(delay)
                 continue
+
+            outcome: ExecutionRetryOutcome = (
+                "exhausted" if retryable else "terminal_non_retryable"
+            )
+            await _report_execution_retry_event(
+                operation, outcome, attempt, started_at, error=error
+            )
             raise
 
-
-async def _run_kcl_operation(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-    operation: Callable[[kcl.Session], Awaitable[_T]],
-    *,
-    allow_partial: bool = False,
-) -> _T:
-    """Own one session per attempt, including cleanup before any explicit retry."""
-
-    async def run_once() -> _T:
-        session = (
-            await kcl.execute_code(kcl_code)
-            if kcl_code is not None
-            else await kcl.execute(str(kcl_path))
+        result_error_family = (
+            _result_error_family(result) if _result_error_family else None
         )
-        async with session:
-            outcome = session.outcome
-            if not allow_partial or outcome.is_retryable():
-                outcome.raise_for_error()
-            return await operation(session)
+        if result_error_family is not None:
+            await _report_execution_retry_event(
+                operation,
+                "terminal_non_retryable",
+                attempt,
+                started_at,
+                error_family=result_error_family,
+            )
+        else:
+            await _report_execution_retry_event(
+                operation,
+                "succeeded" if attempt == 1 else "recovered",
+                attempt,
+                started_at,
+            )
+        return result
 
-    return await _execute_with_retries(run_once)
-
-
-async def _session_outcome(session: kcl.Session) -> kcl.ExecOutcome:
-    return session.outcome
+    raise AssertionError("unreachable")
 
 
 # Issue severities surfaced from an execution outcome, in descending order of
@@ -363,16 +577,29 @@ _EXECUTION_ISSUE_SEVERITIES = (
 )
 
 
-def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]:
+# zoo-kcl 0.3.184 reports this mock-engine limitation as an error even for valid
+# planeOf calls. Match the raw diagnostic exactly, never its rendered source
+# excerpt, and leave all other errors (including fatal issues) blocking.
+_MOCK_ENGINE_LIMITATIONS = frozenset(
+    {"The engine isn't available, so returning an arbitrary incorrect plane"}
+)
+
+
+def _format_execution_issues(
+    outcome: "kcl.ExecOutcome", *, mock: bool = False
+) -> dict[str, list[str]]:
     """Render compilation issues from an execution outcome, grouped by severity.
 
-    A KCL session retains an ``ExecOutcome`` whose ``issues()`` may include warning-, error-, and fatal-level
+    ``kcl.execute`` / ``kcl.execute_code`` return an ``ExecOutcome`` whose
+    ``issues()`` may include warning-, error-, and fatal-level
     ``CompilationIssue``s (e.g. a CSG subtract with no overlap surfaces as a
     warning). Each issue is rendered to a miette report string with the
     relevant source snippet and bucketed by its severity.
 
     Args:
         outcome: The outcome returned by a kcl execution call.
+        mock: Report known engine-unavailable diagnostics as warnings. This
+            applies only to mock outcomes; real execution keeps its severities.
 
     Returns:
         A mapping of severity label (``"fatal"``, ``"error"``, ``"warning"``)
@@ -383,6 +610,12 @@ def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]
     for issue in outcome.issues():
         for severity, predicate in _EXECUTION_ISSUE_SEVERITIES:
             if getattr(issue, predicate)():
+                if (
+                    mock
+                    and severity == "error"
+                    and issue.message() in _MOCK_ENGINE_LIMITATIONS
+                ):
+                    severity = "warning"
                 issues.setdefault(severity, []).append(outcome.report(issue))
                 break
     return issues
@@ -518,20 +751,17 @@ async def zoo_calculate_center_of_mass(
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    result = kittycad_client.file.create_file_center_of_mass(
-        src_format=src_format,
-        body=data,
-        output_unit=UnitLength(unit_length),
-    )
-
-    if not isinstance(result, FileCenterOfMass):
-        logger.info(
-            "Failed to calculate center of mass, incorrect return type %s",
-            type(result),
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        result = await client.file.create_file_center_of_mass(
+            src_format=src_format,
+            body=data,
+            output_unit=UnitLength(unit_length),
         )
-        raise ZooMCPException(
-            "Failed to calculate center of mass, incorrect return type %s",
-            type(result),
+        result = await _resolve_file_api_call(
+            client,
+            result,
+            FileCenterOfMass,
+            "calculate center of mass",
         )
 
     com = result.center_of_mass.to_dict() if result.center_of_mass is not None else None
@@ -571,18 +801,19 @@ async def zoo_calculate_mass(
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    result = kittycad_client.file.create_file_mass(
-        output_unit=UnitMass(unit_mass),
-        src_format=src_format,
-        body=data,
-        material_density_unit=UnitDensity(unit_density),
-        material_density=density,
-    )
-
-    if not isinstance(result, FileMass):
-        logger.info("Failed to calculate mass, incorrect return type %s", type(result))
-        raise ZooMCPException(
-            "Failed to calculate mass, incorrect return type %s", type(result)
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        result = await client.file.create_file_mass(
+            output_unit=UnitMass(unit_mass),
+            src_format=src_format,
+            body=data,
+            material_density_unit=UnitDensity(unit_density),
+            material_density=density,
+        )
+        result = await _resolve_file_api_call(
+            client,
+            result,
+            FileMass,
+            "calculate mass",
         )
 
     mass = result.mass
@@ -613,19 +844,17 @@ async def zoo_calculate_surface_area(file_path: Path | str, unit_area: str) -> f
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    result = kittycad_client.file.create_file_surface_area(
-        output_unit=UnitArea(unit_area),
-        src_format=src_format,
-        body=data,
-    )
-
-    if not isinstance(result, FileSurfaceArea):
-        logger.error(
-            "Failed to calculate surface area, incorrect return type %s",
-            type(result),
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        result = await client.file.create_file_surface_area(
+            output_unit=UnitArea(unit_area),
+            src_format=src_format,
+            body=data,
         )
-        raise ZooMCPException(
-            "Failed to calculate surface area, incorrect return type %s",
+        result = await _resolve_file_api_call(
+            client,
+            result,
+            FileSurfaceArea,
+            "calculate surface area",
         )
 
     surface_area = result.surface_area
@@ -658,18 +887,17 @@ async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
 
     src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
 
-    result = kittycad_client.file.create_file_volume(
-        output_unit=UnitVolume(unit_vol),
-        src_format=src_format,
-        body=data,
-    )
-
-    if not isinstance(result, FileVolume):
-        logger.info(
-            "Failed to calculate volume, incorrect return type %s", type(result)
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        result = await client.file.create_file_volume(
+            output_unit=UnitVolume(unit_vol),
+            src_format=src_format,
+            body=data,
         )
-        raise ZooMCPException(
-            "Failed to calculate volume, incorrect return type %s", type(result)
+        result = await _resolve_file_api_call(
+            client,
+            result,
+            FileVolume,
+            "calculate volume",
         )
 
     volume = result.volume
@@ -713,7 +941,12 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
         case "sldprt":
             return InputFormat3d(OptionSldprt(split_closed_faces=True))
         case "step" | "stp":
-            return InputFormat3d(OptionStep(split_closed_faces=True))
+            return InputFormat3d(
+                OptionStep(
+                    split_closed_faces=False,
+                    target_representation=StepImportTargetRepresentation.MESH,
+                )
+            )
         case "stl":
             return InputFormat3d(
                 OptionStl(
@@ -729,11 +962,11 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
     return None
 
 
-def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
+async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
     """Import a CAD file into the scene and return the imported object's id.
 
-    Sent as a binary frame rather than through ``_send_modeling_command``
-    because the file contents are binary in MsgPack encoding.
+    STEP files are always imported as meshes. B-rep STEP import is not supported,
+    and import failure is returned without a B-rep fallback.
     """
     input_file = Path(input_file)
 
@@ -766,24 +999,30 @@ def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
             outcome,
         )
 
-    with open(input_file, "rb") as data, _modeling_websocket(session_id) as ws:
-        ws.send_binary(
-            WebSocketRequest(
-                OptionModelingCmdReq(
-                    cmd=ModelingCmd(
-                        OptionImportFiles(
-                            files=[ImportFile(data=data.read(), path=input_file.name)],
-                            format=input_format,
-                        )
-                    ),
-                    cmd_id=command_id,
-                )
+    async with aiofiles.open(input_file, "rb") as data:
+        contents = await data.read()
+
+    async with _modeling_websocket(session_id) as ws:
+        request = WebSocketRequest(
+            OptionModelingCmdReq(
+                cmd=ModelingCmd(
+                    OptionImportFiles(
+                        files=[ImportFile(data=contents, path=input_file.name)],
+                        format=input_format,
+                    )
+                ),
+                cmd_id=command_id,
             )
         )
-        log_stage("sent", "awaiting-engine-response")
-
         try:
-            response = _await_modeling_response(
+            await _send_modeling_frame(
+                ws,
+                bson.encode(request.model_dump(exclude_none=True)),
+                deadline,
+                "CAD file import",
+            )
+            log_stage("sent", "awaiting-engine-response")
+            response = await _await_modeling_response(
                 ws,
                 command_id,
                 ResponseImportFiles,
@@ -835,60 +1074,93 @@ async def zoo_calculate_cad_physical_properties(
 
     normalized_ext = _normalize_ext(file_path.suffix.split(".")[1])
     src_format = FileImportFormat(normalized_ext)
+    deadline = monotonic() + FILE_API_CALL_TIMEOUT
 
-    volume_result = kittycad_client.file.create_file_volume(
-        output_unit=UnitVolume(unit_vol),
-        src_format=src_format,
-        body=data,
-    )
-    if not isinstance(volume_result, FileVolume) or volume_result.volume is None:
-        raise ZooMCPException("Failed to calculate volume")
-
-    mass_result = kittycad_client.file.create_file_mass(
-        output_unit=UnitMass(unit_mass),
-        src_format=src_format,
-        body=data,
-        material_density_unit=UnitDensity(unit_density),
-        material_density=density,
-    )
-    if not isinstance(mass_result, FileMass) or mass_result.mass is None:
-        raise ZooMCPException("Failed to calculate mass")
-
-    sa_result = kittycad_client.file.create_file_surface_area(
-        output_unit=UnitArea(unit_area),
-        src_format=src_format,
-        body=data,
-    )
-    if not isinstance(sa_result, FileSurfaceArea) or sa_result.surface_area is None:
-        raise ZooMCPException("Failed to calculate surface area")
-
-    com_result = kittycad_client.file.create_file_center_of_mass(
-        src_format=src_format,
-        body=data,
-        output_unit=UnitLength(unit_length),
-    )
-    if (
-        not isinstance(com_result, FileCenterOfMass)
-        or com_result.center_of_mass is None
-    ):
-        raise ZooMCPException("Failed to calculate center of mass")
-
-    # Compute bounding box from mesh data
-    if normalized_ext == "stl":
-        bbox = _compute_stl_bounding_box(data)
-    else:
-        stl_result = kittycad_client.file.create_file_conversion(
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        volume_result = await client.file.create_file_volume(
+            output_unit=UnitVolume(unit_vol),
             src_format=src_format,
-            output_format=FileExportFormat.STL,
             body=data,
         )
-        if not isinstance(stl_result, FileConversion):
-            raise ZooMCPException("Failed to convert file for bounding box calculation")
-        if stl_result.outputs is None or len(stl_result.outputs) == 0:
-            raise ZooMCPException(
-                "Failed to convert file for bounding box calculation, no output"
+        volume_result = await _resolve_file_api_call(
+            client,
+            volume_result,
+            FileVolume,
+            "calculate volume",
+            deadline=deadline,
+        )
+        if volume_result.volume is None:
+            raise ZooMCPException("Failed to calculate volume")
+
+        mass_result = await client.file.create_file_mass(
+            output_unit=UnitMass(unit_mass),
+            src_format=src_format,
+            body=data,
+            material_density_unit=UnitDensity(unit_density),
+            material_density=density,
+        )
+        mass_result = await _resolve_file_api_call(
+            client,
+            mass_result,
+            FileMass,
+            "calculate mass",
+            deadline=deadline,
+        )
+        if mass_result.mass is None:
+            raise ZooMCPException("Failed to calculate mass")
+
+        sa_result = await client.file.create_file_surface_area(
+            output_unit=UnitArea(unit_area),
+            src_format=src_format,
+            body=data,
+        )
+        sa_result = await _resolve_file_api_call(
+            client,
+            sa_result,
+            FileSurfaceArea,
+            "calculate surface area",
+            deadline=deadline,
+        )
+        if sa_result.surface_area is None:
+            raise ZooMCPException("Failed to calculate surface area")
+
+        com_result = await client.file.create_file_center_of_mass(
+            src_format=src_format,
+            body=data,
+            output_unit=UnitLength(unit_length),
+        )
+        com_result = await _resolve_file_api_call(
+            client,
+            com_result,
+            FileCenterOfMass,
+            "calculate center of mass",
+            deadline=deadline,
+        )
+        if com_result.center_of_mass is None:
+            raise ZooMCPException("Failed to calculate center of mass")
+
+        if normalized_ext == "stl":
+            stl_data = data
+        else:
+            stl_result = await client.file.create_file_conversion(
+                src_format=src_format,
+                output_format=FileExportFormat.STL,
+                body=data,
             )
-        bbox = _compute_stl_bounding_box(next(iter(stl_result.outputs.values())))
+            stl_result = await _resolve_file_api_call(
+                client,
+                stl_result,
+                FileConversion,
+                "convert file for bounding box calculation",
+                deadline=deadline,
+            )
+            if stl_result.outputs is None or len(stl_result.outputs) == 0:
+                raise ZooMCPException(
+                    "Failed to convert file for bounding box calculation, no output"
+                )
+            stl_data = next(iter(stl_result.outputs.values()))
+
+    bbox = await asyncio.to_thread(_compute_stl_bounding_box, stl_data)
 
     physical_properties = {
         "volume": volume_result.volume,
@@ -946,9 +1218,20 @@ async def zoo_calculate_kcl_physical_properties(
         ),
     )
 
-    response = await _run_kcl_operation(
-        kcl_code, kcl_path, lambda session: session.measure(request)
-    )
+    if kcl_code:
+        response = await _execute_with_retries(
+            kcl.execute_code_and_measure,
+            kcl_code,
+            request,
+            _operation="calculate_kcl_physical_properties",
+        )
+    else:
+        response = await _execute_with_retries(
+            kcl.execute_and_measure,
+            str(kcl_path),
+            request,
+            _operation="calculate_kcl_physical_properties",
+        )
 
     volume = response.get_volume()
     com = response.get_center_of_mass()
@@ -1025,13 +1308,20 @@ async def zoo_calculate_bounding_box_kcl(
 
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
-    response = await _run_kcl_operation(
-        kcl_code,
-        kcl_path,
-        lambda session: session.bounding_box(
-            output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length")
-        ),
-    )
+    if kcl_code:
+        response = await _execute_with_retries(
+            kcl.execute_code_and_bounding_box,
+            kcl_code,
+            _operation="calculate_bounding_box_kcl",
+            output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
+        )
+    else:
+        response = await _execute_with_retries(
+            kcl.execute_and_bounding_box,
+            str(kcl_path),
+            _operation="calculate_bounding_box_kcl",
+            output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
+        )
 
     center = response.get_center()
     dims = response.get_dimensions()
@@ -1066,21 +1356,22 @@ async def zoo_calculate_bounding_box_cad(
 
     # If the file is already STL, parse it directly
     if normalized_ext == "stl":
-        return _compute_stl_bounding_box(data)
+        return await asyncio.to_thread(_compute_stl_bounding_box, data)
 
     src_format = FileImportFormat(normalized_ext)
 
     # Convert to STL to get mesh data for bounding box computation
-    stl_result = kittycad_client.file.create_file_conversion(
-        src_format=src_format,
-        output_format=FileExportFormat.STL,
-        body=data,
-    )
-
-    if not isinstance(stl_result, FileConversion):
-        raise ZooMCPException(
-            "Failed to convert file for bounding box calculation, incorrect return type %s",
-            type(stl_result),
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        stl_result = await client.file.create_file_conversion(
+            src_format=src_format,
+            output_format=FileExportFormat.STL,
+            body=data,
+        )
+        stl_result = await _resolve_file_api_call(
+            client,
+            stl_result,
+            FileConversion,
+            "convert file for bounding box calculation",
         )
 
     if stl_result.outputs is None or len(stl_result.outputs) == 0:
@@ -1090,7 +1381,7 @@ async def zoo_calculate_bounding_box_cad(
 
     stl_data = next(iter(stl_result.outputs.values()))
 
-    return _compute_stl_bounding_box(stl_data)
+    return await asyncio.to_thread(_compute_stl_bounding_box, stl_data)
 
 
 async def zoo_convert_cad_file(
@@ -1121,13 +1412,13 @@ async def zoo_convert_cad_file(
         logger.warning("No export format provided, defaulting to step")
         export_format = FileExportFormat.STEP
     else:
-        if export_format not in FileExportFormat:
+        try:
+            export_format = FileExportFormat(export_format)
+        except ValueError:
             logger.warning(
                 "Invalid export format %s provided, defaulting to step", export_format
             )
             export_format = FileExportFormat.STEP
-        else:
-            export_format = FileExportFormat(export_format)
 
     if export_path is None:
         logger.warning("No export path provided, creating a temporary file")
@@ -1161,19 +1452,17 @@ async def zoo_convert_cad_file(
     async with aiofiles.open(input_file, "rb") as inp:
         data = await inp.read()
 
-    export_response = kittycad_client.file.create_file_conversion(
-        src_format=FileImportFormat(_normalize_ext(input_ext)),
-        output_format=FileExportFormat(export_format),
-        body=data,
-    )
-
-    if not isinstance(export_response, FileConversion):
-        logger.error(
-            "Failed to convert file, incorrect return type %s",
-            type(export_response),
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        export_response = await client.file.create_file_conversion(
+            src_format=FileImportFormat(_normalize_ext(input_ext)),
+            output_format=FileExportFormat(export_format),
+            body=data,
         )
-        raise ZooMCPException(
-            "Failed to convert file, incorrect return type %s",
+        export_response = await _resolve_file_api_call(
+            client,
+            export_response,
+            FileConversion,
+            "convert file",
         )
 
     if export_response.outputs is None:
@@ -1189,19 +1478,332 @@ async def zoo_convert_cad_file(
 
 
 @dataclass
-class ResultZooExecuteKclLocal:
-    ok: bool
+class KclExecutionStage:
+    status: Literal["succeeded", "failed", "not_run"]
     message: str
+    diagnostics: dict[str, list[str]] = field(default_factory=dict)
+    error_family: str | None = None
 
 
 @dataclass
-class ResultZooExecuteKclRemote:
+class ResultZooExecuteKclLocal:
     ok: bool
     message: str
+    mock_preflight: KclExecutionStage
+    real_execution: KclExecutionStage
+
+
+@dataclass
+class ResultZooExecuteKclRemote(ResultZooExecuteKclLocal):
     path_artifact_graph: Path
 
 
 ResultZooExecuteKcl: TypeAlias = ResultZooExecuteKclLocal | ResultZooExecuteKclRemote
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionStageEvent:
+    """Stage timing and outcome, without source code or diagnostic details."""
+
+    operation: str
+    stage: Literal["mock_preflight", "real_execution"]
+    outcome: Literal["succeeded", "failed", "not_run", "cancelled"]
+    elapsed_seconds: float
+    attempts: int
+    error_family: str | None
+
+
+_execution_stage_event_buffer: ContextVar[list[ExecutionStageEvent] | None] = (
+    ContextVar("execution_stage_event_buffer", default=None)
+)
+
+
+@contextmanager
+def capture_execution_stage_events() -> Iterator[list[ExecutionStageEvent]]:
+    """Collect execution stage events emitted in the current async context."""
+    events: list[ExecutionStageEvent] = []
+    token = _execution_stage_event_buffer.set(events)
+    try:
+        yield events
+    finally:
+        _execution_stage_event_buffer.reset(token)
+
+
+def _report_execution_stage_event(
+    operation: str,
+    stage: Literal["mock_preflight", "real_execution"],
+    outcome: Literal["succeeded", "failed", "not_run", "cancelled"],
+    started_at: float,
+    attempts: int,
+    error_family: str | None = None,
+) -> None:
+    elapsed = 0.0 if outcome == "not_run" else monotonic() - started_at
+    event = ExecutionStageEvent(
+        operation, stage, outcome, elapsed, attempts, error_family
+    )
+    events = _execution_stage_event_buffer.get()
+    if events is not None:
+        events.append(event)
+    logger.info(
+        "KCL execution operation=%s stage=%s outcome=%s elapsed_seconds=%.3f "
+        "attempts=%d error_family=%s",
+        operation,
+        stage,
+        outcome,
+        elapsed,
+        attempts,
+        error_family,
+    )
+
+
+@dataclass
+class _ResolvedKclExecution:
+    code: str | None
+    path: str | None
+    entrypoint: str
+    files: dict[str, bytes]
+    source_paths: dict[str, str] = field(default_factory=dict)
+
+    def source_report(self, report: str) -> str:
+        for captured, original in self.source_paths.items():
+            report = report.replace(captured, original)
+        return report
+
+    def remap_diagnostics(self, stage: KclExecutionStage) -> None:
+        stage.diagnostics = {
+            severity: [self.source_report(report) for report in reports]
+            for severity, reports in stage.diagnostics.items()
+        }
+
+
+def _capture_execution_project(
+    path: Path | str, destination: Path
+) -> _ResolvedKclExecution:
+    project = load_kcl_project(path)
+    for name, contents in project.files.items():
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+    source_paths = {}
+    for captured_root in (destination, destination.resolve()):
+        for captured, original in (
+            (str(captured_root) + os.sep, str(project.source_root) + os.sep),
+            (captured_root.as_posix() + "/", project.source_root.as_posix() + "/"),
+        ):
+            source_paths[captured] = original
+            # KclError renders reports inside a repr, escaping Windows separators.
+            source_paths[repr(captured)[1:-1]] = repr(original)[1:-1]
+    return _ResolvedKclExecution(
+        None,
+        str(destination / project.entrypoint),
+        project.entrypoint,
+        project.files,
+        source_paths,
+    )
+
+
+@asynccontextmanager
+async def _resolve_kcl_execution(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+) -> AsyncIterator[_ResolvedKclExecution]:
+    """Capture input once and retain it through mock, real execution, and retries."""
+    _check_kcl_code_or_path(kcl_code, kcl_path)
+    if kcl_code:
+        check_inline_imports(kcl_code)
+        yield _ResolvedKclExecution(
+            kcl_code,
+            None,
+            "main.kcl",
+            {"main.kcl": kcl_code.encode()},
+        )
+        return
+
+    assert kcl_path is not None
+    with TemporaryDirectory(prefix="zoo-mcp-preflight-") as directory:
+        pending = asyncio.create_task(
+            asyncio.to_thread(_capture_execution_project, kcl_path, Path(directory))
+        )
+        try:
+            resolved = await asyncio.shield(pending)
+        except asyncio.CancelledError as cancellation:
+            # A filesystem worker cannot be cancelled. Let it finish before the
+            # temporary directory is removed so it cannot recreate leaked files.
+            try:
+                await pending
+            finally:
+                raise cancellation
+        yield resolved
+
+
+async def _mock_execution_stage(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+) -> KclExecutionStage:
+    if kcl_code:
+        outcome = await kcl.mock_execute_code(kcl_code)
+    else:
+        outcome = await kcl.mock_execute(str(kcl_path))
+    issues = _format_execution_issues(outcome, mock=True)
+    failed = "fatal" in issues or "error" in issues
+    return KclExecutionStage(
+        status="failed" if failed else "succeeded",
+        message=(
+            "Mock preflight failed"
+            if failed
+            else "Mock preflight succeeded with diagnostics"
+            if issues
+            else "KCL code mock executed successfully"
+        ),
+        diagnostics=issues,
+        error_family="CompilationIssue" if failed else None,
+    )
+
+
+def _execution_result_message(stage: KclExecutionStage) -> str:
+    return (
+        _execution_issues_message(stage.diagnostics)
+        if stage.diagnostics
+        else stage.message
+    )
+
+
+async def _execute_kcl_with_preflight(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    session_id: str | None,
+    *,
+    operation: str,
+) -> ResultZooExecuteKcl:
+    mock = KclExecutionStage("not_run", "Mock preflight has not run")
+    real = KclExecutionStage("not_run", "Real execution was not started")
+    stage: Literal["mock_preflight", "real_execution"] = "mock_preflight"
+    started_at = monotonic()
+    attempts = 0
+    resolved: _ResolvedKclExecution | None = None
+    try:
+        async with _resolve_kcl_execution(kcl_code, kcl_path) as resolved:
+            attempts = 1
+            mock = await _mock_execution_stage(resolved.code, resolved.path)
+            resolved.remap_diagnostics(mock)
+            _report_execution_stage_event(
+                operation,
+                stage,
+                mock.status,
+                started_at,
+                attempts,
+                "CompilationIssue" if mock.status == "failed" else None,
+            )
+            if mock.status == "failed":
+                _report_execution_stage_event(
+                    operation,
+                    "real_execution",
+                    "not_run",
+                    started_at,
+                    0,
+                )
+                return ResultZooExecuteKclLocal(
+                    False, _execution_result_message(mock), mock, real
+                )
+
+            stage = "real_execution"
+            started_at = monotonic()
+            attempts = 0
+            artifact_graph: Path | None = None
+            if session_id is not None:
+                attempts = 1
+                artifact_graph = await _execute_resolved_kcl_project(
+                    session_id,
+                    resolved.entrypoint,
+                    [
+                        {"path": name, "contents": list(contents)}
+                        for name, contents in resolved.files.items()
+                    ],
+                )
+                real = KclExecutionStage(
+                    "succeeded",
+                    "KCL code executed successfully in the modeling session. "
+                    "Real-execution diagnostics are not reported for session runs; "
+                    "mock-preflight diagnostics are available in mock_preflight.",
+                )
+            else:
+
+                async def execute() -> "kcl.ExecOutcome":
+                    nonlocal attempts
+                    attempts += 1
+                    if resolved.code is not None:
+                        return await kcl.execute_code(resolved.code)
+                    assert resolved.path is not None
+                    return await kcl.execute(resolved.path)
+
+                outcome = await _execute_with_retries(execute, _operation=operation)
+                issues = _format_execution_issues(outcome)
+                real = KclExecutionStage(
+                    "succeeded",
+                    "KCL code executed with diagnostics"
+                    if issues
+                    else "KCL code executed successfully",
+                    issues,
+                )
+                resolved.remap_diagnostics(real)
+            _report_execution_stage_event(
+                operation,
+                stage,
+                real.status,
+                started_at,
+                attempts,
+            )
+            if artifact_graph is not None:
+                return ResultZooExecuteKclRemote(
+                    True,
+                    real.message,
+                    mock,
+                    real,
+                    artifact_graph,
+                )
+            return ResultZooExecuteKclLocal(
+                True, _execution_result_message(real), mock, real
+            )
+    except asyncio.CancelledError:
+        _report_execution_stage_event(
+            operation,
+            stage,
+            "cancelled",
+            started_at,
+            attempts,
+        )
+        raise
+    except Exception as error:
+        detail = resolved.source_report(str(error)) if resolved else str(error)
+        error_family = _execution_error_family(error)
+        _report_execution_stage_event(
+            operation,
+            stage,
+            "failed",
+            started_at,
+            attempts,
+            error_family,
+        )
+        if stage == "mock_preflight":
+            mock = KclExecutionStage(
+                "failed", "Mock preflight failed", {"error": [detail]}, error_family
+            )
+            _report_execution_stage_event(
+                operation,
+                "real_execution",
+                "not_run",
+                started_at,
+                0,
+            )
+            return ResultZooExecuteKclLocal(
+                False, f"Failed to mock execute KCL code: {detail}", mock, real
+            )
+        real = KclExecutionStage(
+            "failed", "Real execution failed", {"error": [detail]}, error_family
+        )
+        return ResultZooExecuteKclLocal(
+            False, f"Failed to execute KCL code: {detail}", mock, real
+        )
 
 
 async def zoo_execute_kcl(
@@ -1212,63 +1814,23 @@ async def zoo_execute_kcl(
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
     Args:
-        kcl_code (str | None): KCL code
+        kcl_code (str | None): Self-contained KCL code. Standard-library imports are allowed; filesystem imports require kcl_path.
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
         session_id (str | None): An open modeling session in which to execute the KCL.
 
     Returns:
-        ResultZooExecuteKcl: The execution status and message. Session executions
-        also include the artifact graph's temporary JSON file path. When a local
-        run completes, compilation issues are appended to the message rather than
-        treated as a hard failure. Session runs cannot report non-fatal diagnostics.
+        ResultZooExecuteKcl: Separate mock-preflight and real-execution outcomes.
+        Mock errors block real execution; warnings are retained and allow it.
+        Session successes include the artifact graph's temporary JSON file path.
+        Transient local real-execution failures retry the same captured input
+        without repeating preflight.
     """
-    logger.info("Executing KCL code")
-
-    _check_kcl_code_or_path(kcl_code, kcl_path)
-
-    try:
-        if session_id is not None:
-            # Reads the modeling websocket synchronously; see server._modeling_command
-            # for why that cannot happen on the event loop.
-            path_artifact_graph = await asyncio.to_thread(
-                zoo_exec_kcl_project,
-                kcl_code=kcl_code,
-                kcl_path=kcl_path,
-                session_id=session_id,
-            )
-            logger.info("KCL code executed in modeling session")
-            # The engine's exec_kcl_project response carries only an artifact
-            # graph, so warnings the local compiler would surface are not
-            # available here. Say so rather than report an unqualified success.
-            return ResultZooExecuteKclRemote(
-                ok=True,
-                message=(
-                    "KCL code executed successfully in the modeling session. "
-                    "Non-fatal diagnostics (warnings and non-fatal errors) are not "
-                    "reported for session runs; re-run without session_id to check "
-                    "them."
-                ),
-                path_artifact_graph=path_artifact_graph,
-            )
-
-        outcome = await _run_kcl_operation(kcl_code, kcl_path, _session_outcome)
-
-        issues = _format_execution_issues(outcome)
-        if issues:
-            total = sum(len(reports) for reports in issues.values())
-            logger.info("KCL code execution reported %d issue(s)", total)
-            message = _execution_issues_message(issues)
-            return ResultZooExecuteKclLocal(ok=True, message=message)
-
-        logger.info("KCL code executed successfully")
-        return ResultZooExecuteKclLocal(
-            ok=True, message="KCL code executed successfully"
-        )
-    except Exception as e:
-        logger.info("Failed to execute KCL code: %s", e)
-        return ResultZooExecuteKclLocal(
-            ok=False, message=f"Failed to execute KCL code: {e}"
-        )
+    return await _execute_kcl_with_preflight(
+        kcl_code,
+        kcl_path,
+        session_id,
+        operation="execute_kcl",
+    )
 
 
 async def zoo_export_kcl(
@@ -1336,9 +1898,24 @@ async def zoo_export_kcl(
             logger.info("Using provided export path: %s", str(export_path.name))
 
     async with aiofiles.open(export_path, "wb") as out:
-        export_response = await _run_kcl_operation(
-            kcl_code, kcl_path, lambda session: session.export(export_format)
-        )
+        if kcl_code:
+            logger.info("Exporting KCL code to %s", str(kcl_code))
+            export_response = await _execute_with_retries(
+                kcl.execute_code_and_export,
+                kcl_code,
+                export_format,
+                _operation="export_kcl",
+            )
+        else:
+            logger.info("Exporting KCL project to %s", str(kcl_path))
+            assert kcl_path is not None  # _check_kcl_code_or_path ensures this
+            kcl_path_resolved = Path(kcl_path)
+            export_response = await _execute_with_retries(
+                kcl.execute_and_export,
+                str(kcl_path_resolved.resolve()),
+                export_format,
+                _operation="export_kcl",
+            )
         await out.write(bytes(export_response[0].contents))
 
     logger.info("KCL exported successfully to %s", str(export_path))
@@ -1489,6 +2066,21 @@ def _format_constraint_report(report: kcl.SketchConstraintReport) -> dict:
     return result
 
 
+def _constraint_report_error_family(
+    report: kcl.SketchConstraintReport,
+) -> str | None:
+    """Classify an incomplete constraint report without exposing its message."""
+    if report.is_complete:
+        return None
+    if report.kcl_error is None:
+        return "IncompleteConstraintReport"
+    if report.kcl_error.phase == "parse":
+        return "KclParseError"
+    if report.kcl_error.phase == "execution":
+        return "KclExecutionError"
+    return "KclConstraintError"
+
+
 async def zoo_get_sketch_constraint_status(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
@@ -1508,13 +2100,74 @@ async def zoo_get_sketch_constraint_status(
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
-        outcome = await _run_kcl_operation(
-            kcl_code, kcl_path, _session_outcome, allow_partial=True
-        )
-        return _format_constraint_report(outcome.sketch_constraint_report())
+        if kcl_code:
+            report = await _execute_with_retries(
+                kcl.get_sketch_constraint_status_code,
+                kcl_code,
+                _operation="get_sketch_constraint_status",
+                _result_error_family=_constraint_report_error_family,
+            )
+        else:
+            assert kcl_path is not None
+            report = await _execute_with_retries(
+                kcl.get_sketch_constraint_status,
+                str(kcl_path),
+                _operation="get_sketch_constraint_status",
+                _result_error_family=_constraint_report_error_family,
+            )
+        return _format_constraint_report(report)
     except Exception as e:
-        logger.error(e)
+        logger.error(
+            "Failed to get sketch constraint status (error_family=%s)",
+            _execution_error_family(e),
+        )
         raise ZooMCPException(f"Failed to get sketch constraint status: {e}")
+
+
+async def zoo_visualize_sketch(
+    sketch_name: str,
+    kcl_code: str | None = None,
+    kcl_path: Path | str | None = None,
+) -> bytes:
+    """Execute KCL and render one named sketch as a PNG.
+
+    The renderer is provided by ``zoo-kcl`` on ``ExecOutcome``. Sketch names
+    are the variable names assigned to sketch expressions and are also exposed
+    by :func:`zoo_get_sketch_constraint_status`.
+
+    Args:
+        sketch_name: Variable name of the sketch to render.
+        kcl_code: KCL source code to execute.
+        kcl_path: Path to a KCL file or project containing ``main.kcl``.
+
+    Returns:
+        Raw PNG bytes for the requested sketch.
+    """
+    logger.info("Visualizing sketch %s", sketch_name)
+
+    _check_kcl_code_or_path(kcl_code, kcl_path)
+
+    try:
+        if kcl_code:
+            outcome = await _execute_with_retries(
+                kcl.execute_code,
+                kcl_code,
+                _operation="visualize_sketch",
+            )
+        else:
+            assert kcl_path is not None
+            outcome = await _execute_with_retries(
+                kcl.execute,
+                str(kcl_path),
+                _operation="visualize_sketch",
+            )
+        return bytes(outcome.render_sketch_png(sketch_name))
+    except Exception as e:
+        logger.error(
+            "Failed to visualize sketch (error_family=%s)",
+            _execution_error_family(e),
+        )
+        raise ZooMCPException(f"Failed to visualize sketch: {e}")
 
 
 async def zoo_mock_execute_kcl(
@@ -1529,30 +2182,20 @@ async def zoo_mock_execute_kcl(
 
     Returns:
         tuple(bool, str): Returns ``False`` when execution aborts or reports an
-        error/fatal compilation issue. Warning-only outcomes remain successful
-        and include their rendered diagnostics in the message.
+        error/fatal compilation issue. Known mock-engine limitations are treated
+        as warnings. Warning-only outcomes remain successful and include their
+        rendered diagnostics in the message.
     """
-    logger.info("Executing KCL code")
-
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
-        if kcl_code:
-            outcome = await kcl.mock_execute_code(kcl_code)
-        else:
-            outcome = await kcl.mock_execute(str(kcl_path))
-
-        issues = _format_execution_issues(outcome)
-        if issues:
-            total = sum(len(reports) for reports in issues.values())
-            logger.info("KCL mock execution reported %d issue(s)", total)
-            has_blocking_issues = "fatal" in issues or "error" in issues
-            return not has_blocking_issues, _execution_issues_message(issues)
-
-        logger.info("KCL mock executed successfully")
-        return True, "KCL code mock executed successfully"
+        result = await _mock_execution_stage(kcl_code, kcl_path)
+        return result.status == "succeeded", _execution_result_message(result)
     except Exception as e:
-        logger.info("Failed to mock execute KCL code: %s", e)
+        logger.info(
+            "Failed to mock execute KCL code (error_family=%s)",
+            _execution_error_family(e),
+        )
         return False, f"Failed to mock execute KCL code: {e}"
 
 
@@ -1563,26 +2206,8 @@ class FaceInfo:
     face_get_center: FaceGetCenter
 
 
-def _prepare_kcl_project(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-) -> tuple[str, list[dict[str, str | list[int]]]]:
-    _check_kcl_code_or_path(kcl_code, kcl_path)
-
-    if kcl_code:
-        return "main.kcl", [
-            {
-                "path": "main.kcl",
-                "contents": list(kcl_code.encode()),
-            }
-        ]
-
-    assert kcl_path is not None
-    return load_kcl_project(kcl_path)
-
-
-def _exec_kcl_project(
-    ws: WebSocketModelingCommandsWs,
+async def _exec_kcl_project(
+    ws: ClientConnection,
     entrypoint: str,
     files: list[dict[str, str | list[int]]],
 ) -> Path:
@@ -1596,11 +2221,15 @@ def _exec_kcl_project(
             "files": files,
         },
     }
-    ws.ws.send(json.dumps(request))
-
     # Bounded by what is left of the whole call rather than per read, so the
     # frames skipped below cannot keep the loop alive indefinitely.
     deadline = _Deadline()
+    await _send_modeling_frame(
+        ws,
+        json.dumps(request),
+        deadline,
+        "KCL project execution",
+    )
 
     # This response is not represented in the generated SDK yet.
     while True:
@@ -1608,7 +2237,7 @@ def _exec_kcl_project(
         if remaining <= 0:
             raise _modeling_timeout(deadline, "KCL project execution")
         try:
-            raw_response = ws.ws.recv(timeout=remaining)
+            raw_response = await asyncio.wait_for(ws.recv(), timeout=remaining)
         except TimeoutError as error:
             raise _modeling_timeout(deadline, "KCL project execution") from error
         try:
@@ -1648,9 +2277,9 @@ def _exec_kcl_project(
 @dataclass
 class _ModelingSession:
     session_id: str
-    context: AbstractContextManager[WebSocketModelingCommandsWs]
-    websocket: WebSocketModelingCommandsWs
-    lock: Lock
+    client: AsyncKittyCAD
+    websocket: ClientConnection
+    lock: asyncio.Lock
     artifact_graph_paths: set[Path] = field(default_factory=set)
 
 
@@ -1667,48 +2296,101 @@ class _StartingModelingSession:
 
 
 _modeling_session: _ModelingSession | _StartingModelingSession | None = None
-_modeling_session_lock = Lock()
 
 
-def _modeling_websocket_context() -> AbstractContextManager[
-    WebSocketModelingCommandsWs
-]:
-    return kittycad_client.modeling.modeling_commands_ws(
-        fps=30,
-        post_effect=PostEffectType.SSAO,
-        show_grid=False,
-        unlocked_framerate=False,
-        video_res_height=1024,
-        video_res_width=1024,
-        webrtc=False,
+async def _open_modeling_websocket(client: AsyncKittyCAD) -> ClientConnection:
+    """Open the async modeling transport using an async client's credentials.
+
+    KittyCAD 1.5.0's generated ``AsyncModelingAPI.modeling_commands_ws``
+    currently returns ``None`` and constructs a relative websocket URL. Keep
+    connection setup here until that generated method is usable.
+    """
+    query = urlencode(
+        {
+            "fps": 30,
+            "post_effect": PostEffectType.SSAO,
+            "show_grid": "false",
+            "unlocked_framerate": "false",
+            "video_res_height": 1024,
+            "video_res_width": 1024,
+            "webrtc": "false",
+        }
+    )
+    url = f"{client.base_url.rstrip('/')}/ws/modeling/commands?{query}"
+    parsed_url = urlsplit(url)
+    if parsed_url.scheme == "https":
+        websocket_scheme = "wss"
+        websocket_ssl = client.verify_ssl
+    elif parsed_url.scheme == "http":
+        websocket_scheme = "ws"
+        websocket_ssl = None
+    else:
+        raise ZooMCPException(f"Unsupported Zoo API URL scheme '{parsed_url.scheme}'")
+    websocket_url = urlunsplit(parsed_url._replace(scheme=websocket_scheme))
+    return await connect(
+        websocket_url,
+        additional_headers=client.get_headers(),
+        close_timeout=120,
+        max_size=None,
+        ssl=websocket_ssl,
     )
 
 
-def _close_modeling_session(session: _ModelingSession) -> None:
+async def _close_modeling_session(session: _ModelingSession) -> None:
     """Close one session's websocket, waiting for any in-flight command."""
     try:
-        with session.lock:
-            session.context.__exit__(None, None, None)
+        async with session.lock:
+            await session.websocket.close()
     finally:
-        _unlink_modeling_session_artifact_graphs(session)
+        try:
+            await session.client.aclose()
+        finally:
+            _unlink_modeling_session_artifact_graphs(session)
 
 
-def _discard_modeling_websocket(session: _ModelingSession) -> None:
+def _abort_modeling_websocket(session: _ModelingSession) -> None:
+    """Abort a socket immediately when awaiting its close isn't safe."""
+    try:
+        session.websocket.transport.abort()
+    except Exception as error:
+        logger.warning(
+            "Failed to abort modeling session %s websocket: %s",
+            session.session_id,
+            error,
+        )
+
+
+async def _discard_modeling_websocket(
+    session: _ModelingSession,
+    *,
+    abort: bool = False,
+) -> None:
     """Close a session's websocket from inside its own command.
 
     Deliberately not _close_modeling_session: that waits on ``session.lock``,
     which the command calling this still holds, so it would deadlock.
     """
-    try:
-        session.context.__exit__(None, None, None)
-    except Exception as error:
-        # The socket is being abandoned anyway; a failure closing it must not
-        # replace the timeout the caller is about to see.
-        logger.warning(
-            "Failed to close timed-out modeling session %s: %s",
-            session.session_id,
-            error,
+    if abort:
+        _abort_modeling_websocket(session)
+        resources = (("async client", session.client.aclose),)
+    else:
+        resources = (
+            ("websocket", session.websocket.close),
+            ("async client", session.client.aclose),
         )
+
+    for resource, close in resources:
+        try:
+            await close()
+        except Exception as error:
+            # The socket is being abandoned anyway; a failure closing it must not
+            # replace the timeout the caller is about to see.
+            logger.warning(
+                "Failed to close modeling session %s %s: %s",
+                session.session_id,
+                resource,
+                error,
+            )
 
 
 def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
@@ -1717,77 +2399,78 @@ def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
     session.artifact_graph_paths.clear()
 
 
-def zoo_start_modeling_session() -> str:
+async def zoo_start_modeling_session() -> str:
     global _modeling_session
 
     session_id = str(uuid4())
     starting = _StartingModelingSession(session_id=session_id)
-    with _modeling_session_lock:
-        if _modeling_session is not None:
-            # Name the blocker so a caller that lost track of it, or that is
-            # blocked by a start whose handshake is hung, can stop it.
-            raise ZooMCPException(
-                f"A modeling session is already open or starting "
-                f"('{_modeling_session.session_id}'); "
-                "stop it before starting another"
-            )
-        _modeling_session = starting
+    if _modeling_session is not None:
+        # Name the blocker so a caller that lost track of it, or that is
+        # blocked by a start whose handshake is hung, can stop it.
+        raise ZooMCPException(
+            f"A modeling session is already open or starting "
+            f"('{_modeling_session.session_id}'); "
+            "stop it before starting another"
+        )
+    _modeling_session = starting
 
+    client: AsyncKittyCAD | None = None
     try:
-        context = _modeling_websocket_context()
-        websocket = context.__enter__()
+        client = AsyncKittyCAD(verify_ssl=ctx)
+        websocket = await _open_modeling_websocket(client)
     except BaseException:
-        with _modeling_session_lock:
-            if _modeling_session is starting:
-                _modeling_session = None
+        if _modeling_session is starting:
+            _modeling_session = None
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception as error:
+                logger.warning("Failed to close modeling client: %s", error)
         raise
 
     session = _ModelingSession(
         session_id=session_id,
-        context=context,
+        client=client,
         websocket=websocket,
-        lock=Lock(),
+        lock=asyncio.Lock(),
     )
-    with _modeling_session_lock:
-        if _modeling_session is starting:
-            _modeling_session = session
-            return session_id
+    if _modeling_session is starting:
+        _modeling_session = session
+        return session_id
 
-    context.__exit__(None, None, None)
+    await websocket.close()
+    await client.aclose()
     raise ZooMCPException("Modeling session start was canceled")
 
 
 def zoo_get_modeling_sessions() -> list[str]:
     """Return the IDs of modeling sessions owned by this server process."""
-    with _modeling_session_lock:
-        if not isinstance(_modeling_session, _ModelingSession):
-            return []
-        return [_modeling_session.session_id]
+    if not isinstance(_modeling_session, _ModelingSession):
+        return []
+    return [_modeling_session.session_id]
 
 
-def zoo_stop_modeling_session(session_id: str) -> None:
+async def zoo_stop_modeling_session(session_id: str) -> None:
     global _modeling_session
 
-    with _modeling_session_lock:
-        if _modeling_session is None or _modeling_session.session_id != session_id:
-            raise ZooMCPException(f"Unknown modeling session '{session_id}'")
-        session = _modeling_session
-        _modeling_session = None
+    if _modeling_session is None or _modeling_session.session_id != session_id:
+        raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+    session = _modeling_session
+    _modeling_session = None
 
     if isinstance(session, _StartingModelingSession):
         logger.info("Canceled starting modeling session %s", session_id)
         return
 
-    _close_modeling_session(session)
+    await _close_modeling_session(session)
 
 
-def zoo_stop_all_modeling_sessions() -> None:
+async def zoo_stop_all_modeling_sessions() -> None:
     """Close the persistent modeling session, normally during server shutdown."""
     global _modeling_session
 
-    with _modeling_session_lock:
-        session = _modeling_session
-        _modeling_session = None
+    session = _modeling_session
+    _modeling_session = None
 
     if session is None:
         return
@@ -1795,24 +2478,43 @@ def zoo_stop_all_modeling_sessions() -> None:
         # Its own starter closes the half-open socket; see zoo_start_modeling_session.
         return
     try:
-        _close_modeling_session(session)
+        await _close_modeling_session(session)
     except Exception as error:
         logger.warning("Failed to close modeling session: %s", error)
+
+
+def _abort_all_modeling_sessions() -> None:
+    """Synchronously abandon a session during interpreter teardown.
+
+    Async websocket and client objects belong to the server's event loop and
+    cannot be awaited from the new loop an ``atexit`` hook would have to create.
+    The normal lifespan shutdown remains responsible for graceful cleanup.
+    """
+    global _modeling_session
+
+    session = _modeling_session
+    _modeling_session = None
+    if not isinstance(session, _ModelingSession):
+        return
+
+    try:
+        _abort_modeling_websocket(session)
+    finally:
+        _unlink_modeling_session_artifact_graphs(session)
 
 
 def _evict_modeling_session(session_id: str) -> None:
     """Drop a session whose websocket is no longer usable."""
     global _modeling_session
 
-    with _modeling_session_lock:
-        if (
-            isinstance(_modeling_session, _ModelingSession)
-            and _modeling_session.session_id == session_id
-        ):
-            session = _modeling_session
-            _modeling_session = None
-        else:
-            session = None
+    if (
+        isinstance(_modeling_session, _ModelingSession)
+        and _modeling_session.session_id == session_id
+    ):
+        session = _modeling_session
+        _modeling_session = None
+    else:
+        session = None
 
     if session is not None:
         _unlink_modeling_session_artifact_graphs(session)
@@ -1823,68 +2525,88 @@ def _evict_modeling_session(session_id: str) -> None:
 # engine scene has the same model.
 
 
-@contextmanager
-def _modeling_websocket(session_id: str) -> Iterator[WebSocketModelingCommandsWs]:
-    with _modeling_session_lock:
-        active_session = _modeling_session
-        if (
-            not isinstance(active_session, _ModelingSession)
-            or active_session.session_id != session_id
-        ):
-            raise ZooMCPException(f"Unknown modeling session '{session_id}'")
-        session = active_session
+@asynccontextmanager
+async def _modeling_websocket(session_id: str) -> AsyncIterator[ClientConnection]:
+    active_session = _modeling_session
+    if (
+        not isinstance(active_session, _ModelingSession)
+        or active_session.session_id != session_id
+    ):
+        raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+    session = active_session
 
-    # Acquired outside the state lock so waiting on an in-flight command does
-    # not block session cleanup from removing the session from active state.
-    session.lock.acquire()
-    try:
-        yield session.websocket
-    except ZooMCPTimeoutError:
-        # The engine still owes a response to the command that gave up. Its
-        # request_id no longer matches anything a later command waits for, so
-        # the backlog would silently eat the next command's budget, and the
-        # engine keeps working on the abandoned command either way. Drop the
-        # session rather than hand it back.
-        _evict_modeling_session(session_id)
-        _discard_modeling_websocket(session)
-        raise
-    except (WebSocketException, OSError) as error:
-        _evict_modeling_session(session_id)
-        raise ZooMCPException(
-            f"Modeling session '{session_id}' is no longer connected "
-            f"({error}); start a new session"
-        ) from error
-    finally:
-        session.lock.release()
+    # Session state has no awaits around its reads and writes, while this lock
+    # serializes commands that yield during websocket I/O.
+    async with session.lock:
+        try:
+            yield session.websocket
+        except ZooMCPTimeoutError:
+            # The engine still owes a response to the command that gave up. Its
+            # request_id no longer matches anything a later command waits for, so
+            # the backlog would silently eat the next command's budget, and the
+            # engine keeps working on the abandoned command either way. Drop the
+            # session rather than hand it back.
+            _evict_modeling_session(session_id)
+            await _discard_modeling_websocket(session, abort=True)
+            raise
+        except asyncio.CancelledError:
+            # A canceled send or receive can leave a command outstanding. Do not
+            # hand that transport to a later call whose view of scene state may
+            # no longer match the engine's.
+            _evict_modeling_session(session_id)
+            await _discard_modeling_websocket(session, abort=True)
+            raise
+        except (WebSocketException, OSError) as error:
+            _evict_modeling_session(session_id)
+            await _discard_modeling_websocket(session)
+            raise ZooMCPException(
+                f"Modeling session '{session_id}' is no longer connected "
+                f"({error}); start a new session"
+            ) from error
 
 
-def zoo_exec_kcl_project(
+async def zoo_exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
-) -> Path:
-    entrypoint, files = _prepare_kcl_project(kcl_code, kcl_path)
+) -> ResultZooExecuteKcl:
+    """Mock preflight a captured project, then execute it in a modeling session."""
+    return await _execute_kcl_with_preflight(
+        kcl_code,
+        kcl_path,
+        session_id,
+        operation="exec_kcl_project",
+    )
 
-    with _modeling_websocket(session_id) as ws:
-        path = _exec_kcl_project(ws, entrypoint, files)
-        with _modeling_session_lock:
-            if (
-                not isinstance(_modeling_session, _ModelingSession)
-                or _modeling_session.session_id != session_id
-            ):
-                path.unlink(missing_ok=True)
-                raise ZooMCPException(f"Unknown modeling session '{session_id}'")
-            _modeling_session.artifact_graph_paths.add(path)
+
+async def _execute_resolved_kcl_project(
+    session_id: str,
+    entrypoint: str,
+    files: list[dict[str, str | list[int]]],
+) -> Path:
+    """Execute already-preflighted input and register its session artifact graph."""
+    async with _modeling_websocket(session_id) as ws:
+        path = await _exec_kcl_project(ws, entrypoint, files)
+        if (
+            not isinstance(_modeling_session, _ModelingSession)
+            or _modeling_session.session_id != session_id
+        ):
+            path.unlink(missing_ok=True)
+            raise ZooMCPException(f"Unknown modeling session '{session_id}'")
+        _modeling_session.artifact_graph_paths.add(path)
         return path
 
 
-def zoo_face_info(
+async def zoo_face_info(
     face_id: Uuid,
     session_id: str,
 ) -> FaceInfo:
-    with _modeling_websocket(session_id) as ws:
+    async with _modeling_websocket(session_id) as ws:
+        # One budget covers all three requests and replies.
+        deadline = _Deadline()
         cmd_id_face_get_position = ModelingCmdId(uuid4())
-        ws.send(
+        await _send_modeling_frame(
+            ws,
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(
@@ -1895,11 +2617,14 @@ def zoo_face_info(
                     ),
                     cmd_id=cmd_id_face_get_position,
                 )
-            )
+            ).model_dump_json(exclude_none=True),
+            deadline,
+            "face info",
         )
 
         cmd_id_face_get_gradient = ModelingCmdId(uuid4())
-        ws.send(
+        await _send_modeling_frame(
+            ws,
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(
@@ -1910,32 +2635,34 @@ def zoo_face_info(
                     ),
                     cmd_id=cmd_id_face_get_gradient,
                 )
-            )
+            ).model_dump_json(exclude_none=True),
+            deadline,
+            "face info",
         )
 
         cmd_id_face_get_center = ModelingCmdId(uuid4())
-        ws.send(
+        await _send_modeling_frame(
+            ws,
             WebSocketRequest(
                 OptionModelingCmdReq(
                     cmd=ModelingCmd(OptionFaceGetCenter(object_id=face_id)),
                     cmd_id=cmd_id_face_get_center,
                 )
-            )
+            ).model_dump_json(exclude_none=True),
+            deadline,
+            "face info",
         )
 
         face_get_position: FaceGetPosition | Literal[False] = False
         face_get_gradient: FaceGetGradient | Literal[False] = False
         face_get_center: FaceGetCenter | Literal[False] = False
 
-        # Shared across all three replies, as for any other single tool call.
-        deadline = _Deadline()
-
         while (
             face_get_position is False
             or face_get_gradient is False
             or face_get_center is False
         ):
-            message = _recv_modeling_frame(ws, deadline, "face info").root
+            message = (await _recv_modeling_frame(ws, deadline, "face info")).root
 
             # Match on request_id first; see _send_modeling_command.
             request_id = getattr(message, "request_id", None)
@@ -1986,7 +2713,7 @@ _ModelingResponseT = TypeVar("_ModelingResponseT")
 
 
 class _Deadline:
-    """A monotonic wall-clock budget shared by every read in one tool call.
+    """A monotonic wall-clock budget shared by websocket I/O in one tool call.
 
     Monotonic so a clock adjustment mid-import cannot extend or collapse the
     budget, and shared so that a multi-command call like a multiview snapshot
@@ -2012,34 +2739,48 @@ class _Deadline:
 
 def _modeling_timeout(deadline: _Deadline, description: str) -> ZooMCPTimeoutError:
     return ZooMCPTimeoutError(
-        f"The modeling engine did not return a {description} response within "
+        f"The modeling engine did not complete {description} within "
         f"{deadline.timeout:g}s (waited {deadline.elapsed:.1f}s). The modeling "
         "session was closed; start a new one and retry, and simplify or shrink "
         "the input if it fails again."
     )
 
 
-def _recv_modeling_frame(
-    ws: WebSocketModelingCommandsWs,
+async def _recv_modeling_frame(
+    ws: ClientConnection,
     deadline: _Deadline,
     description: str,
 ) -> WebSocketResponse:
     """Read one frame, bounded by what is left of the whole call's budget.
 
-    The SDK applies its own recv timeout per call, which cannot bound a loop
-    that reads until its command's frame arrives: a live session interleaves
-    unsolicited frames every few seconds, and each one starts a fresh timeout.
-    Passing the remaining budget makes those frames consume it instead.
+    A live session interleaves unsolicited frames every few seconds. Applying
+    the remaining whole-call budget to each read makes those frames consume it
+    instead of restarting a fixed per-read timeout.
     """
     remaining = deadline.remaining
     if remaining <= 0:
         raise _modeling_timeout(deadline, description)
 
-    # Reaching into the SDK's per-read timeout is how the budget gets applied;
-    # recv() takes no timeout argument of its own.
-    ws._recv_timeout = remaining
     try:
-        return ws.recv()
+        raw_response = await asyncio.wait_for(ws.recv(), timeout=remaining)
+    except TimeoutError as error:
+        raise _modeling_timeout(deadline, description) from error
+    return WebSocketResponse.model_validate_json(raw_response)
+
+
+async def _send_modeling_frame(
+    ws: ClientConnection,
+    payload: str | bytes,
+    deadline: _Deadline,
+    description: str,
+) -> None:
+    """Send one frame within the same wall-clock budget as its response."""
+    remaining = deadline.remaining
+    if remaining <= 0:
+        raise _modeling_timeout(deadline, description)
+
+    try:
+        await asyncio.wait_for(ws.send(payload), timeout=remaining)
     except TimeoutError as error:
         raise _modeling_timeout(deadline, description) from error
 
@@ -2057,8 +2798,8 @@ def _format_websocket_failure(message: object) -> str:
     return f"The modeling engine reported a failure: {rendered}"
 
 
-def _await_modeling_response(
-    ws: WebSocketModelingCommandsWs,
+async def _await_modeling_response(
+    ws: ClientConnection,
     command_id: ModelingCmdId,
     expected_response: type[_ModelingResponseT],
     response_description: str,
@@ -2066,7 +2807,7 @@ def _await_modeling_response(
 ) -> _ModelingResponseT:
     """Read until the typed response for ``command_id`` arrives or time runs out."""
     while True:
-        message = _recv_modeling_frame(ws, deadline, response_description).root
+        message = (await _recv_modeling_frame(ws, deadline, response_description)).root
 
         request_id = getattr(message, "request_id", None)
 
@@ -2096,8 +2837,8 @@ def _await_modeling_response(
         return modeling_response
 
 
-def _send_modeling_command(
-    ws: WebSocketModelingCommandsWs,
+async def _send_modeling_command(
+    ws: ClientConnection,
     command: ModelingCmd,
     expected_response: type[_ModelingResponseT],
     response_description: str,
@@ -2111,16 +2852,19 @@ def _send_modeling_command(
     if deadline is None:
         deadline = _Deadline()
     command_id = ModelingCmdId(uuid4())
-    ws.send(
+    await _send_modeling_frame(
+        ws,
         WebSocketRequest(
             OptionModelingCmdReq(
                 cmd=command,
                 cmd_id=command_id,
             )
-        )
+        ).model_dump_json(exclude_none=True),
+        deadline,
+        response_description,
     )
 
-    return _await_modeling_response(
+    return await _await_modeling_response(
         ws,
         command_id,
         expected_response,
@@ -2129,15 +2873,15 @@ def _send_modeling_command(
     )
 
 
-def zoo_execute_modeling_command(
+async def zoo_execute_modeling_command(
     command: ModelingCmd,
     expected_response: type[_ModelingResponseT],
     response_description: str,
     session_id: str,
 ) -> _ModelingResponseT:
     """Run one modeling command in an existing session."""
-    with _modeling_websocket(session_id) as ws:
-        return _send_modeling_command(
+    async with _modeling_websocket(session_id) as ws:
+        return await _send_modeling_command(
             ws,
             command,
             expected_response,
@@ -2146,7 +2890,7 @@ def zoo_execute_modeling_command(
         )
 
 
-def zoo_snapshot(
+async def zoo_snapshot(
     session_id: str,
     views: list[OptionDefaultCameraLookAt] | None = None,
     max_image_dimension: int = 512,
@@ -2170,14 +2914,15 @@ def zoo_snapshot(
 
     Edge lines are hidden unless ``highlight_edges`` is True, so that entities
     highlighted via highlight_set_entities stand out instead of competing with
-    the outline drawn on every edge in the scene.
+    the outline drawn on every edge in the scene. Order-independent transparency
+    is enabled so material opacity is represented in the captured image.
     """
     # One budget for the whole capture. A per-command budget would multiply by
-    # the command count, which for a four-view capture is fourteen commands.
+    # the command count, which for a four-view capture is fifteen commands.
     deadline = _Deadline()
 
-    with _modeling_websocket(session_id) as ws:
-        _send_modeling_command(
+    async with _modeling_websocket(session_id) as ws:
+        await _send_modeling_command(
             ws,
             ModelingCmd(OptionDefaultCameraSetOrthographic()),
             ResponseDefaultCameraSetOrthographic,
@@ -2186,11 +2931,18 @@ def zoo_snapshot(
         )
 
         # Scene-wide, so it is set once rather than per view.
-        _send_modeling_command(
+        await _send_modeling_command(
             ws,
             ModelingCmd(OptionEdgeLinesVisible(hidden=not highlight_edges)),
             ResponseEdgeLinesVisible,
             "edge line visibility",
+            deadline,
+        )
+        await _send_modeling_command(
+            ws,
+            ModelingCmd(OptionSetOrderIndependentTransparency(enabled=True)),
+            ResponseSetOrderIndependentTransparency,
+            "order-independent transparency",
             deadline,
         )
 
@@ -2199,7 +2951,7 @@ def zoo_snapshot(
         jpeg_contents_list: list[bytes] = []
         for view in views or [None]:
             if view is not None:
-                _send_modeling_command(
+                await _send_modeling_command(
                     ws,
                     ModelingCmd(view),
                     ResponseDefaultCameraLookAt,
@@ -2207,7 +2959,7 @@ def zoo_snapshot(
                     deadline,
                 )
             elif zoom:
-                _send_modeling_command(
+                await _send_modeling_command(
                     ws,
                     ModelingCmd(OptionViewIsometric()),
                     ResponseViewIsometric,
@@ -2216,7 +2968,7 @@ def zoo_snapshot(
                 )
 
             if zoom:
-                _send_modeling_command(
+                await _send_modeling_command(
                     ws,
                     ModelingCmd(zoom_to_fit),
                     ResponseZoomToFit,
@@ -2224,7 +2976,7 @@ def zoo_snapshot(
                     deadline,
                 )
 
-            response = _send_modeling_command(
+            response = await _send_modeling_command(
                 ws,
                 ModelingCmd(OptionTakeSnapshot(format=ImageFormat.JPEG)),
                 ResponseTakeSnapshot,
@@ -2233,16 +2985,21 @@ def zoo_snapshot(
             )
             jpeg_contents_list.append(response.data.contents)
 
-    return resize_image(
-        create_image_collage(jpeg_contents_list),
-        max_image_dimension,
+    return await asyncio.to_thread(
+        lambda: resize_image(
+            create_image_collage(jpeg_contents_list),
+            max_image_dimension,
+        )
     )
 
 
-def _list_org_datasets_raw(lookup_enabled: bool | None) -> list[dict[str, str | None]]:
+async def _list_org_datasets_raw(
+    client: AsyncKittyCAD,
+    lookup_enabled: bool | None,
+) -> list[dict[str, str | None]]:
     """List datasets without validating fields unrelated to this tool's output."""
-    client = kittycad_client.get_http_client()
-    url = f"{kittycad_client.base_url}/org/datasets"
+    http_client = client.get_http_client()
+    url = f"{client.base_url}/org/datasets"
     page_token: str | None = None
     seen_page_tokens: set[str] = set()
     datasets: list[dict[str, str | None]] = []
@@ -2255,9 +3012,9 @@ def _list_org_datasets_raw(lookup_enabled: bool | None) -> list[dict[str, str | 
             params["lookup_enabled"] = "true" if lookup_enabled else "false"
         if page_token is not None:
             params["page_token"] = page_token
-        response = client.get(
+        response = await http_client.get(
             url=url,
-            headers=kittycad_client.get_headers(),
+            headers=client.get_headers(),
             params=params,
         )
         if not response.is_success:
@@ -2307,7 +3064,7 @@ def _org_datasets_empty_or_raise(
     raise ZooMCPException(f"Failed to list org datasets: {exc}") from exc
 
 
-def zoo_list_org_datasets(
+async def zoo_list_org_datasets(
     lookup_enabled: bool | None = True,
 ) -> list[dict[str, str | None]]:
     """List all datasets visible to the org tied to the current ZOO_API_TOKEN.
@@ -2322,30 +3079,32 @@ def zoo_list_org_datasets(
         entries, possibly empty.
     """
     logger.info("Listing org datasets (lookup_enabled=%s)", lookup_enabled)
-    use_raw_fallback = False
-    datasets = []
-    try:
-        datasets = list(
-            kittycad_client.orgs.list_org_datasets(
-                limit=None, page_token=None, lookup_enabled=lookup_enabled
-            )
-        )
-    except ValueError as exc:
-        logger.warning(
-            "SDK could not validate org datasets; falling back to raw JSON: %s",
-            exc,
-        )
-        use_raw_fallback = True
-    except KittyCADClientError as exc:
-        return _org_datasets_empty_or_raise(exc)
-
-    # Run the fallback outside the handler above so its own client errors still
-    # get the 404-means-empty treatment instead of escaping uncaught.
-    if use_raw_fallback:
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        use_raw_fallback = False
+        datasets = []
         try:
-            return _list_org_datasets_raw(lookup_enabled)
+            datasets = [
+                dataset
+                async for dataset in client.orgs.list_org_datasets(
+                    limit=None, page_token=None, lookup_enabled=lookup_enabled
+                )
+            ]
+        except ValueError as exc:
+            logger.warning(
+                "SDK could not validate org datasets; falling back to raw JSON: %s",
+                exc,
+            )
+            use_raw_fallback = True
         except KittyCADClientError as exc:
             return _org_datasets_empty_or_raise(exc)
+
+        # Run the fallback outside the handler above so its own client errors still
+        # get the 404-means-empty treatment instead of escaping uncaught.
+        if use_raw_fallback:
+            try:
+                return await _list_org_datasets_raw(client, lookup_enabled)
+            except KittyCADClientError as exc:
+                return _org_datasets_empty_or_raise(exc)
 
     return [
         {"id": str(d.id), "name": d.name, "description": d.description}
@@ -2353,7 +3112,7 @@ def zoo_list_org_datasets(
     ]
 
 
-def zoo_list_org_skills() -> list[dict[str, str]]:
+async def zoo_list_org_skills() -> list[dict[str, str]]:
     """List all skills visible to the org tied to the current ZOO_API_TOKEN.
 
     Returns:
@@ -2361,12 +3120,13 @@ def zoo_list_org_skills() -> list[dict[str, str]]:
         "markdown": <str>} entries, possibly empty.
     """
     logger.info("Listing org skills")
-    try:
-        skills = kittycad_client.orgs.list_org_skills()
-    except KittyCADClientError as exc:
-        if exc.status_code == 404:
-            return []
-        raise ZooMCPException(f"Failed to list org skills: {exc}") from exc
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        try:
+            skills = await client.orgs.list_org_skills()
+        except KittyCADClientError as exc:
+            if exc.status_code == 404:
+                return []
+            raise ZooMCPException(f"Failed to list org skills: {exc}") from exc
 
     return [
         {
@@ -2379,7 +3139,7 @@ def zoo_list_org_skills() -> list[dict[str, str]]:
     ]
 
 
-def zoo_search_org_dataset_semantic(
+async def zoo_search_org_dataset_semantic(
     dataset_id: str,
     query: str,
     limit: int | None = None,
@@ -2398,12 +3158,15 @@ def zoo_search_org_dataset_semantic(
     logger.info(
         "Semantic search in dataset %s for query of length %d", dataset_id, len(query)
     )
-    try:
-        matches = kittycad_client.orgs.search_org_dataset_semantic(
-            id=Uuid(dataset_id), q=query, limit=limit
-        )
-    except KittyCADClientError as exc:
-        raise ZooMCPException(f"Failed to search dataset {dataset_id}: {exc}") from exc
+    async with AsyncKittyCAD(verify_ssl=ctx) as client:
+        try:
+            matches = await client.orgs.search_org_dataset_semantic(
+                id=Uuid(dataset_id), q=query, limit=limit
+            )
+        except KittyCADClientError as exc:
+            raise ZooMCPException(
+                f"Failed to search dataset {dataset_id}: {exc}"
+            ) from exc
 
     return [
         {

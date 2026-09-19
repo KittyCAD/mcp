@@ -83,7 +83,8 @@ from kittycad.models.ok_modeling_cmd_response import (
     OptionSetSelectionFilter as ResponseSetSelectionFilter,
 )
 from kittycad.models.uuid import Uuid
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ImageContent
 
 from zoo_mcp import ZooMCPException, logger
@@ -109,7 +110,7 @@ from zoo_mcp.zoo_tools import (
     CameraView,
     FaceInfo,
     ResultZooExecuteKcl,
-    ResultZooExecuteKclLocal,
+    _abort_all_modeling_sessions,
     zoo_calculate_bounding_box_cad,
     zoo_calculate_bounding_box_kcl,
     zoo_calculate_cad_physical_properties,
@@ -137,6 +138,7 @@ from zoo_mcp.zoo_tools import (
     zoo_start_modeling_session,
     zoo_stop_all_modeling_sessions,
     zoo_stop_modeling_session,
+    zoo_visualize_sketch,
 )
 
 
@@ -175,7 +177,7 @@ async def _ensure_kcl_indexes() -> None:
 
 
 @asynccontextmanager
-async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
+async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
     """Eagerly start index population when the server starts.
 
     Tools still ``await _ensure_kcl_indexes()`` so they wait for completion
@@ -187,7 +189,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        zoo_stop_all_modeling_sessions()
+        await zoo_stop_all_modeling_sessions()
         if _kcl_index_task is not None and not _kcl_index_task.done():
             _kcl_index_task.cancel()
         _kcl_index_task = None
@@ -195,7 +197,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
         KCLSamples._instance = None
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     name="Zoo MCP Server",
     log_level="INFO",
     lifespan=_lifespan,
@@ -211,24 +213,12 @@ async def _modeling_command(
     response_description: str,
     session_id: str,
 ) -> _ModelingResponseT:
-    """Run a modeling command without holding the event loop.
-
-    The modeling helpers read their websocket synchronously. Called inline from
-    an async tool they stall the whole server rather than just their own call:
-    MCP dispatches every tool handler onto one event loop, so a blocked read
-    starves the other in-flight tools, the stdin reader, and any cancellation
-    the client sends. Handing the read to a worker thread keeps this call
-    awaitable, so it is the tool's deadline that ends a stalled command.
-    """
-    # Called through a closure so the command's response type is resolved here
-    # rather than lost passing a generic function to to_thread.
-    return await asyncio.to_thread(
-        lambda: zoo_execute_modeling_command(
-            command,
-            expected_response,
-            response_description,
-            session_id,
-        )
+    """Run a modeling command through the asynchronous websocket."""
+    return await zoo_execute_modeling_command(
+        command,
+        expected_response,
+        response_description,
+        session_id,
     )
 
 
@@ -512,32 +502,38 @@ async def execute_kcl(
 ) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
+    Executing kcl_code does not save a .kcl source file. For model creation,
+    save the source and required project files with the client's authorized
+    file-editing tools, then validate the saved project using kcl_path and
+    include the editable KCL files in the handoff.
+
       Session executions save the artifact graph to a temporary JSON file and
       return its path. Local executions do not produce an artifact graph and can
       have large network overhead depending on the model.
 
     Args:
-        kcl_code (str | None): The KCL code to execute.
-        kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file.
+        kcl_code (str | None): Self-contained KCL code to execute. Standard-library imports are allowed; filesystem imports require kcl_path.
+        kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: An open modeling session in which to execute the KCL.
 
     Returns:
-        ResultZooExecuteKcl: The execution status and message. Session executions
-                            also include the artifact graph's JSON file path.
+        ResultZooExecuteKcl: Separate mock_preflight and real_execution outcomes,
+                            each with status, message, and diagnostics. Mock errors
+                            return immediately with real_execution not_run; mock
+                            warnings remain visible and allow real execution.
+                            Known mock-engine limitations are warnings.
+                            Session successes include path_artifact_graph.
+                            Transient local failures may retry real execution
+                            without repeating preflight.
     """
 
     logger.info("execute_kcl tool called")
 
-    try:
-        return await zoo_execute_kcl(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            session_id=session_id,
-        )
-    except Exception as e:
-        return ResultZooExecuteKclLocal(
-            ok=False, message=f"Failed to execute KCL code: {e}"
-        )
+    return await zoo_execute_kcl(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -545,26 +541,28 @@ async def exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
-) -> str:
-    """Run a KCL project on the server side and save its artifact graph.
+) -> ResultZooExecuteKcl:
+    """Mock preflight a KCL project, then run it in the session and save its artifact graph.
+
+    Both stages use the same captured project. Mock errors return immediately
+    without starting real execution. Mock warnings remain visible and allow it.
+    Known mock-engine limitations are reported as warnings for real execution.
 
     Args:
-        kcl_code (str | None): KCL code to run as a single-file project.
-        kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+        kcl_code (str | None): Self-contained KCL code to run as a single-file project. Standard-library imports are allowed; filesystem imports require kcl_path.
+        kcl_path (str | None): A .kcl file or project directory containing main.kcl. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: The modeling session in which to execute the project.
 
     Returns:
-        str: The path to the JSON file containing the artifact graph.
+        ResultZooExecuteKcl: Separate mock_preflight and real_execution outcomes,
+                            each with status, message, and diagnostics. Session
+                            success includes path_artifact_graph. Mock failures
+                            set real_execution.status to not_run.
     """
     logger.info("exec_kcl_project tool called")
 
-    return str(
-        await asyncio.to_thread(
-            zoo_exec_kcl_project,
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            session_id=session_id,
-        )
+    return await zoo_exec_kcl_project(
+        kcl_code=kcl_code, kcl_path=kcl_path, session_id=session_id
     )
 
 
@@ -587,7 +585,7 @@ async def start_modeling_session() -> str:
         str: The session ID to pass to session-aware modeling tools.
     """
     logger.info("start_modeling_session tool called")
-    return await asyncio.to_thread(zoo_start_modeling_session)
+    return await zoo_start_modeling_session()
 
 
 @mcp.tool()
@@ -619,9 +617,7 @@ async def import_cad_file(session_id: str, input_file: str) -> str:
         str: The modeling engine ID of the imported object.
     """
     logger.info("import_cad_file tool called for file: %s", input_file)
-    return await asyncio.to_thread(
-        zoo_import_cad_file, session_id=session_id, input_file=input_file
-    )
+    return await zoo_import_cad_file(session_id=session_id, input_file=input_file)
 
 
 @mcp.tool()
@@ -639,7 +635,7 @@ async def stop_modeling_session(session_id: str) -> None:
         None
     """
     logger.info("stop_modeling_session tool called")
-    await asyncio.to_thread(zoo_stop_modeling_session, session_id)
+    await zoo_stop_modeling_session(session_id)
 
 
 @mcp.tool()
@@ -650,6 +646,10 @@ async def export_kcl(
     export_format: str | None = None,
 ) -> str:
     """Export KCL code to a CAD file. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
+
+    This tool does not save editable KCL source. For model creation, include
+    the saved KCL project alongside any requested CAD exports unless the user
+    explicitly requests export-only output.
 
     Args:
         kcl_code (str | None): The KCL code to export to a CAD file.
@@ -733,6 +733,46 @@ async def get_sketch_constraint_status(
 
 
 @mcp.tool()
+async def visualize_sketch(
+    sketch_name: str,
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    output_path: str | None = None,
+) -> ImageContent | str:
+    """Render a named 2D KCL sketch as a solver-debug PNG.
+
+    The image shows sketch geometry and solver freedom without opening a
+    modeling session. ``sketch_name`` is the variable assigned to the sketch,
+    such as ``profile`` in ``profile = sketch(on = XY) { ... }``. Use
+    ``get_sketch_constraint_status`` to discover sketch names when needed.
+
+    Args:
+        sketch_name: Variable name of the sketch to render.
+        kcl_code: KCL source code containing the sketch.
+        kcl_path: Path to a KCL file or project containing ``main.kcl``.
+        output_path: If provided, write the PNG to this file or directory and
+            return its absolute path. A directory receives ``image.png``. If
+            omitted, return the PNG inline as ImageContent.
+
+    Returns:
+        The inline PNG, its saved absolute path, or an error message.
+    """
+    logger.info("visualize_sketch tool called for sketch: %s", sketch_name)
+
+    try:
+        image = await zoo_visualize_sketch(
+            sketch_name=sketch_name,
+            kcl_code=kcl_code,
+            kcl_path=kcl_path,
+        )
+        if output_path is not None:
+            return save_image_bytes_to_disk(image, output_path, image_format="png")
+        return encode_image(image, image_format="png")
+    except Exception as e:
+        return f"There was an error visualizing the sketch: {e}"
+
+
+@mcp.tool()
 async def get_face_info(
     face_id: str,
     session_id: str,
@@ -751,11 +791,7 @@ async def get_face_info(
     """
     logger.info("get_face_info tool called for face_id=%s", face_id)
 
-    return await asyncio.to_thread(
-        zoo_face_info,
-        face_id=Uuid(face_id),
-        session_id=session_id,
-    )
+    return await zoo_face_info(face_id=Uuid(face_id), session_id=session_id)
 
 
 @mcp.tool()
@@ -1346,10 +1382,13 @@ async def snapshot(
     """
     logger.info("snapshot tool called")
 
-    image = await asyncio.to_thread(
-        zoo_snapshot,
+    try:
+        views = _resolve_camera_views(camera_view)
+    except ZooMCPException as error:
+        raise ToolError(str(error)) from error
+    image = await zoo_snapshot(
         session_id=session_id,
-        views=_resolve_camera_views(camera_view),
+        views=views,
         max_image_dimension=max_image_dimension,
         padding=padding,
         zoom=zoom,
@@ -1455,7 +1494,7 @@ async def list_org_datasets() -> list[dict] | str:
     logger.info("list_org_datasets tool called")
 
     try:
-        return zoo_list_org_datasets()
+        return await zoo_list_org_datasets()
     except Exception as e:
         return f"There was an error listing org datasets: {e}"
 
@@ -1475,7 +1514,7 @@ async def list_org_skills() -> list[dict] | str:
     logger.info("list_org_skills tool called")
 
     try:
-        return zoo_list_org_skills()
+        return await zoo_list_org_skills()
     except Exception as e:
         return f"There was an error listing org skills: {e}"
 
@@ -1504,7 +1543,7 @@ async def search_org_dataset_semantic(
     logger.info("search_org_dataset_semantic tool called for dataset_id=%s", dataset_id)
 
     try:
-        return zoo_search_org_dataset_semantic(
+        return await zoo_search_org_dataset_semantic(
             dataset_id=dataset_id, query=query, limit=limit
         )
     except Exception as e:
@@ -1700,6 +1739,11 @@ def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:
     raise KeyboardInterrupt
 
 
+def _abort_modeling_sessions_at_exit() -> None:
+    """Best-effort fallback for exits outside the MCPServer lifespan."""
+    _abort_all_modeling_sessions()
+
+
 def install_shutdown_handlers() -> None:
     """Make the server close its modeling sessions on the way out."""
     try:
@@ -1709,7 +1753,7 @@ def install_shutdown_handlers() -> None:
         # application owns signal disposition.
         logger.debug("Not on the main thread, leaving signal handlers alone")
 
-    atexit.register(zoo_stop_all_modeling_sessions)
+    atexit.register(_abort_modeling_sessions_at_exit)
 
 
 def main():
