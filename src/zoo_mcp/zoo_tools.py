@@ -146,6 +146,7 @@ SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 # the conversations driving these tools, so a stalled engine surfaces as a
 # retryable error instead of an abandoned request.
 MODELING_COMMAND_TIMEOUT = 300.0
+MODELING_VIDEO_RESOLUTION = 1024
 
 # Large file-analysis requests are asynchronous. Leave enough headroom under
 # the enclosing 300-second tool budget to surface a typed timeout instead of
@@ -2045,6 +2046,8 @@ async def _execute_kcl_with_preflight(
                                 highlight_edges=snapshot_request.highlight_edges
                                 if snapshot_request is not None
                                 else None,
+                                video_res_width=MODELING_VIDEO_RESOLUTION,
+                                video_res_height=MODELING_VIDEO_RESOLUTION,
                             )
                         assert resolved.path is not None
                         return await kcl.new_kcl_session(
@@ -2052,6 +2055,8 @@ async def _execute_kcl_with_preflight(
                             highlight_edges=snapshot_request.highlight_edges
                             if snapshot_request is not None
                             else None,
+                            video_res_width=MODELING_VIDEO_RESOLUTION,
+                            video_res_height=MODELING_VIDEO_RESOLUTION,
                         )
 
                     session = await _execute_with_retries(
@@ -2723,8 +2728,8 @@ async def _open_modeling_websocket(client: AsyncKittyCAD) -> ClientConnection:
             "post_effect": PostEffectType.SSAO,
             "show_grid": "false",
             "unlocked_framerate": "false",
-            "video_res_height": 1024,
-            "video_res_width": 1024,
+            "video_res_height": MODELING_VIDEO_RESOLUTION,
+            "video_res_width": MODELING_VIDEO_RESOLUTION,
             "webrtc": "false",
         }
     )

@@ -149,7 +149,12 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
 
     assert result.ok
     assert calls == ["constraints", "snapshot:True", "measure", "close"]
-    open_session.assert_awaited_once_with("x = 1", highlight_edges=False)
+    open_session.assert_awaited_once_with(
+        "x = 1",
+        highlight_edges=False,
+        video_res_width=1024,
+        video_res_height=1024,
+    )
     old_execute.assert_not_awaited()
     assert result.inspection.sketch_constraints_status == "succeeded"
     assert result.inspection.rendered_snapshots_status == "succeeded"

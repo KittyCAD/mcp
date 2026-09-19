@@ -81,5 +81,5 @@ dev = [
 ]
 
 [tool.uv.sources]
-# Remove after the first zoo-kcl release containing modeling-app #13991.
-zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "9777f7546387eb0e7910d57758b1b694da2aae86", subdirectory = "rust/kcl-python-bindings" }
+# Remove after the first zoo-kcl release containing modeling-app #13991 and #14030.
+zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "3697940c5694ba98317492eb5efcf85286655593", subdirectory = "rust/kcl-python-bindings" }
