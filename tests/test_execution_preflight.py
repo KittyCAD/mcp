@@ -41,6 +41,30 @@ class Outcome:
     def report(self, issue):
         return f"{issue.severity}: PRIVATE_CUSTOMER_CONTENT"
 
+    def sketch_constraint_report(self):
+        return ConstraintReport()
+
+
+class ConstraintReport:
+    def __init__(self):
+        self.fully_constrained = []
+        self.under_constrained = []
+        self.over_constrained = []
+        self.errors = []
+        self.warnings = []
+        self.execution_errors = []
+        self.execution_fatals = []
+        self.is_complete = True
+        self.kcl_error = None
+
+
+class VolumeResponse:
+    def get_volume(self):
+        return 12.5
+
+    def get_surface_area(self):
+        return 42.0
+
 
 @pytest.fixture(params=["local", "session", "project"])
 def execution_route(request):
@@ -75,6 +99,96 @@ def mock_bindings(monkeypatch, mock, real):
     monkeypatch.setattr(kcl, "mock_execute", mock)
     monkeypatch.setattr(kcl, "execute_code", real)
     monkeypatch.setattr(kcl, "execute", real)
+
+
+@pytest.mark.asyncio
+async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
+    calls: list[str] = []
+
+    class SessionOutcome(Outcome):
+        def sketch_constraint_report(self):
+            calls.append("constraints")
+            return ConstraintReport()
+
+    class Session:
+        outcome = SessionOutcome()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            calls.append("close")
+
+        async def snapshots(self, _image_format, _options, *, zoom):
+            calls.append(f"snapshot:{zoom}")
+            return [b"jpeg"]
+
+        async def measure(self, _request):
+            calls.append("measure")
+            return VolumeResponse()
+
+    mock = AsyncMock(return_value=Outcome())
+    session = Session()
+    open_session = AsyncMock(return_value=session)
+    old_execute = AsyncMock(side_effect=AssertionError("must use one KCL session"))
+    monkeypatch.setattr(kcl, "mock_execute_code", mock)
+    monkeypatch.setattr(kcl, "new_kcl_session_code", open_session)
+    monkeypatch.setattr(kcl, "execute_code", old_execute)
+    monkeypatch.setattr(zoo_tools, "resize_image", lambda image, _dimension: image)
+
+    result = await zoo_tools.zoo_execute_kcl(
+        kcl_code="x = 1",
+        snapshot_request=zoo_tools.KclSnapshotRequest(("front",)),
+        physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(
+            ("volume", "surface_area")
+        ),
+    )
+
+    assert result.ok
+    assert calls == ["constraints", "snapshot:True", "measure", "close"]
+    open_session.assert_awaited_once_with("x = 1", highlight_edges=False)
+    old_execute.assert_not_awaited()
+    assert result.inspection.sketch_constraints_status == "succeeded"
+    assert result.inspection.rendered_snapshots_status == "succeeded"
+    assert result.inspection.rendered_snapshot == b"jpeg"
+    assert result.inspection.physical_analysis_status == "succeeded"
+    assert result.inspection.physical_properties == {
+        "volume": {"value": 12.5, "unit": "mm3"},
+        "surface_area": {"value": 42.0, "unit": "mm2"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_real_execution_error_returns_partial_constraints(monkeypatch):
+    class PartialReport(ConstraintReport):
+        def __init__(self):
+            super().__init__()
+            self.is_complete = False
+
+    class ExecutionError(Exception):
+        sketch_constraint_report = PartialReport()
+
+        def is_retryable(self):
+            return False
+
+    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=Outcome()))
+    monkeypatch.setattr(
+        kcl,
+        "new_kcl_session_code",
+        AsyncMock(side_effect=ExecutionError("bad KCL")),
+    )
+
+    result = await zoo_tools.zoo_execute_kcl(
+        kcl_code="x = 1",
+        snapshot_request=zoo_tools.KclSnapshotRequest(("front",)),
+    )
+
+    assert not result.ok
+    assert result.real_execution.status == "failed"
+    assert result.inspection.sketch_constraints_status == "partial"
+    assert result.inspection.sketch_constraints is not None
+    assert result.inspection.sketch_constraints["kcl_executes_successfully"] is False
+    assert result.inspection.rendered_snapshots_status == "not_run"
 
 
 @pytest.mark.asyncio

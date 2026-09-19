@@ -79,3 +79,7 @@ dev = [
     "ty",
     "uv-build",
 ]
+
+[tool.uv.sources]
+# Remove after the first zoo-kcl release containing modeling-app #13991.
+zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "9777f7546387eb0e7910d57758b1b694da2aae86", subdirectory = "rust/kcl-python-bindings" }

@@ -938,6 +938,19 @@ class _FakeOutcome:
     def report(self, issue: _FakeIssue) -> str:
         return f"{issue.severity} report"
 
+    def sketch_constraint_report(self):
+        report = MagicMock()
+        report.fully_constrained = []
+        report.under_constrained = []
+        report.over_constrained = []
+        report.errors = []
+        report.warnings = []
+        report.execution_errors = []
+        report.execution_fatals = []
+        report.is_complete = True
+        report.kcl_error = None
+        return report
+
 
 def test_format_execution_issues_groups_by_severity():
     outcome = _FakeOutcome(
