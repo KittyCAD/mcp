@@ -4,6 +4,7 @@ import io
 import json
 import os
 from collections.abc import AsyncIterator, Sequence
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1478,6 +1479,190 @@ s2 = sketch(on = XZ) {
 }
 """
 
+SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL = f"""
+{SKETCH_VISUALIZER_KCL}
+
+extrude(missingSketch, length = 5mm)
+"""
+
+
+@pytest.fixture
+def native_sketch_execution(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Exercise real native outcomes using the offline interpreter backend."""
+    calls: list[str] = []
+
+    async def execute_code(source: str) -> "kcl.ExecOutcome":
+        calls.append(source)
+        return await kcl.mock_execute_code(source)
+
+    async def execute(path: str) -> "kcl.ExecOutcome":
+        calls.append(path)
+        return await kcl.mock_execute(path)
+
+    monkeypatch.setattr(kcl, "execute_code", execute_code)
+    monkeypatch.setattr(kcl, "execute", execute)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_recovers_without_reexecution(
+    native_sketch_execution: list[str],
+) -> None:
+    baseline = await kcl.mock_execute_code(SKETCH_VISUALIZER_KCL)
+    with zoo_mcp.zoo_tools.capture_execution_retry_events() as events:
+        png = await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+            "s1", kcl_code=SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL
+        )
+    assert png == bytes(baseline.render_sketch_png("s1"))
+    assert native_sketch_execution == [SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL]
+    # A recovered image must not turn a failed execution into successful telemetry.
+    assert [(event.outcome, event.error_family) for event in events] == [
+        ("terminal_non_retryable", "KclError")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("native_sketch_execution")
+async def test_visualize_sketch_retains_ambiguity_after_single_quoted_string() -> None:
+    source = (
+        SKETCH_VISUALIZER_KCL
+        + """
+label = '"'
+fn makeProfile() {
+  s1 = sketch(on = XY) {
+    edge = line(start = [0mm, 0mm], end = [10mm, 0mm])
+  }
+  return s1
+}
+third = makeProfile()
+"""
+    )
+    baseline = await kcl.mock_execute_code(source)
+    source += "\nlate = missingValue\n"
+    with pytest.raises(
+        zoo_mcp.ZooMCPException, match="found 2 sketches named"
+    ) as raised:
+        await zoo_mcp.zoo_tools.zoo_visualize_sketch("s1", kcl_code=source)
+    assert "missingValue" in str(raised.value)
+    for index in (0, 1):
+        png = await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+            "s1", kcl_code=source, instance_index=index
+        )
+        assert png == bytes(baseline.render_sketch_png("s1", instance_index=index))
+    for index, message in ((-1, "must be non-negative"), (2, "out of range")):
+        with pytest.raises(zoo_mcp.ZooMCPException, match=message):
+            await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+                "s1", kcl_code=source, instance_index=index
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("native_sketch_execution")
+@pytest.mark.parametrize(
+    ("sketch_name", "message"),
+    [("unfinished", "no completed geometry"), ("absent", "no sketch named")],
+)
+async def test_visualize_sketch_preserves_error_when_recovery_fails(
+    sketch_name: str,
+    message: str,
+) -> None:
+    source = (
+        SKETCH_VISUALIZER_KCL
+        + """
+unfinished = sketch(on = XY) {
+  edge = line(start = [0mm, 0mm], end = [10mm, 0mm])
+  late = missingValue
+}
+"""
+    )
+    with pytest.raises(zoo_mcp.ZooMCPException, match=message) as raised:
+        await zoo_mcp.zoo_tools.zoo_visualize_sketch(sketch_name, kcl_code=source)
+    assert "missingValue" in str(raised.value)
+    png = await zoo_mcp.zoo_tools.zoo_visualize_sketch("s1", kcl_code=source)
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_recovers_from_original_project(
+    native_sketch_execution: list[str],
+    tmp_path: Path,
+) -> None:
+    helper = tmp_path / "helper.kcl"
+    helper.write_text("""export fn makeProfile() {
+  profile = sketch(on = XY) {
+    edge = line(start = [0mm, 0mm], end = [10mm, 0mm])
+  }
+  return profile
+}
+""")
+    source = '@settings(kclVersion = 2.0)\nimport makeProfile from "helper.kcl"\npart = makeProfile()\n'
+    path = tmp_path / "main.kcl"
+    path.write_text(source)
+    (tmp_path / "project.toml").write_text('[settings.modeling]\nbase_unit = "mm"\n')
+    # Assets not recognized by relevant_file_extensions must remain in place.
+    (tmp_path / "mesh.bin").write_bytes(b"retained external asset")
+    baseline = await kcl.mock_execute(str(path))
+    path.write_text(source + "\nlate = missingValue\n")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    png = await zoo_mcp.zoo_tools.zoo_visualize_sketch("profile", kcl_path=path)
+    assert png == bytes(baseline.render_sketch_png("profile"))
+    assert native_sketch_execution == [str(path)]
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.fixture
+def flanges_rail_profile_source() -> str:
+    # Exact source at eval trace 01a09886-20db-7bcb-b214-627a342be681,
+    # visualize_sketch span 01a0988d-771c-7fc2-9d83-9246198674b0.
+    source = (
+        Path(__file__).parent / "data" / "flanges_rail_profile_downstream_error.kcl"
+    ).read_text()
+    assert sha256(source.encode()).hexdigest() == (
+        "9ea4ce9a2198de37e7c3a35ef2a86280da60ed342c4a6585beb376669643c0d3"
+    )
+    return source
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_preserves_parse_error(
+    flanges_rail_profile_source: str,
+) -> None:
+    # A syntax error exercises native failure and recovery without an engine.
+    source = flanges_rail_profile_source + "\nbroken =\n"
+    with pytest.raises(kcl.KclError) as original:
+        await kcl.execute_code(source)
+    with pytest.raises(zoo_mcp.ZooMCPException) as recovered:
+        await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+            "railProfile", kcl_code=source, instance_index=0
+        )
+    assert str(original.value) in str(recovered.value)
+    assert "no sketch named" not in str(recovered.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instance_index", [None, 0])
+@pytest.mark.usefixtures("native_sketch_execution")
+async def test_visualize_sketch_execution_deadline_and_subsequent_success(
+    monkeypatch: pytest.MonkeyPatch, instance_index: int | None
+) -> None:
+    # Exercise the real native await with unique and explicit instance selection.
+    # An expired budget must not be converted to a generic failure or retry.
+    with monkeypatch.context() as patch:
+        patch.setattr(zoo_mcp.zoo_tools, "SKETCH_VISUALIZATION_TIMEOUT", 0.0)
+        with (
+            zoo_mcp.zoo_tools.capture_execution_retry_events() as events,
+            pytest.raises(zoo_mcp.ZooMCPTimeoutError, match="0-second budget"),
+        ):
+            await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+                "s1", kcl_code=SKETCH_VISUALIZER_KCL, instance_index=instance_index
+            )
+        assert not events
+
+    png = await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+        "s1", kcl_code=SKETCH_VISUALIZER_KCL, instance_index=instance_index
+    )
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+
 
 @pytest.mark.asyncio
 async def test_visualize_sketch_returns_png():
@@ -1497,6 +1682,56 @@ async def test_visualize_sketch_returns_png():
     assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
     with PILImage.open(io.BytesIO(png_bytes)) as png:
         assert png.format == "PNG"
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_ignores_downstream_execution_error():
+    response = await mcp.call_tool(
+        "visualize_sketch",
+        arguments={
+            "sketch_name": "s1",
+            "kcl_code": SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL,
+            "kcl_path": None,
+        },
+    )
+
+    image = _content_list(response)[0]
+    assert isinstance(image, ImageContent)
+    assert image.mime_type == "image/png"
+    assert base64.b64decode(image.data).startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_path_ignores_downstream_execution_error(
+    tmp_path: Path,
+):
+    project_code = SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL.replace(
+        "@settings(experimentalFeatures = allow)",
+        '@settings(experimentalFeatures = allow)\n\nimport startX from "helper.kcl"',
+        1,
+    ).replace(
+        "line1.start.at[0] == 2",
+        "line1.start.at[0] == startX",
+        1,
+    )
+    kcl_path = tmp_path / "main.kcl"
+    kcl_path.write_text(project_code)
+    (tmp_path / "helper.kcl").write_text("export startX = 2mm\n")
+
+    response = await mcp.call_tool(
+        "visualize_sketch",
+        arguments={
+            "sketch_name": "s1",
+            "kcl_code": None,
+            "kcl_path": str(kcl_path),
+        },
+    )
+
+    image = _content_list(response)[0]
+    assert isinstance(image, ImageContent)
+    assert image.mime_type == "image/png"
+    assert base64.b64decode(image.data).startswith(b"\x89PNG\r\n\x1a\n")
+    assert kcl_path.read_text() == project_code
 
 
 @pytest.mark.asyncio
@@ -1535,6 +1770,87 @@ async def test_visualize_sketch_reports_missing_name():
     result = _meta_result(response)
     assert isinstance(result, str)
     assert "no sketch named `missingSketch`" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instance_index", [0, 1])
+async def test_visualize_sketch_solid_helper_instance_matches_full_execution(
+    tmp_path: Path, instance_index: int
+) -> None:
+    source = """
+@settings(kclVersion = 2.0)
+fn makePad(r) {
+  profile = sketch(on = XY) {
+    edge = circle(center = [0mm, 0mm], start = [var 3mm, var 0mm])
+    radius(edge) == r
+  }
+  solid = extrude(region(segments = [profile.edge]), length = 5mm)
+  hide(profile)
+  return solid
+}
+first = makePad(r = 3mm)
+second = makePad(r = 7mm)
+"""
+    full = await kcl.execute_code(source)
+    expected = bytes(full.render_sketch_png("profile", instance_index=instance_index))
+    path = tmp_path / "main.kcl"
+    path.write_text(source)
+    for png in (
+        await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_code=source, instance_index=instance_index
+        ),
+        await zoo_mcp.zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_path=path, instance_index=instance_index
+        ),
+    ):
+        assert png == expected
+    assert path.read_text() == source
+
+
+@pytest.mark.asyncio
+async def test_visualize_sketch_duplicate_instances(tmp_path: Path) -> None:
+    (tmp_path / "helpers.kcl").write_text("""
+export fn makeProfile(@height) {
+  profile = sketch(on = XY) {
+    edge = line(start = [0mm, 0mm], end = [20mm, height])
+  }
+  return profile
+}
+""")
+    path = tmp_path / "main.kcl"
+    path.write_text("""
+@settings(kclVersion = 2.0)
+import makeProfile from "helpers.kcl"
+first = makeProfile(6.5mm)
+second = makeProfile(10.5mm)
+""")
+    report = await zoo_mcp.zoo_tools.zoo_get_sketch_constraint_status(kcl_path=path)
+    assert [s["instance_index"] for s in report["fully_constrained"]] == [0, 1]
+
+    arguments = {"sketch_name": "profile", "kcl_path": str(path)}
+    ambiguous = _meta_result(
+        await mcp.call_tool("visualize_sketch", arguments=arguments)
+    )
+    assert "found 2 sketches named `profile`" in ambiguous
+    assert "instance_index" in ambiguous
+
+    images = []
+    for index in (0, 1):
+        response = await mcp.call_tool(
+            "visualize_sketch", arguments={**arguments, "instance_index": index}
+        )
+        image = _content_list(response)[0]
+        assert isinstance(image, ImageContent)
+        images.append(base64.b64decode(image.data))
+    assert images[0] != images[1]
+
+    for index, message in ((-1, "must be non-negative"), (2, "out of range")):
+        result = _meta_result(
+            await mcp.call_tool(
+                "visualize_sketch", arguments={**arguments, "instance_index": index}
+            )
+        )
+        assert message in result
 
 
 @pytest.mark.asyncio

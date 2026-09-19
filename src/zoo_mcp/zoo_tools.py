@@ -145,6 +145,9 @@ SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 # retryable error instead of an abandoned request.
 MODELING_COMMAND_TIMEOUT = 300.0
 
+# One budget for sketch execution and retries. Native PNG rendering is synchronous.
+SKETCH_VISUALIZATION_TIMEOUT = 120.0
+
 # Large file-analysis requests are asynchronous. Leave enough headroom under
 # the enclosing 300-second tool budget to surface a typed timeout instead of
 # letting the caller abandon the request while it is still polling.
@@ -2027,13 +2030,17 @@ def zoo_lint_and_fix_kcl(
 
 def _format_constraint_status(status: kcl.SketchConstraintStatus) -> dict:
     """Format a single SketchConstraintStatus into a dict."""
-    return {
+    result = {
         "name": status.name,
         "status": str(status.status).removeprefix("ConstraintKind."),
         "free_count": status.free_count,
         "conflict_count": status.conflict_count,
         "total_count": status.total_count,
     }
+    instance_index = getattr(status, "instance_index", None)
+    if isinstance(instance_index, int):
+        result["instance_index"] = instance_index
+    return result
 
 
 def _format_constraint_report(report: kcl.SketchConstraintReport) -> dict:
@@ -2128,17 +2135,22 @@ async def zoo_visualize_sketch(
     sketch_name: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
+    instance_index: int | None = None,
 ) -> bytes:
     """Execute KCL and render one named sketch as a PNG.
 
-    The renderer is provided by ``zoo-kcl`` on ``ExecOutcome``. Sketch names
-    are the variable names assigned to sketch expressions and are also exposed
-    by :func:`zoo_get_sketch_constraint_status`.
+    Native outcomes and execution errors can render completed sketches. Recovery
+    uses the failed execution's retained geometry without rerunning or changing
+    the source. A recovered PNG does not mean the whole project is valid.
+    Execution and retries share ``SKETCH_VISUALIZATION_TIMEOUT`` seconds;
+    synchronous PNG rendering is outside that execution budget.
 
     Args:
         sketch_name: Variable name of the sketch to render.
         kcl_code: KCL source code to execute.
         kcl_path: Path to a KCL file or project containing ``main.kcl``.
+        instance_index: For duplicate names, zero-based creation order from a
+            fresh constraint report for the same entrypoint and source.
 
     Returns:
         Raw PNG bytes for the requested sketch.
@@ -2147,27 +2159,55 @@ async def zoo_visualize_sketch(
 
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
+    if instance_index is not None and instance_index < 0:
+        raise ZooMCPException("instance_index must be non-negative")
+
     try:
-        if kcl_code:
-            outcome = await _execute_with_retries(
-                kcl.execute_code,
-                kcl_code,
-                _operation="visualize_sketch",
+        try:
+            async with asyncio.timeout(SKETCH_VISUALIZATION_TIMEOUT):
+                if kcl_code:
+                    outcome = await _execute_with_retries(
+                        kcl.execute_code,
+                        kcl_code,
+                        _operation="visualize_sketch",
+                    )
+                else:
+                    assert kcl_path is not None
+                    outcome = await _execute_with_retries(
+                        kcl.execute,
+                        str(kcl_path),
+                        _operation="visualize_sketch",
+                    )
+        except kcl.KclError as execution_error:
+            try:
+                png = bytes(
+                    execution_error.render_sketch_png(
+                        sketch_name, instance_index=instance_index
+                    )
+                )
+            except Exception as render_error:
+                raise ZooMCPException(
+                    f"{execution_error}\nSketch recovery failed: {render_error}"
+                ) from execution_error
+            logger.info(
+                "Rendered retained sketch after failed KCL execution "
+                "(error_family=%s); project execution remains unsuccessful",
+                _execution_error_family(execution_error),
             )
-        else:
-            assert kcl_path is not None
-            outcome = await _execute_with_retries(
-                kcl.execute,
-                str(kcl_path),
-                _operation="visualize_sketch",
-            )
-        return bytes(outcome.render_sketch_png(sketch_name))
+            return png
+        return bytes(
+            outcome.render_sketch_png(sketch_name, instance_index=instance_index)
+        )
+    except TimeoutError as e:
+        raise ZooMCPTimeoutError(
+            f"Sketch execution exceeded its {SKETCH_VISUALIZATION_TIMEOUT:g}-second budget"
+        ) from e
     except Exception as e:
         logger.error(
             "Failed to visualize sketch (error_family=%s)",
             _execution_error_family(e),
         )
-        raise ZooMCPException(f"Failed to visualize sketch: {e}")
+        raise ZooMCPException(f"Failed to visualize sketch: {e}") from e
 
 
 async def zoo_mock_execute_kcl(
