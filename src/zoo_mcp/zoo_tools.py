@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import io
 import json
@@ -586,7 +588,7 @@ _MOCK_ENGINE_LIMITATIONS = frozenset(
 
 
 def _format_execution_issues(
-    outcome: "kcl.ExecOutcome", *, mock: bool = False
+    outcome: kcl.ExecOutcome, *, mock: bool = False
 ) -> dict[str, list[str]]:
     """Render compilation issues from an execution outcome, grouped by severity.
 
@@ -2029,7 +2031,7 @@ async def _execute_kcl_with_preflight(
                     or physical_properties_request is not None
                 ):
 
-                    async def execute_session() -> "kcl.KclSession":
+                    async def execute_session() -> kcl.KclSession:
                         nonlocal attempts
                         attempts += 1
                         if resolved.code is not None:
@@ -2069,7 +2071,7 @@ async def _execute_kcl_with_preflight(
                             )
                 else:
 
-                    async def execute() -> "kcl.ExecOutcome":
+                    async def execute() -> kcl.ExecOutcome:
                         nonlocal attempts
                         attempts += 1
                         if resolved.code is not None:
