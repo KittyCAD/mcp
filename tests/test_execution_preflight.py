@@ -66,6 +66,26 @@ class VolumeResponse:
         return 42.0
 
 
+class Session:
+    def __init__(self, outcome, calls=None):
+        self.outcome = outcome
+        self.calls = calls if calls is not None else []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        self.calls.append("close")
+
+    async def snapshots(self, *_args, zoom):
+        self.calls.append(f"snapshot:{zoom}")
+        return [b"jpeg"]
+
+    async def measure(self, _request):
+        self.calls.append("measure")
+        return VolumeResponse()
+
+
 @pytest.fixture(params=["local", "session", "project"])
 def execution_route(request):
     return request.param
@@ -110,25 +130,8 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
             calls.append("constraints")
             return ConstraintReport()
 
-    class Session:
-        outcome = SessionOutcome()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            calls.append("close")
-
-        async def snapshots(self, _image_format, _options, *, zoom):
-            calls.append(f"snapshot:{zoom}")
-            return [b"jpeg"]
-
-        async def measure(self, _request):
-            calls.append("measure")
-            return VolumeResponse()
-
     mock = AsyncMock(return_value=Outcome())
-    session = Session()
+    session = Session(SessionOutcome(), calls)
     open_session = AsyncMock(return_value=session)
     old_execute = AsyncMock(side_effect=AssertionError("must use one KCL session"))
     monkeypatch.setattr(kcl, "mock_execute_code", mock)
@@ -156,6 +159,70 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
         "volume": {"value": 12.5, "unit": "mm3"},
         "surface_area": {"value": 42.0, "unit": "mm2"},
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("severity", "expected_ok", "expected_calls"),
+    [
+        ("warning", True, ["snapshot:True", "measure", "close"]),
+        ("error", False, ["close"]),
+    ],
+)
+async def test_real_diagnostics_gate_requested_outputs(
+    monkeypatch, severity, expected_ok, expected_calls
+):
+    calls: list[str] = []
+
+    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=Outcome()))
+    monkeypatch.setattr(
+        kcl,
+        "new_kcl_session_code",
+        AsyncMock(return_value=Session(Outcome(severity), calls)),
+    )
+    monkeypatch.setattr(zoo_tools, "resize_image", lambda image, _dimension: image)
+
+    result = await zoo_tools.zoo_execute_kcl(
+        kcl_code="x = 1",
+        snapshot_request=zoo_tools.KclSnapshotRequest(("front",)),
+        physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(("volume",)),
+    )
+
+    assert result.ok is expected_ok
+    assert result.real_execution.status == ("succeeded" if expected_ok else "failed")
+    assert result.real_execution.error_family == (
+        None if expected_ok else "CompilationIssue"
+    )
+    expected_output_status = "succeeded" if expected_ok else "not_run"
+    assert result.inspection.rendered_snapshots_status == expected_output_status
+    assert result.inspection.physical_analysis_status == expected_output_status
+    assert calls == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_snapshot_postprocessing_failure_preserves_execution_success(monkeypatch):
+    def fail_resize(_image, _dimension):
+        raise ValueError("resize failed")
+
+    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=Outcome()))
+    monkeypatch.setattr(
+        kcl,
+        "new_kcl_session_code",
+        AsyncMock(return_value=Session(Outcome())),
+    )
+    monkeypatch.setattr(zoo_tools, "resize_image", fail_resize)
+
+    result = await zoo_tools.zoo_execute_kcl(
+        kcl_code="x = 1",
+        snapshot_request=zoo_tools.KclSnapshotRequest(("front",)),
+    )
+
+    assert result.ok
+    assert result.real_execution.status == "succeeded"
+    assert result.inspection.rendered_snapshots_status == "failed"
+    assert result.inspection.rendered_snapshot is None
+    assert result.inspection.completed_snapshot_views == ["front"]
+    assert result.inspection.snapshot_errors == {"post_processing": "resize failed"}
 
 
 @pytest.mark.asyncio

@@ -1837,15 +1837,20 @@ async def _collect_session_snapshots(
             inspection.snapshot_errors[view_name] = str(error)
 
     if images:
-        inspection.rendered_snapshot = await asyncio.to_thread(
-            lambda: resize_image(
-                images[0] if len(images) == 1 else create_image_collage(images),
-                request.max_image_dimension,
+        try:
+            inspection.rendered_snapshot = await asyncio.to_thread(
+                lambda: resize_image(
+                    images[0] if len(images) == 1 else create_image_collage(images),
+                    request.max_image_dimension,
+                )
             )
-        )
-        inspection.rendered_snapshots_status = (
-            "partial" if inspection.snapshot_errors else "succeeded"
-        )
+        except Exception as error:
+            inspection.snapshot_errors["post_processing"] = str(error)
+            inspection.rendered_snapshots_status = "failed"
+        else:
+            inspection.rendered_snapshots_status = (
+                "partial" if inspection.snapshot_errors else "succeeded"
+            )
     else:
         inspection.rendered_snapshots_status = "failed"
 
@@ -2060,15 +2065,19 @@ async def _execute_kcl_with_preflight(
                                 constraint_report, resolved
                             )
                         )
-                        inspection.sketch_constraints_status = "succeeded"
-                        if snapshot_request is not None:
-                            await _collect_session_snapshots(
-                                session, snapshot_request, inspection
-                            )
-                        if physical_properties_request is not None:
-                            await _collect_session_physical_properties(
-                                session, physical_properties_request, inspection
-                            )
+                        inspection.sketch_constraints_status = (
+                            "succeeded" if constraint_report.is_complete else "partial"
+                        )
+                        issues = _format_execution_issues(outcome)
+                        if "fatal" not in issues and "error" not in issues:
+                            if snapshot_request is not None:
+                                await _collect_session_snapshots(
+                                    session, snapshot_request, inspection
+                                )
+                            if physical_properties_request is not None:
+                                await _collect_session_physical_properties(
+                                    session, physical_properties_request, inspection
+                                )
                 else:
 
                     async def execute() -> kcl.ExecOutcome:
@@ -2080,18 +2089,23 @@ async def _execute_kcl_with_preflight(
                         return await kcl.execute(resolved.path)
 
                     outcome = await _execute_with_retries(execute, _operation=operation)
+                    constraint_report = outcome.sketch_constraint_report()
                     inspection.sketch_constraints = _format_session_constraint_report(
-                        outcome.sketch_constraint_report(), resolved
+                        constraint_report, resolved
                     )
-                    inspection.sketch_constraints_status = "succeeded"
+                    inspection.sketch_constraints_status = (
+                        "succeeded" if constraint_report.is_complete else "partial"
+                    )
+                    issues = _format_execution_issues(outcome)
 
-                issues = _format_execution_issues(outcome)
+                has_blocking_issues = "fatal" in issues or "error" in issues
                 real = KclExecutionStage(
-                    "succeeded",
+                    "failed" if has_blocking_issues else "succeeded",
                     "KCL code executed with diagnostics"
                     if issues
                     else "KCL code executed successfully",
                     issues,
+                    "CompilationIssue" if has_blocking_issues else None,
                 )
                 resolved.remap_diagnostics(real)
             _report_execution_stage_event(
@@ -2100,6 +2114,7 @@ async def _execute_kcl_with_preflight(
                 real.status,
                 started_at,
                 attempts,
+                real.error_family,
             )
             if artifact_graph is not None:
                 return ResultZooExecuteKclRemote(
@@ -2111,7 +2126,7 @@ async def _execute_kcl_with_preflight(
                     inspection=inspection,
                 )
             return ResultZooExecuteKclLocal(
-                True,
+                real.status == "succeeded",
                 _execution_result_message(real),
                 mock,
                 real,

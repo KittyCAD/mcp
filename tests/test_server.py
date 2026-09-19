@@ -995,7 +995,8 @@ async def test_execute_kcl_surfaces_all_issue_severities(monkeypatch):
 
     result = await zoo_mcp.zoo_tools.zoo_execute_kcl(kcl_code="anything")
     assert isinstance(result, zoo_mcp.zoo_tools.ResultZooExecuteKclLocal)
-    assert result.ok is True
+    assert result.ok is False
+    assert result.real_execution.status == "failed"
     assert result.message.startswith(
         "KCL code execution completed with the following issues:"
     )
