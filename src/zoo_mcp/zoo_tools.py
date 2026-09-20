@@ -1510,9 +1510,9 @@ KclInspectionStatus: TypeAlias = Literal[
 
 @dataclass(frozen=True)
 class KclSnapshotRequest:
-    views: tuple[str, ...]
+    views: tuple[str | kcl.CameraLookAt, ...]
     padding: float = 0.1
-    zoom: bool = True
+    zoom: bool | None = None
     highlight_edges: bool = False
     max_image_dimension: int = 512
 
@@ -1746,17 +1746,23 @@ def _validate_execution_inspection_requests(
     physical_properties_request: KclPhysicalPropertiesRequest | None,
 ) -> None:
     if snapshot_request is not None:
-        if not snapshot_request.views:
-            raise ValueError("snapshot views must not be empty")
+        if not 1 <= len(snapshot_request.views) <= 4:
+            raise ValueError(
+                "snapshot requests must contain between one and four views"
+            )
         if snapshot_request.max_image_dimension <= 0:
             raise ValueError("max_image_dimension must be positive")
         unknown_views = [
             view
             for view in snapshot_request.views
-            if view not in CameraView.views.value
+            if isinstance(view, str) and view not in CameraView.views.value
         ]
         if unknown_views:
             raise ValueError(f"Unknown snapshot views: {unknown_views}")
+        if snapshot_request.zoom is False and any(
+            isinstance(view, str) for view in snapshot_request.views
+        ):
+            raise ValueError("Named snapshot views require zoom-to-fit")
 
     if physical_properties_request is None:
         return
@@ -1816,11 +1822,16 @@ async def _collect_session_snapshots(
     inspection: KclExecutionInspection,
 ) -> None:
     images: list[bytes] = []
-    for view_name in request.views:
-        view = CameraView.views.value[view_name]
+    for index, view in enumerate(request.views):
+        named = isinstance(view, str)
+        view_name = view if isinstance(view, str) else f"custom_{index + 1}"
         options = [
             kcl.SnapshotOptions(
-                camera=CameraView.to_kcl_camera(view),
+                camera=(
+                    CameraView.to_kcl_camera(CameraView.views.value[view])
+                    if isinstance(view, str)
+                    else view
+                ),
                 padding=request.padding,
             )
         ]
@@ -1828,7 +1839,7 @@ async def _collect_session_snapshots(
             rendered = await session.snapshots(
                 kcl.ImageFormat.Jpeg,
                 options,
-                zoom=request.zoom,
+                zoom=named if request.zoom is None else request.zoom,
             )
             if not rendered:
                 raise ZooMCPException("snapshot returned no image")

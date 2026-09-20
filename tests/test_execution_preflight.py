@@ -138,17 +138,31 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
     monkeypatch.setattr(kcl, "new_kcl_session_code", open_session)
     monkeypatch.setattr(kcl, "execute_code", old_execute)
     monkeypatch.setattr(zoo_tools, "resize_image", lambda image, _dimension: image)
+    monkeypatch.setattr(zoo_tools, "create_image_collage", lambda images: b"collage")
+    camera = zoo_tools.CameraView.to_kcl_camera(
+        {"up": [0, 0, 1], "vantage": [150, -150, 120], "center": [10, 0, 0]}
+    )
+    snapshot_options = MagicMock(wraps=kcl.SnapshotOptions)
+    monkeypatch.setattr(kcl, "SnapshotOptions", snapshot_options)
 
     result = await zoo_tools.zoo_execute_kcl(
         kcl_code="x = 1",
-        snapshot_request=zoo_tools.KclSnapshotRequest(("front",)),
+        snapshot_request=zoo_tools.KclSnapshotRequest(("front", camera)),
         physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(
             ("volume", "surface_area")
         ),
     )
 
     assert result.ok
-    assert calls == ["constraints", "snapshot:True", "measure", "close"]
+    assert calls == [
+        "constraints",
+        "snapshot:True",
+        "snapshot:False",
+        "measure",
+        "close",
+    ]
+    mock.assert_awaited_once()
+    assert snapshot_options.call_args_list[1].kwargs["camera"] is camera
     open_session.assert_awaited_once_with(
         "x = 1",
         highlight_edges=False,
@@ -158,7 +172,8 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
     old_execute.assert_not_awaited()
     assert result.inspection.sketch_constraints_status == "succeeded"
     assert result.inspection.rendered_snapshots_status == "succeeded"
-    assert result.inspection.rendered_snapshot == b"jpeg"
+    assert result.inspection.rendered_snapshot == b"collage"
+    assert result.inspection.completed_snapshot_views == ["front", "custom_2"]
     assert result.inspection.physical_analysis_status == "succeeded"
     assert result.inspection.physical_properties == {
         "volume": {"value": 12.5, "unit": "mm3"},
