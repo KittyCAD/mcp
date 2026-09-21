@@ -17,7 +17,7 @@ dependencies = [
     "truststore<1.0",
     "typing-extensions>=4.12",
     "websockets>=14.1,<17.0",
-    "zoo-kcl>=0.3.185",
+    "zoo-kcl>=0.3.186",
 ]
 authors = [
     { name = "Ryan Barton", email = "ryan@zoo.dev" },
@@ -79,7 +79,3 @@ dev = [
     "ty",
     "uv-build",
 ]
-
-[tool.uv.sources]
-# Remove after the first zoo-kcl release containing modeling-app #13991 and #14030.
-zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "3697940c5694ba98317492eb5efcf85286655593", subdirectory = "rust/kcl-python-bindings" }
