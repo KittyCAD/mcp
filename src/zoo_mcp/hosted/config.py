@@ -18,6 +18,7 @@ class Settings:
     max_project_files: int = 1000
     max_workers: int = 16
     max_sessions_per_grant: int = 4
+    max_jobs_per_grant: int = 8
     idle_seconds: int = 1800
     operation_seconds: int = 300
     capability_seconds: int = 300
@@ -44,6 +45,7 @@ class Settings:
             min(
                 self.max_workers,
                 self.max_sessions_per_grant,
+                self.max_jobs_per_grant,
                 self.idle_seconds,
                 self.operation_seconds,
             )

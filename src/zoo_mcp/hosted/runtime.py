@@ -1,6 +1,7 @@
 """Grant-isolated scene workers with bounded direct execution."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -10,7 +11,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from .backend import Backend, Principal, ServiceError
 from .files import Artifacts, unpack_project
@@ -51,6 +52,7 @@ class Runtime:
         self.settings = backend.settings
         self.artifacts = Artifacts(backend)
         self.workers: dict[str, Worker] = {}
+        self.jobs: dict[str, asyncio.Task] = {}
         self.direct_tasks: set[asyncio.Task] = set()
         self.closing = False
         self.outcomes: Counter[str] = Counter()
@@ -438,6 +440,154 @@ class Runtime:
                 task.cancel()
             raise
 
+    async def submit(self, p: Principal, name: str, arguments: dict, operation) -> dict:
+        key = arguments.get("idempotency_key")
+        if not isinstance(key, str) or not key or len(key) > 128:
+            raise ServiceError(
+                "idempotency_required",
+                "Supply a unique idempotency_key for this operation; reuse it only when retrying the same request.",
+            )
+        job_id = str(uuid5(UUID(p.grant_id), key))
+        digest = hashlib.sha256(
+            json.dumps([name, arguments], sort_keys=True).encode()
+        ).hexdigest()
+        try:
+            existing = await self.backend.get(p, job_id)
+        except ServiceError as error:
+            if error.code != "not_found":
+                raise
+        else:
+            if existing["kind"] != "job" or existing["data"]["digest"] != digest:
+                raise ServiceError(
+                    "idempotency_conflict",
+                    "This idempotency key belongs to a different request.",
+                )
+            return await self.job(p, job_id)
+        rows = await self.backend.list(p, "job")
+        if (
+            sum(
+                r["data"].get("status") == "running"
+                and r["data"].get("deadline", 0) > time.time()
+                for r in rows
+            )
+            >= self.settings.max_jobs_per_grant
+        ):
+            raise ServiceError("job_limit", "Wait for an existing operation to finish.")
+        try:
+            row = await self.backend.put(
+                p,
+                job_id,
+                "job",
+                {
+                    "status": "running",
+                    "digest": digest,
+                    "node": self.settings.node_url,
+                    "deadline": time.time() + self.settings.operation_seconds + 30,
+                },
+            )
+        except ServiceError as error:
+            if error.code != "conflict":
+                raise
+            # A simultaneous retry may have won the create on another pod.
+            existing = await self.backend.get(p, job_id)
+            if existing["kind"] != "job" or existing["data"].get("digest") != digest:
+                raise ServiceError(
+                    "idempotency_conflict", "This key belongs to another operation."
+                ) from None
+            return await self.job(p, job_id)
+
+        async def execute():
+            try:
+                # Revalidate grant just before any work; never persist credentials.
+                await self.backend.principal(p.token)
+                async with asyncio.timeout(self.settings.operation_seconds):
+                    result = await operation()
+                data = {**row["data"], "status": "completed", "result": result}
+            except asyncio.CancelledError:
+                data = {**row["data"], "status": "cancelled"}
+            except Exception as exc:
+                data = {
+                    **row["data"],
+                    "status": "failed",
+                    "error": exc.code
+                    if isinstance(exc, ServiceError)
+                    else "operation_failed",
+                }
+            self.outcomes[data["status"]] += 1
+            try:
+                # Large graphs and reports belong in artifact storage, not a database row.
+                if len(json.dumps(data).encode()) > 900_000:
+                    artifact = self.artifacts.describe(
+                        p,
+                        await self.artifacts.store(
+                            p, "result.json", json.dumps(data["result"]).encode()
+                        ),
+                    )
+                    data["result"] = {"result_artifact": artifact}
+                await self.backend.put(p, job_id, "job", data, row["revision"])
+            except Exception:
+                self.outcomes["unrecorded"] += 1
+                logger.warning("job_outcome_unrecorded")
+            finally:
+                self.jobs.pop(job_id, None)
+
+        task = asyncio.create_task(execute())
+        self.jobs[job_id] = task
+        await asyncio.wait({task}, timeout=2)
+        return await self.job(p, job_id)
+
+    async def job(self, p: Principal, job_id: str) -> dict:
+        row = await self.backend.get(p, str(UUID(job_id)))
+        if row["kind"] != "job":
+            raise ServiceError("not_found", "Job not found.")
+        data = row["data"]
+        if data["status"] == "running" and data["deadline"] < time.time():
+            data = {
+                **data,
+                "status": "interrupted",
+                "error": "Worker stopped before recording an outcome. Inspect the project or scene before retrying.",
+            }
+
+        async def fresh(value):
+            if isinstance(value, dict):
+                if "artifact_id" in value and "download_url" in value:
+                    try:
+                        return self.artifacts.describe(
+                            p, await self.backend.get(p, value["artifact_id"])
+                        )
+                    except ServiceError as error:
+                        if error.code != "not_found":
+                            raise
+                        return {
+                            "artifact_id": value["artifact_id"],
+                            "unavailable": True,
+                        }
+                return {k: await fresh(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [await fresh(v) for v in value]
+            return value
+
+        return await fresh(
+            {
+                "job_id": job_id,
+                **{k: v for k, v in data.items() if k not in {"node", "digest"}},
+            }
+        )
+
+    async def cancel(self, p: Principal, job_id: str) -> dict:
+        row = await self.backend.get(p, str(UUID(job_id)))
+        if row["kind"] != "job":
+            raise ServiceError("not_found", "Job not found.")
+        if row["data"]["node"] != self.settings.node_url:
+            return await self.forward(
+                p, row["data"]["node"], "cancel_job", {"job_id": job_id}
+            )
+        task = self.jobs.get(job_id)
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return await self.job(p, job_id)
+
     async def maintain(self):
         while not self.closing:
             await asyncio.sleep(30)
@@ -467,6 +617,9 @@ class Runtime:
 
     async def close(self):
         self.closing = True
+        for task in list(self.jobs.values()):
+            task.cancel()
+        await asyncio.gather(*self.jobs.values(), return_exceptions=True)
         for task in list(self.direct_tasks):
             task.cancel()
         await asyncio.gather(*self.direct_tasks, return_exceptions=True)

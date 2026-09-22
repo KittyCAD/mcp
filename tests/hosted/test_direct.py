@@ -22,19 +22,17 @@ async def test_foundation_catalog_and_direct_results():
     tools = {tool.name: tool for tool in await catalog()}
     assert (
         not {
-            "get_job",
-            "cancel_job",
             "open_zoo_workspace",
             "list_projects",
             "import_attachment",
         }
         & tools.keys()
     )
-    for tool in tools.values():
-        assert (
-            not {"idempotency_key", "execution_mode"}
-            & tool.input_schema["properties"].keys()
-        )
+    assert "idempotency_key" not in tools["format_kcl"].input_schema["required"]
+    assert (
+        tools["format_kcl"].input_schema["properties"]["execution_mode"]["default"]
+        == "direct"
+    )
     backend = MemoryBackend()
     app = create_app(backend=backend)
     try:

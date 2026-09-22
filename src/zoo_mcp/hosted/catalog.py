@@ -35,6 +35,20 @@ SCENE_READ_TOOLS = {
 
 # name: (description, properties, required, scope, mutates)
 CUSTOM: dict[str, tuple[str, dict[str, Any], list[str], str, bool]] = {
+    "get_job": (
+        "Retrieve operation status and results. Interrupted work is never replayed automatically.",
+        {"job_id": UUID},
+        ["job_id"],
+        "",
+        False,
+    ),
+    "cancel_job": (
+        "Cancel a running job. A completed upstream change cannot be undone by cancellation.",
+        {"job_id": UUID},
+        ["job_id"],
+        "",
+        True,
+    ),
     "create_upload": (
         "Reserve a temporary file and obtain a short-lived upload URL. PUT exactly size_bytes bytes, then use the artifact ID.",
         {
@@ -97,6 +111,42 @@ def scopes_for(name: str) -> list[str]:
     if name not in CUSTOM and name not in DOC_TOOLS | DATASET_TOOLS | SCENE_READ_TOOLS:
         scopes.update({"files:read", "files:write"})
     return sorted(scopes)
+
+
+def background(name: str) -> bool:
+    if name in CUSTOM:
+        return CUSTOM[name][4] and name not in {"create_upload", "cancel_job"}
+    return name not in DOC_TOOLS | DATASET_TOOLS | {"get_modeling_sessions"}
+
+
+def execution_options(name: str, schema: dict) -> None:
+    if not background(name):
+        return
+    schema["properties"].update(
+        {
+            "execution_mode": {
+                "type": "string",
+                "enum": ["direct", "background"],
+                "default": "direct",
+                "description": "Direct results by default; background returns a durable job handle.",
+            },
+            "idempotency_key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Required only for background execution; reuse only for identical arguments.",
+            },
+        }
+    )
+    schema.setdefault("allOf", []).append(
+        {
+            "if": {
+                "properties": {"execution_mode": {"const": "background"}},
+                "required": ["execution_mode"],
+            },
+            "then": {"required": ["idempotency_key"]},
+        }
+    )
 
 
 async def catalog() -> list[Tool]:
@@ -178,4 +228,6 @@ async def catalog() -> list[Tool]:
                 _meta=meta,
             )
         )
+    for tool in tools:
+        execution_options(tool.name, tool.input_schema)
     return tools

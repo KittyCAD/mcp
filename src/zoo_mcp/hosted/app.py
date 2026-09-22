@@ -29,7 +29,7 @@ from starlette.routing import Route
 from zoo_mcp import __version__
 
 from .backend import Backend, Principal, ServiceError
-from .catalog import catalog, scope_for, scopes_for
+from .catalog import background, catalog, scope_for, scopes_for
 from .config import Settings
 from .runtime import Runtime
 
@@ -66,6 +66,10 @@ def create_app(
 
     async def dispatch(p: Principal, name: str, arguments: dict) -> dict:
         p.require(*scopes_for(name))
+        if name == "get_job":
+            return await runtime.job(p, arguments["job_id"])
+        if name == "cancel_job":
+            return await runtime.cancel(p, arguments["job_id"])
         if name == "create_upload":
             row = await runtime.artifacts.create(
                 p, arguments["name"], arguments["size_bytes"]
@@ -125,8 +129,21 @@ def create_app(
             format_checker=jsonschema.FormatChecker(),
         )
         p.require(*scopes_for(name))
+        operation_arguments = {
+            key: value
+            for key, value in arguments.items()
+            if key not in {"execution_mode", "idempotency_key"}
+        }
+        if (
+            arguments.get("execution_mode", "direct") == "background"
+            and background(name)
+            and not forwarded
+        ):
+            return await runtime.submit(
+                p, name, arguments, lambda: dispatch(p, name, operation_arguments)
+            )
         return await runtime.run_direct(
-            lambda: dispatch(p, name, arguments), current_disconnect.get()
+            lambda: dispatch(p, name, operation_arguments), current_disconnect.get()
         )
 
     async def call_tool(ctx, params) -> CallToolResult:
@@ -197,7 +214,7 @@ def create_app(
         version=__version__,
         instructions=(
             "Use Zoo artifact IDs for remote files. Save editable KCL with write_kcl_project before execution. "
-            "Tools return direct results. Interrupted calls have no durable recovery and are never automatically retried. "
+            "Tools return direct results by default. Eligible tools accept execution_mode=background with an idempotency_key; get_job polls persisted outcomes. Direct calls have no durable recovery and are never automatically retried. "
             "Restore expired scenes explicitly from saved source."
         ),
         on_list_tools=list_tools,
@@ -370,6 +387,7 @@ def create_app(
             return Response(status_code=403)
         lines = [
             f"zoo_mcp_workers {len(runtime.workers)}",
+            f"zoo_mcp_running_jobs {len(runtime.jobs)}",
         ]
         lines.extend(
             f'zoo_mcp_outcomes_total{{outcome="{key}"}} {value}'

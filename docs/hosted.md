@@ -62,3 +62,17 @@ Original review threads remain in MCP #271 and API #4671. The original heads are
 preserved under `backup/hosted-mcp-20260922` in each repository. Child PRs target
 their immediate parent and should be retargeted/restacked after parent merges.
 Production enablement and catalog publication are separate rollout steps.
+
+## Optional durable execution
+
+Eligible tools additionally accept `execution_mode: "background"`. Only this
+mode requires an `idempotency_key` (1–128 characters). Reusing the key with the
+same tool and arguments returns the same job; a different request conflicts.
+Omitting the mode, or selecting `"direct"`, preserves the original result shape.
+
+Background calls return `job_id` and status. `get_job` reads persisted outcomes
+and refreshes artifact links; `cancel_job` requests cancellation on the owning
+worker. Completed side effects cannot be undone. A worker lost before recording
+an outcome becomes `interrupted` after its deadline and is never replayed
+automatically. Durable records retain outcomes, not credentials or running
+processes. There are at most eight active jobs per grant.
