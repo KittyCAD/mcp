@@ -198,3 +198,8 @@ The server includes tests located in [`tests`](`tests`). To run the tests, use t
 ```bash
 uv run pytest -n auto
 ```
+# Hosted service
+
+The private hosted service exposes Zoo tools through the API's OAuth and API-key
+authentication. Calls return direct results and use grant-owned artifacts for
+remote files. See [the hosted deployment guide](docs/hosted.md).
