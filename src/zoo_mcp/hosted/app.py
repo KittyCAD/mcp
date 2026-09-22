@@ -29,8 +29,9 @@ from starlette.routing import Route
 from zoo_mcp import __version__
 
 from .backend import Backend, Principal, ServiceError
-from .catalog import background, catalog, scope_for, scopes_for
+from .catalog import CUSTOM, background, catalog, scope_for, scopes_for
 from .config import Settings
+from .projects import Projects
 from .runtime import Runtime
 
 current_principal: contextvars.ContextVar[Principal] = contextvars.ContextVar(
@@ -54,6 +55,7 @@ def create_app(
     )
     backend = backend or Backend(settings, http)
     runtime = Runtime(backend)
+    projects = Projects(backend)
     tools = {}
 
     async def tool_list():
@@ -102,6 +104,8 @@ def create_app(
             return {"deleted": True}
         if name == "write_kcl_project":
             return await runtime.artifacts.write_source(p, arguments["files"])
+        if name in CUSTOM:
+            return await projects.call(p, name, arguments)
         # Source is retained even when callers submit inline KCL.
         source = None
         if arguments.get("kcl_code") and name in {
