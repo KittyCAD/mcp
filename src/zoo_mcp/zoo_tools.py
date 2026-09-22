@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import io
 import json
@@ -144,6 +146,7 @@ SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 # the conversations driving these tools, so a stalled engine surfaces as a
 # retryable error instead of an abandoned request.
 MODELING_COMMAND_TIMEOUT = 300.0
+MODELING_VIDEO_RESOLUTION = 1024
 
 # Large file-analysis requests are asynchronous. Leave enough headroom under
 # the enclosing 300-second tool budget to surface a typed timeout instead of
@@ -586,7 +589,7 @@ _MOCK_ENGINE_LIMITATIONS = frozenset(
 
 
 def _format_execution_issues(
-    outcome: "kcl.ExecOutcome", *, mock: bool = False
+    outcome: kcl.ExecOutcome, *, mock: bool = False
 ) -> dict[str, list[str]]:
     """Render compilation issues from an execution outcome, grouped by severity.
 
@@ -726,6 +729,14 @@ class CameraView(Enum):
                 y=view["center"][1],
                 z=view["center"][2],
             ),
+        )
+
+    @staticmethod
+    def to_kcl_camera(view: dict[str, list[float]]) -> kcl.CameraLookAt:
+        return kcl.CameraLookAt(
+            vantage=kcl.Point3d(*view["vantage"]),
+            center=kcl.Point3d(*view["center"]),
+            up=kcl.Point3d(*view["up"]),
         )
 
 
@@ -1485,12 +1496,60 @@ class KclExecutionStage:
     error_family: str | None = None
 
 
+KclPhysicalProperty: TypeAlias = Literal[
+    "volume",
+    "mass",
+    "surface_area",
+    "center_of_mass",
+    "bounding_box",
+]
+KclInspectionStatus: TypeAlias = Literal[
+    "not_requested", "not_run", "succeeded", "partial", "failed"
+]
+
+
+@dataclass(frozen=True)
+class KclSnapshotRequest:
+    views: tuple[str | kcl.CameraLookAt, ...]
+    padding: float = 0.1
+    zoom: bool | None = None
+    highlight_edges: bool = False
+    max_image_dimension: int = 512
+
+
+@dataclass(frozen=True)
+class KclPhysicalPropertiesRequest:
+    properties: tuple[KclPhysicalProperty, ...]
+    unit_length: str = "mm"
+    unit_mass: str = "g"
+    unit_density: str | None = None
+    density: float | None = None
+    unit_area: str = "mm2"
+    unit_volume: str = "mm3"
+
+
+@dataclass
+class KclExecutionInspection:
+    sketch_constraints_status: KclInspectionStatus = "not_run"
+    sketch_constraints: dict[str, object] | None = None
+    rendered_snapshots_status: KclInspectionStatus = "not_requested"
+    rendered_snapshot: bytes | None = field(default=None, repr=False)
+    completed_snapshot_views: list[str] = field(default_factory=list)
+    snapshot_errors: dict[str, str] = field(default_factory=dict)
+    physical_analysis_status: KclInspectionStatus = "not_requested"
+    physical_properties: dict[str, object] | None = None
+    physical_property_errors: dict[str, str] = field(default_factory=dict)
+
+
 @dataclass
 class ResultZooExecuteKclLocal:
     ok: bool
     message: str
     mock_preflight: KclExecutionStage
     real_execution: KclExecutionStage
+    inspection: KclExecutionInspection = field(
+        default_factory=KclExecutionInspection, kw_only=True
+    )
 
 
 @dataclass
@@ -1668,13 +1727,266 @@ def _execution_result_message(stage: KclExecutionStage) -> str:
     )
 
 
+def _new_execution_inspection(
+    snapshot_request: KclSnapshotRequest | None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None,
+) -> KclExecutionInspection:
+    return KclExecutionInspection(
+        rendered_snapshots_status=(
+            "not_run" if snapshot_request is not None else "not_requested"
+        ),
+        physical_analysis_status=(
+            "not_run" if physical_properties_request is not None else "not_requested"
+        ),
+    )
+
+
+def _validate_execution_inspection_requests(
+    snapshot_request: KclSnapshotRequest | None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None,
+) -> None:
+    if snapshot_request is not None:
+        if not 1 <= len(snapshot_request.views) <= 4:
+            raise ValueError(
+                "snapshot requests must contain between one and four views"
+            )
+        if snapshot_request.max_image_dimension <= 0:
+            raise ValueError("max_image_dimension must be positive")
+        unknown_views = [
+            view
+            for view in snapshot_request.views
+            if isinstance(view, str) and view not in CameraView.views.value
+        ]
+        if unknown_views:
+            raise ValueError(f"Unknown snapshot views: {unknown_views}")
+        if snapshot_request.zoom is False and any(
+            isinstance(view, str) for view in snapshot_request.views
+        ):
+            raise ValueError("Named snapshot views require zoom-to-fit")
+
+    if physical_properties_request is None:
+        return
+    if not physical_properties_request.properties:
+        raise ValueError("physical properties must not be empty")
+    unknown_properties = set(physical_properties_request.properties) - {
+        "volume",
+        "mass",
+        "surface_area",
+        "center_of_mass",
+        "bounding_box",
+    }
+    if unknown_properties:
+        raise ValueError(f"Unknown physical properties: {sorted(unknown_properties)}")
+    if "mass" in physical_properties_request.properties:
+        if physical_properties_request.density is None:
+            raise ValueError("density is required when requesting mass")
+        if physical_properties_request.unit_density is None:
+            raise ValueError("unit_density is required when requesting mass")
+
+    for property_name in physical_properties_request.properties:
+        if property_name in {"center_of_mass", "bounding_box"}:
+            _parse_unit(
+                physical_properties_request.unit_length,
+                UNIT_LENGTH_MAP,
+                "unit_length",
+            )
+        elif property_name == "volume":
+            _parse_unit(
+                physical_properties_request.unit_volume,
+                UNIT_VOLUME_MAP,
+                "unit_volume",
+            )
+        elif property_name == "surface_area":
+            _parse_unit(
+                physical_properties_request.unit_area,
+                UNIT_AREA_MAP,
+                "unit_area",
+            )
+        elif property_name == "mass":
+            assert physical_properties_request.unit_density is not None
+            _parse_unit(
+                physical_properties_request.unit_mass,
+                UNIT_MASS_MAP,
+                "unit_mass",
+            )
+            _parse_unit(
+                physical_properties_request.unit_density,
+                UNIT_DENSITY_MAP,
+                "unit_density",
+            )
+
+
+async def _collect_session_snapshots(
+    session: kcl.KclSession,
+    request: KclSnapshotRequest,
+    inspection: KclExecutionInspection,
+) -> None:
+    images: list[bytes] = []
+    for index, view in enumerate(request.views):
+        named = isinstance(view, str)
+        view_name = view if isinstance(view, str) else f"custom_{index + 1}"
+        options = [
+            kcl.SnapshotOptions(
+                camera=(
+                    CameraView.to_kcl_camera(CameraView.views.value[view])
+                    if isinstance(view, str)
+                    else view
+                ),
+                padding=request.padding,
+            )
+        ]
+        try:
+            rendered = await session.snapshots(
+                kcl.ImageFormat.Jpeg,
+                options,
+                zoom=named if request.zoom is None else request.zoom,
+            )
+            if not rendered:
+                raise ZooMCPException("snapshot returned no image")
+            images.append(bytes(rendered[0]))
+            inspection.completed_snapshot_views.append(view_name)
+        except Exception as error:
+            inspection.snapshot_errors[view_name] = str(error)
+
+    if images:
+        try:
+            inspection.rendered_snapshot = await asyncio.to_thread(
+                lambda: resize_image(
+                    images[0] if len(images) == 1 else create_image_collage(images),
+                    request.max_image_dimension,
+                )
+            )
+        except Exception as error:
+            inspection.snapshot_errors["post_processing"] = str(error)
+            inspection.rendered_snapshots_status = "failed"
+        else:
+            inspection.rendered_snapshots_status = (
+                "partial" if inspection.snapshot_errors else "succeeded"
+            )
+    else:
+        inspection.rendered_snapshots_status = "failed"
+
+
+def _physical_properties_request(
+    options: KclPhysicalPropertiesRequest,
+) -> kcl.PhysicalPropertiesRequest:
+    request = kcl.PhysicalPropertiesRequest()
+    for property_name in options.properties:
+        if property_name == "volume":
+            request.set_volume(
+                _parse_unit(options.unit_volume, UNIT_VOLUME_MAP, "unit_volume")
+            )
+        elif property_name == "surface_area":
+            request.set_surface_area(
+                _parse_unit(options.unit_area, UNIT_AREA_MAP, "unit_area")
+            )
+        elif property_name == "center_of_mass":
+            request.set_center_of_mass(
+                _parse_unit(options.unit_length, UNIT_LENGTH_MAP, "unit_length")
+            )
+        elif property_name == "bounding_box":
+            request.set_bounding_box(
+                _parse_unit(options.unit_length, UNIT_LENGTH_MAP, "unit_length")
+            )
+        else:
+            assert options.density is not None
+            assert options.unit_density is not None
+            request.set_mass(
+                output_unit=_parse_unit(options.unit_mass, UNIT_MASS_MAP, "unit_mass"),
+                material_density=options.density,
+                material_density_unit=_parse_unit(
+                    options.unit_density,
+                    UNIT_DENSITY_MAP,
+                    "unit_density",
+                ),
+            )
+    return request
+
+
+def _physical_property_value(
+    property_name: KclPhysicalProperty,
+    response: kcl.PhysicalPropertiesResponse,
+    options: KclPhysicalPropertiesRequest,
+) -> object:
+    if property_name == "volume":
+        return {"value": response.get_volume(), "unit": options.unit_volume}
+    if property_name == "mass":
+        return {"value": response.get_mass(), "unit": options.unit_mass}
+    if property_name == "surface_area":
+        return {"value": response.get_surface_area(), "unit": options.unit_area}
+    if property_name == "center_of_mass":
+        center = response.get_center_of_mass()
+        return {
+            "value": {"x": center.x, "y": center.y, "z": center.z},
+            "unit": options.unit_length,
+        }
+    bounding_box = response.get_bounding_box()
+    center = bounding_box.get_center()
+    dimensions = bounding_box.get_dimensions()
+    return {
+        "center": {"x": center.x, "y": center.y, "z": center.z},
+        "dimensions": {
+            "x": dimensions.x,
+            "y": dimensions.y,
+            "z": dimensions.z,
+        },
+        "unit": options.unit_length,
+    }
+
+
+async def _collect_session_physical_properties(
+    session: kcl.KclSession,
+    request: KclPhysicalPropertiesRequest,
+    inspection: KclExecutionInspection,
+) -> None:
+    values: dict[str, object] = {}
+    try:
+        response = await session.measure(_physical_properties_request(request))
+    except Exception as error:
+        inspection.physical_property_errors = {
+            property_name: str(error) for property_name in request.properties
+        }
+        inspection.physical_analysis_status = "failed"
+        return
+
+    for property_name in request.properties:
+        try:
+            values[property_name] = _physical_property_value(
+                property_name, response, request
+            )
+        except Exception as error:
+            inspection.physical_property_errors[property_name] = str(error)
+
+    inspection.physical_properties = values or None
+    if values:
+        inspection.physical_analysis_status = (
+            "partial" if inspection.physical_property_errors else "succeeded"
+        )
+    else:
+        inspection.physical_analysis_status = "failed"
+
+
 async def _execute_kcl_with_preflight(
     kcl_code: str | None,
     kcl_path: Path | str | None,
     session_id: str | None,
     *,
     operation: str,
+    snapshot_request: KclSnapshotRequest | None = None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None = None,
 ) -> ResultZooExecuteKcl:
+    if session_id is not None and (
+        snapshot_request is not None or physical_properties_request is not None
+    ):
+        raise ValueError(
+            "snapshot and physical-property outputs are only available for local execution"
+        )
+    _validate_execution_inspection_requests(
+        snapshot_request, physical_properties_request
+    )
+    inspection = _new_execution_inspection(
+        snapshot_request, physical_properties_request
+    )
     mock = KclExecutionStage("not_run", "Mock preflight has not run")
     real = KclExecutionStage("not_run", "Real execution was not started")
     stage: Literal["mock_preflight", "real_execution"] = "mock_preflight"
@@ -1703,7 +2015,11 @@ async def _execute_kcl_with_preflight(
                     0,
                 )
                 return ResultZooExecuteKclLocal(
-                    False, _execution_result_message(mock), mock, real
+                    False,
+                    _execution_result_message(mock),
+                    mock,
+                    real,
+                    inspection=inspection,
                 )
 
             stage = "real_execution"
@@ -1727,23 +2043,85 @@ async def _execute_kcl_with_preflight(
                     "mock-preflight diagnostics are available in mock_preflight.",
                 )
             else:
+                if (
+                    snapshot_request is not None
+                    or physical_properties_request is not None
+                ):
 
-                async def execute() -> "kcl.ExecOutcome":
-                    nonlocal attempts
-                    attempts += 1
-                    if resolved.code is not None:
-                        return await kcl.execute_code(resolved.code)
-                    assert resolved.path is not None
-                    return await kcl.execute(resolved.path)
+                    async def execute_session() -> kcl.KclSession:
+                        nonlocal attempts
+                        attempts += 1
+                        if resolved.code is not None:
+                            return await kcl.new_kcl_session_code(
+                                resolved.code,
+                                highlight_edges=snapshot_request.highlight_edges
+                                if snapshot_request is not None
+                                else None,
+                                video_res_width=MODELING_VIDEO_RESOLUTION,
+                                video_res_height=MODELING_VIDEO_RESOLUTION,
+                            )
+                        assert resolved.path is not None
+                        return await kcl.new_kcl_session(
+                            resolved.path,
+                            highlight_edges=snapshot_request.highlight_edges
+                            if snapshot_request is not None
+                            else None,
+                            video_res_width=MODELING_VIDEO_RESOLUTION,
+                            video_res_height=MODELING_VIDEO_RESOLUTION,
+                        )
 
-                outcome = await _execute_with_retries(execute, _operation=operation)
-                issues = _format_execution_issues(outcome)
+                    session = await _execute_with_retries(
+                        execute_session, _operation=operation
+                    )
+                    async with session:
+                        outcome = session.outcome
+                        constraint_report = outcome.sketch_constraint_report()
+                        inspection.sketch_constraints = (
+                            _format_session_constraint_report(
+                                constraint_report, resolved
+                            )
+                        )
+                        inspection.sketch_constraints_status = (
+                            "succeeded" if constraint_report.is_complete else "partial"
+                        )
+                        issues = _format_execution_issues(outcome)
+                        if "fatal" not in issues and "error" not in issues:
+                            if snapshot_request is not None:
+                                await _collect_session_snapshots(
+                                    session, snapshot_request, inspection
+                                )
+                            if physical_properties_request is not None:
+                                await _collect_session_physical_properties(
+                                    session, physical_properties_request, inspection
+                                )
+                else:
+
+                    async def execute() -> kcl.ExecOutcome:
+                        nonlocal attempts
+                        attempts += 1
+                        if resolved.code is not None:
+                            return await kcl.execute_code(resolved.code)
+                        assert resolved.path is not None
+                        return await kcl.execute(resolved.path)
+
+                    outcome = await _execute_with_retries(execute, _operation=operation)
+                    constraint_report = outcome.sketch_constraint_report()
+                    inspection.sketch_constraints = _format_session_constraint_report(
+                        constraint_report, resolved
+                    )
+                    inspection.sketch_constraints_status = (
+                        "succeeded" if constraint_report.is_complete else "partial"
+                    )
+                    issues = _format_execution_issues(outcome)
+
+                has_blocking_issues = "fatal" in issues or "error" in issues
                 real = KclExecutionStage(
-                    "succeeded",
+                    "failed" if has_blocking_issues else "succeeded",
                     "KCL code executed with diagnostics"
                     if issues
                     else "KCL code executed successfully",
                     issues,
+                    "CompilationIssue" if has_blocking_issues else None,
                 )
                 resolved.remap_diagnostics(real)
             _report_execution_stage_event(
@@ -1752,6 +2130,7 @@ async def _execute_kcl_with_preflight(
                 real.status,
                 started_at,
                 attempts,
+                real.error_family,
             )
             if artifact_graph is not None:
                 return ResultZooExecuteKclRemote(
@@ -1760,9 +2139,14 @@ async def _execute_kcl_with_preflight(
                     mock,
                     real,
                     artifact_graph,
+                    inspection=inspection,
                 )
             return ResultZooExecuteKclLocal(
-                True, _execution_result_message(real), mock, real
+                real.status == "succeeded",
+                _execution_result_message(real),
+                mock,
+                real,
+                inspection=inspection,
             )
     except asyncio.CancelledError:
         _report_execution_stage_event(
@@ -1796,13 +2180,29 @@ async def _execute_kcl_with_preflight(
                 0,
             )
             return ResultZooExecuteKclLocal(
-                False, f"Failed to mock execute KCL code: {detail}", mock, real
+                False,
+                f"Failed to mock execute KCL code: {detail}",
+                mock,
+                real,
+                inspection=inspection,
             )
+        constraint_report = getattr(error, "sketch_constraint_report", None)
+        if constraint_report is not None:
+            inspection.sketch_constraints = _format_session_constraint_report(
+                constraint_report, resolved
+            )
+            inspection.sketch_constraints_status = "partial"
+        else:
+            inspection.sketch_constraints_status = "failed"
         real = KclExecutionStage(
             "failed", "Real execution failed", {"error": [detail]}, error_family
         )
         return ResultZooExecuteKclLocal(
-            False, f"Failed to execute KCL code: {detail}", mock, real
+            False,
+            f"Failed to execute KCL code: {detail}",
+            mock,
+            real,
+            inspection=inspection,
         )
 
 
@@ -1810,6 +2210,9 @@ async def zoo_execute_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
     session_id: str | None = None,
+    *,
+    snapshot_request: KclSnapshotRequest | None = None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None = None,
 ) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -1817,6 +2220,8 @@ async def zoo_execute_kcl(
         kcl_code (str | None): Self-contained KCL code. Standard-library imports are allowed; filesystem imports require kcl_path.
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
         session_id (str | None): An open modeling session in which to execute the KCL.
+        snapshot_request: Optional views to render from the local real-execution session.
+        physical_properties_request: Optional properties to measure from that same session.
 
     Returns:
         ResultZooExecuteKcl: Separate mock-preflight and real-execution outcomes.
@@ -1824,12 +2229,17 @@ async def zoo_execute_kcl(
         Session successes include the artifact graph's temporary JSON file path.
         Transient local real-execution failures retry the same captured input
         without repeating preflight.
+        Local execution includes a full sketch-constraint report, or the partial
+        report retained by KclError. Requested snapshots and physical properties
+        are collected serially before the real-execution session closes.
     """
     return await _execute_kcl_with_preflight(
         kcl_code,
         kcl_path,
         session_id,
         operation="execute_kcl",
+        snapshot_request=snapshot_request,
+        physical_properties_request=physical_properties_request,
     )
 
 
@@ -2029,6 +2439,7 @@ def _format_constraint_status(status: kcl.SketchConstraintStatus) -> dict:
     """Format a single SketchConstraintStatus into a dict."""
     return {
         "name": status.name,
+        "instance_index": status.instance_index,
         "status": str(status.status).removeprefix("ConstraintKind."),
         "free_count": status.free_count,
         "conflict_count": status.conflict_count,
@@ -2063,6 +2474,23 @@ def _format_constraint_report(report: kcl.SketchConstraintReport) -> dict:
             "phase": report.kcl_error.phase,
             "text": report.kcl_error.text,
         }
+    return result
+
+
+def _format_session_constraint_report(
+    report: kcl.SketchConstraintReport,
+    resolved: _ResolvedKclExecution | None,
+) -> dict[str, object]:
+    result = _format_constraint_report(report)
+    remap = resolved.source_report if resolved is not None else lambda value: value
+    result.update(
+        warnings=[remap(value) for value in report.warnings],
+        execution_errors=[remap(value) for value in report.execution_errors],
+        execution_fatals=[remap(value) for value in report.execution_fatals],
+    )
+    kcl_error = result.get("kcl_error")
+    if isinstance(kcl_error, dict) and isinstance(kcl_error.get("text"), str):
+        kcl_error["text"] = remap(kcl_error["text"])
     return result
 
 
@@ -2311,8 +2739,8 @@ async def _open_modeling_websocket(client: AsyncKittyCAD) -> ClientConnection:
             "post_effect": PostEffectType.SSAO,
             "show_grid": "false",
             "unlocked_framerate": "false",
-            "video_res_height": 1024,
-            "video_res_width": 1024,
+            "video_res_height": MODELING_VIDEO_RESOLUTION,
+            "video_res_width": MODELING_VIDEO_RESOLUTION,
             "webrtc": "false",
         }
     )

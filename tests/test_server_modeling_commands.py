@@ -642,6 +642,17 @@ async def test_kcl_execution_tools_forward_session_id(
             "diagnostics": {},
             "error_family": None,
         },
+        "inspection": {
+            "sketch_constraints_status": "not_run",
+            "sketch_constraints": None,
+            "rendered_snapshots_status": "not_requested",
+            "rendered_snapshot": None,
+            "completed_snapshot_views": [],
+            "snapshot_errors": {},
+            "physical_analysis_status": "not_requested",
+            "physical_properties": None,
+            "physical_property_errors": {},
+        },
         "path_artifact_graph": str(artifact_graph_path),
     }
     assert _result(project_response) == _result(execute_response)
