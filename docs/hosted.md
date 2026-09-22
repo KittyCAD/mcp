@@ -102,3 +102,33 @@ Build browser assets with `npm ci --ignore-scripts && npm run build` in
 Hosted image and release workflows include this step. Attachment import accepts
 only explicitly configured `ZOO_MCP_FILE_HOSTS`, resolves and pins public IPs,
 and rejects redirects. Configure that allowlist for each deployment.
+
+## Distribution and rollout
+
+`server.json` retains the local PyPI package and adds the planned remote endpoint.
+`distribution/zoo` contains the catalog plugin package; archive its contents,
+including dotfiles, when submission is authorized. The current package version
+remains 0.28.1. Follow the repository release versioning instructions before a
+new release. Catalog descriptions and fixture screenshots are under
+[`docs/catalog`](catalog/submission.md).
+
+`deploy/hosted.yaml` is a deployment example, with an intentionally incomplete
+image digest. Select a reviewed immutable image, configure matching API contracts
+and secrets, and use the deployment's own issuer/resource/callback URLs before
+applying it. Production enablement and external publication require separate
+rollout steps; this stack does not perform either.
+
+Before that rollout, exercise a public API PR preview with the pinned image:
+
+1. Complete OAuth consent, PKCE exchange, refresh, and revocation using the
+   supported Claude and Codex metadata clients. Check API-token exchange and
+   revocation of its originating API key.
+2. Upload and download a file, format a source project, and export a model.
+   Verify another grant cannot read its files, jobs, or modeling sessions.
+3. Reuse a modeling session across calls and through another service pod. Keep
+   a direct call open beyond the normal proxy idle interval and confirm SSE
+   keepalives and the final result reach the client through public ingress.
+4. Compare a direct operation with the completed result of its background form;
+   retry the same idempotency key, cancel a running job, and interrupt a worker.
+5. Open, modify, save, and preview a project in the browser and MCP app resource.
+   Capture final catalog screenshots from the deployed service before submission.

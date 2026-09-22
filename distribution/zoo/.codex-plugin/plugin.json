@@ -1,0 +1,40 @@
+{
+  "name": "zoo",
+  "version": "0.28.1",
+  "description": "Create, inspect, convert, and manage CAD models with Zoo.",
+  "author": {
+    "name": "Zoo",
+    "url": "https://zoo.dev"
+  },
+  "homepage": "https://github.com/KittyCAD/mcp",
+  "repository": "https://github.com/KittyCAD/mcp",
+  "license": "MIT",
+  "keywords": [
+    "cad",
+    "3d",
+    "kcl",
+    "engineering"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Zoo",
+    "shortDescription": "Create and work with CAD models.",
+    "longDescription": "Create editable KCL models, upload CAD files, inspect geometry, export manufacturing formats, and manage projects in Zoo. Includes an interactive 3D workspace. Requires a Zoo account; CAD operations are metered through Zoo API billing.",
+    "developerName": "Zoo",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://zoo.dev",
+    "privacyPolicyURL": "https://zoo.dev/privacy-policy",
+    "termsOfServiceURL": "https://zoo.dev/terms-and-conditions",
+    "defaultPrompt": [
+      "Design an adjustable mounting bracket.",
+      "Open my Zoo projects.",
+      "Convert a CAD file to STEP and preview it."
+    ],
+    "brandColor": "#235F3C",
+    "logo": "./assets/zoo-logo.svg"
+  }
+}
