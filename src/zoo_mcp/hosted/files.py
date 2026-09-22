@@ -4,13 +4,18 @@ import base64
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import mimetypes
+import socket
 import stat
 import time
 import zipfile
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
+
+import httpx
 
 from .backend import Backend, Principal, ServiceError
 from .config import Settings
@@ -267,3 +272,63 @@ class Artifacts:
                     )
                 archive.write(path, relative_path(path.relative_to(root).as_posix()))
         return self.describe(p, await self.store(p, "project.zip", output.getvalue()))
+
+    async def import_openai_file(self, p: Principal, value: dict) -> dict:
+        p.require("files:write")
+        url = urlsplit(value["download_url"])
+        if (
+            url.scheme != "https"
+            or url.hostname not in self.settings.file_hosts
+            or url.username
+            or url.password
+            or url.port not in (None, 443)
+        ):
+            raise ServiceError(
+                "invalid_file_url",
+                "This attachment host is not supported. Use the Zoo upload picker.",
+            )
+        # Exact host allowlist plus public DNS targets; deployments also restrict egress.
+        import asyncio
+
+        addresses = await asyncio.get_running_loop().getaddrinfo(
+            url.hostname, 443, type=socket.SOCK_STREAM
+        )
+        if not addresses or any(
+            not ipaddress.ip_address(a[4][0]).is_global for a in addresses
+        ):
+            raise ServiceError(
+                "invalid_file_url", "Attachment URL must resolve to public addresses."
+            )
+        # Pin the vetted address while preserving TLS SNI and hostname verification.
+        # A dedicated client prevents proxy/environment routing and connection reuse
+        # across different hostnames that happen to resolve to the same address.
+        pinned = httpx.URL(value["download_url"]).copy_with(host=addresses[0][4][0])
+        async with (
+            httpx.AsyncClient(
+                trust_env=False, timeout=60, follow_redirects=False
+            ) as client,
+            client.stream(
+                "GET",
+                pinned,
+                headers={"Host": url.hostname},
+                extensions={"sni_hostname": url.hostname},
+            ) as response,
+        ):
+            if response.status_code != 200:
+                raise ServiceError(
+                    "attachment_expired",
+                    "Select the attachment again to obtain a fresh download link.",
+                )
+            data = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(data) + len(chunk) > self.settings.max_file_bytes:
+                    raise ServiceError(
+                        "file_too_large", "The attachment exceeds the upload limit."
+                    )
+                data.extend(chunk)
+        return self.describe(
+            p,
+            await self.store(
+                p, value.get("file_name") or "attachment.bin", bytes(data)
+            ),
+        )

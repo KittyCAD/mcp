@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Zoo workspace</title>
+    <style>
+      :root {
+        font:
+          14px/1.5 system-ui,
+          sans-serif;
+        color: #192923;
+        background: #f3f5f1;
+        font-synthesis: none;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      header {
+        padding: 18px 24px;
+        border-bottom: 1px solid #d9dfd7;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        background: #fff;
+      }
+      header strong {
+        font-size: 25px;
+        letter-spacing: -1px;
+      }
+      header span {
+        color: #5b6b61;
+      }
+      header a {
+        margin-left: auto;
+        color: #286047;
+      }
+      main {
+        padding: 20px;
+        max-width: 1100px;
+        margin: auto;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+        border: 1px solid #c4cfc4;
+        border-radius: 7px;
+        background: #fff;
+        color: #24432e;
+        padding: 9px 13px;
+      }
+      button:hover {
+        background: #edf3eb;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: wait;
+      }
+      .primary {
+        background: #235f3c;
+        color: white;
+        border-color: #235f3c;
+      }
+      .primary:hover {
+        background: #164e2d;
+      }
+      input,
+      select {
+        padding: 9px;
+        border: 1px solid #c4cfc4;
+        border-radius: 7px;
+        min-width: 0;
+      }
+      .toolbar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 275px 1fr;
+        gap: 18px;
+      }
+      .panel {
+        border: 1px solid #d5dfd3;
+        border-radius: 12px;
+        background: #fff;
+        overflow: hidden;
+      }
+      .label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 1.1px;
+        color: #607662;
+        margin: 0;
+        padding: 14px 16px;
+        border-bottom: 1px solid #e3e9e1;
+      }
+      .drop {
+        display: block;
+        padding: 18px;
+        margin: 12px;
+        border: 1px dashed #a2b7a3;
+        border-radius: 8px;
+        text-align: center;
+        color: #506b54;
+      }
+      .drop input {
+        max-width: 100%;
+        padding: 8px 0;
+        border: 0;
+        font-size: 12px;
+      }
+      .row {
+        display: block;
+        text-align: left;
+        width: 100%;
+        border: 0;
+        border-radius: 0;
+        border-top: 1px solid #eef1ec;
+        padding: 13px 16px;
+        overflow-wrap: anywhere;
+      }
+      .row.selected {
+        background: #edf5e9;
+        border-left: 3px solid #39723e;
+      }
+      .row small {
+        display: block;
+        color: #6e806f;
+      }
+      .empty {
+        padding: 24px 16px;
+        color: #748175;
+      }
+      .viewer {
+        height: 380px;
+        position: relative;
+        background: radial-gradient(ellipse at 50% 40%, #f8faf6, #e8eee3);
+      }
+      #canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      #placeholder {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-content: center;
+        text-align: center;
+        color: #7c917a;
+        pointer-events: none;
+      }
+      #placeholder strong {
+        font-weight: 500;
+        font-size: 20px;
+        color: #496d4c;
+      }
+      #placeholder p {
+        max-width: 250px;
+        margin: 8px auto;
+      }
+      #details {
+        padding: 16px;
+        border-top: 1px solid #e1e8dc;
+      }
+      #filename {
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+      #actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 12px;
+      }
+      #status {
+        min-height: 25px;
+        padding: 10px 0;
+        color: #426248;
+      }
+      #status.error {
+        color: #aa3535;
+      }
+      #sourceTitle {
+        flex: 1 1 200px;
+      }
+      #projectActions {
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid #e5ebe0;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      footer {
+        padding: 16px 4px;
+        color: #6a7b68;
+        font-size: 12px;
+      }
+      #login {
+        display: none;
+      }
+      .link {
+        display: block;
+        padding: 8px;
+        color: #286047;
+        overflow-wrap: anywhere;
+      }
+      canvas {
+        touch-action: none;
+      }
+      @media (max-width: 650px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        .viewer {
+          height: 300px;
+        }
+        header {
+          padding: 14px;
+        }
+        main {
+          padding: 12px;
+        }
+        #files {
+          max-height: 220px;
+          overflow: auto;
+        }
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          color: #e3ebe0;
+          background: #141d16;
+        }
+        header,
+        .panel,
+        button {
+          background: #1d2a20;
+          color: #d5e7cf;
+        }
+        input,
+        select {
+          background: #202e22;
+          color: #e3ebe0;
+        }
+        .viewer {
+          background: #202c20;
+        }
+        .row.selected {
+          background: #2a4028;
+        }
+        .primary {
+          background: #397449;
+        }
+        .label,
+        header,
+        .panel,
+        #details,
+        .row {
+          border-color: #374332;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Zoo</strong><span>CAD workspace</span
+      ><a id="account" target="_blank" rel="noreferrer">Account</a>
+    </header>
+    <main>
+      <div class="toolbar">
+        <select id="mode" aria-label="File source">
+          <option value="artifacts">Temporary files</option>
+          <option value="projects">Zoo projects</option></select
+        ><button id="refresh">Refresh</button
+        ><button id="login" class="primary">Connect Zoo</button
+        ><button id="native" hidden>Choose chat attachment</button>
+      </div>
+      <div class="grid">
+        <section class="panel">
+          <p class="label">Your files</p>
+          <label class="drop"
+            >Upload CAD, KCL, or a project ZIP<input
+              id="upload"
+              type="file"
+              aria-label="Upload CAD or KCL file"
+          /></label>
+          <div id="files" class="empty">Connect Zoo to view your files.</div>
+        </section>
+        <section class="panel">
+          <div class="viewer">
+            <canvas id="canvas"></canvas>
+            <div id="placeholder">
+              <strong>Make it tangible.</strong>
+              <p>
+                Choose a model to explore it in 3D. Drag to orbit and scroll to
+                zoom.
+              </p>
+            </div>
+          </div>
+          <div id="details">
+            <div id="filename">No file selected</div>
+            <div id="actions">
+              <button id="preview" disabled>Preview in 3D</button
+              ><button id="download" disabled>Download</button>
+            </div>
+            <div id="projectActions">
+              <input
+                id="sourceTitle"
+                aria-label="Project title"
+                placeholder="Project title"
+              /><button id="save" disabled>Save to Zoo</button
+              ><button id="publish" hidden>Publish</button
+              ><button id="share" hidden>Share</button
+              ><button id="transfer" hidden>Move to organization</button
+              ><button id="delete" hidden>Delete project</button>
+            </div>
+            <div id="links"></div>
+          </div>
+        </section>
+      </div>
+      <div id="status" role="status" aria-live="polite"></div>
+      <footer>
+        Temporary files are kept for 7 days. Saved Zoo projects follow your
+        account’s retention settings. CAD operations use your Zoo API credits
+        and billing settings.
+      </footer>
+    </main>
+    <!-- APPLICATION -->
+  </body>
+</html>

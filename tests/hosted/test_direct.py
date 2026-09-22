@@ -20,13 +20,6 @@ from zoo_mcp.hosted.runtime import Runtime
 @pytest.mark.asyncio
 async def test_foundation_catalog_and_direct_results():
     tools = {tool.name: tool for tool in await catalog()}
-    assert (
-        not {
-            "open_zoo_workspace",
-            "import_attachment",
-        }
-        & tools.keys()
-    )
     assert "idempotency_key" not in tools["format_kcl"].input_schema["required"]
     assert (
         tools["format_kcl"].input_schema["properties"]["execution_mode"]["default"]

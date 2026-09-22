@@ -35,6 +35,32 @@ SCENE_READ_TOOLS = {
 
 # name: (description, properties, required, scope, mutates)
 CUSTOM: dict[str, tuple[str, dict[str, Any], list[str], str, bool]] = {
+    "open_zoo_workspace": (
+        "Open Zoo's upload picker, project browser, and interactive 3D viewer.",
+        {},
+        [],
+        "",
+        False,
+    ),
+    "import_attachment": (
+        "Import a user-selected ChatGPT attachment into a private Zoo artifact.",
+        {
+            "file": {
+                "type": "object",
+                "properties": {
+                    "download_url": TEXT,
+                    "file_id": TEXT,
+                    "mime_type": TEXT,
+                    "file_name": TEXT,
+                },
+                "required": ["download_url", "file_id"],
+                "additionalProperties": False,
+            }
+        },
+        ["file"],
+        "files:write",
+        True,
+    ),
     "list_projects": (
         "List Zoo projects accessible to your connected account.",
         {},
@@ -310,6 +336,10 @@ async def catalog() -> list[Tool]:
         meta: dict = {
             "securitySchemes": [{"type": "oauth2", "scopes": scopes_for(name)}]
         }
+        if name == "open_zoo_workspace":
+            meta["ui"] = {"resourceUri": "ui://zoo/workspace-v1.html"}
+        if name == "import_attachment":
+            meta["openai/fileParams"] = ["file"]
         tools.append(
             Tool(
                 name=name,

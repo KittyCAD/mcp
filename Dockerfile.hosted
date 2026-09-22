@@ -1,8 +1,16 @@
+FROM node:24-bookworm-slim AS workspace
+WORKDIR /build
+COPY src/zoo_mcp/hosted/web/package*.json ./
+RUN npm ci --ignore-scripts
+COPY src/zoo_mcp/hosted/web/ ./
+RUN npm run check && npm run build
+
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS python
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src/ src/
+COPY --from=workspace /build/dist/ src/zoo_mcp/hosted/web/dist/
 RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.13-slim-bookworm

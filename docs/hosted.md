@@ -87,3 +87,18 @@ updating a project submits its complete source tree, the acknowledged revision,
 and explicit deleted paths. Existing API ownership and revision checks remain
 authoritative. Direct results remain the default; eligible operations can opt
 into background execution.
+
+## Browser workspace and previews
+
+`/mcp/workspace` and the `ui://zoo/workspace-v1.html` MCP app resource serve the
+same bundled workspace. It uses deployment-derived OAuth endpoints and the
+reserved workspace client supplied by the API authorization slice. Browser
+operations explicitly request background execution and poll persisted results.
+The existing Three.js viewer, source editor, and model previews are retained;
+GLB API changes and a different viewer remain separate decisions.
+
+Build browser assets with `npm ci --ignore-scripts && npm run build` in
+`src/zoo_mcp/hosted/web` before building a wheel or starting this service.
+Hosted image and release workflows include this step. Attachment import accepts
+only explicitly configured `ZOO_MCP_FILE_HOSTS`, resolves and pins public IPs,
+and rejects redirects. Configure that allowlist for each deployment.
