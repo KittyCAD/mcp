@@ -1,0 +1,182 @@
+// Spool flange 38305T22
+// Drawing-based reconstruction; nominal dimensions exact, relief dimensions estimated.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
+flangeDiameter = 457.2
+boreDiameter = 76.2
+overallThickness = 31.75
+webThickness = 15.24
+ribTop = 25.4
+ribThickness = 3.2
+hubOuterRadius = 81
+hubInnerRadius = hubOuterRadius - ribThickness
+collarOuterRadius = 74.7
+collarInnerRadius = 71.5
+petalWidth = 45
+petalRootRadius = 66
+petalTipCenterRadius = 148.5
+
+fn roundPrism(rad, depth) {
+  diskProfile = sketch(on = XY) {
+    boundary = circle(start = [var 80mm, var 0mm], center = [var 0mm, var 0mm])
+    coincident([boundary.center, ORIGIN])
+    horizontal([boundary.start, boundary.center])
+    radius(boundary) == rad
+  }
+  diskSolid = extrude(region(segments = [diskProfile.boundary]), length = depth)
+  hide(diskProfile)
+  return diskSolid
+}
+
+fn capsulePrism(width, straightLength, depth) {
+  capsuleProfile = sketch(on = XY) {
+    rightSide = line(start = [var 20mm, var -40mm], end = [var 20mm, var 40mm])
+    upperEnd = arc(start = [var 20mm, var 40mm], end = [var -20mm, var 40mm], center = [var 0mm, var 40mm])
+    leftSide = line(start = [var -20mm, var 40mm], end = [var -20mm, var -40mm])
+    lowerEnd = arc(start = [var -20mm, var -40mm], end = [var 20mm, var -40mm], center = [var 0mm, var -40mm])
+    coincident([rightSide.end, upperEnd.start])
+    coincident([upperEnd.end, leftSide.start])
+    coincident([leftSide.end, lowerEnd.start])
+    coincident([lowerEnd.end, rightSide.start])
+    coincident([upperEnd.center, [0mm, straightLength / 2]])
+    coincident([lowerEnd.center, [0mm, -straightLength / 2]])
+    horizontal([upperEnd.start, upperEnd.center])
+    horizontal([upperEnd.end, upperEnd.center])
+    horizontal([lowerEnd.start, lowerEnd.center])
+    horizontal([lowerEnd.end, lowerEnd.center])
+    radius(upperEnd) == width / 2
+    radius(lowerEnd) == width / 2
+  }
+  capsuleSolid = extrude(region(segments = [capsuleProfile.rightSide, capsuleProfile.upperEnd], intersectionIndex = -1, direction = CCW), length = depth)
+  hide(capsuleProfile)
+  return capsuleSolid
+}
+
+fn rectanglePrism(width, span, depth) {
+  rectangleProfile = sketch(on = XY) {
+    bottomSide = line(start = [var -5mm, var -20mm], end = [var 5mm, var -20mm])
+    rightSide = line(start = [var 5mm, var -20mm], end = [var 5mm, var 20mm])
+    topSide = line(start = [var 5mm, var 20mm], end = [var -5mm, var 20mm])
+    leftSide = line(start = [var -5mm, var 20mm], end = [var -5mm, var -20mm])
+    coincident([bottomSide.end, rightSide.start])
+    coincident([rightSide.end, topSide.start])
+    coincident([topSide.end, leftSide.start])
+    coincident([leftSide.end, bottomSide.start])
+    horizontal(bottomSide)
+    horizontal(topSide)
+    vertical(rightSide)
+    vertical(leftSide)
+    horizontalDistance([ORIGIN, bottomSide.start]) == -width / 2
+    verticalDistance([ORIGIN, bottomSide.start]) == -span / 2
+    distance([bottomSide.start, bottomSide.end]) == width
+    distance([rightSide.start, rightSide.end]) == span
+  }
+  rectangleSolid = extrude(region(segments = [rectangleProfile.bottomSide, rectangleProfile.rightSide], intersectionIndex = -1, direction = CCW), length = depth)
+  hide(rectangleProfile)
+  return rectangleSolid
+}
+
+plateProfile = sketch(on = XY) {
+  outside = circle(start = [var 228.6mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([outside.center, ORIGIN])
+  horizontal([outside.start, outside.center])
+  diameter(outside) == flangeDiameter
+}
+flangeWeb = extrude(region(segments = [plateProfile.outside]), length = webThickness)
+hide(plateProfile)
+
+petalBlank = capsulePrism(width = petalWidth, straightLength = petalTipCenterRadius - petalRootRadius, depth = ribTop - 1)
+  |> translate(xyz = [0, (petalTipCenterRadius + petalRootRadius) / 2, 1], global = true)
+  |> rotate(axis = Z, angle = -36deg, global = true)
+petalCavity = capsulePrism(width = petalWidth - 2 * ribThickness, straightLength = petalTipCenterRadius - petalRootRadius, depth = ribTop + 2)
+  |> translate(xyz = [0, (petalTipCenterRadius + petalRootRadius) / 2, 0], global = true)
+  |> rotate(axis = Z, angle = -36deg, global = true)
+petalRootTool = roundPrism(rad = hubInnerRadius + 0.5, depth = ribTop + 2)
+petalRib = subtract([petalBlank], tools = [petalCavity, petalRootTool])
+petalRibs = patternCircular3d(petalRib, instances = 5, axis = Z, center = [0, 0, 0], arcDegrees = 360deg, rotateDuplicates = true)
+hubBlank = roundPrism(rad = hubOuterRadius, depth = ribTop)
+hubCavity = roundPrism(rad = hubInnerRadius, depth = ribTop + 2)
+hubRim = subtract([hubBlank], tools = [hubCavity])
+collarBlank = roundPrism(rad = collarOuterRadius, depth = ribTop)
+collarCavity = roundPrism(rad = collarInnerRadius, depth = ribTop + 2)
+collar = subtract([collarBlank], tools = [collarCavity])
+coreRings = union([flangeWeb, hubRim[0], collar[0]])
+corePetalA = union([coreRings[0], petalRibs[0]])
+corePetalB = union([corePetalA[0], petalRibs[1]])
+corePetalC = union([corePetalB[0], petalRibs[2]])
+corePetalD = union([corePetalC[0], petalRibs[3]])
+coreBlank = union([corePetalD[0], petalRibs[4]])
+
+ringSplit = rectanglePrism(width = 5.5, span = 23, depth = ribTop - webThickness + 2)
+  |> translate(xyz = [0, 78, webThickness], global = true)
+ringSplits = patternCircular3d(ringSplit, instances = 5, axis = Z, center = [0, 0, 0], arcDegrees = 360deg, rotateDuplicates = true)
+splitCore = subtract(coreBlank, tools = ringSplits)
+
+boreProfile = sketch(on = XY) {
+  bore = circle(start = [var 38.1mm, var 0mm], center = [var 0mm, var 0mm])
+  coincident([bore.center, ORIGIN])
+  horizontal([bore.start, bore.center])
+  diameter(bore) == boreDiameter
+}
+boreTool = extrude(region(segments = [boreProfile.bore]), length = overallThickness + 2)
+hide(boreProfile)
+keyWidth = 17.5
+keyOuterRadius = 57
+keyTool = rectanglePrism(width = keyWidth, span = 25, depth = overallThickness + 2)
+  |> translate(xyz = [0, keyOuterRadius - 12.5, 0], global = true)
+keyTools = patternCircular3d(keyTool, instances = 3, axis = Z, center = [0, 0, 0], arcDegrees = 360deg, rotateDuplicates = true)
+keyedCore = subtract(splitCore, tools = [boreTool, keyTools[0], keyTools[1], keyTools[2]])
+
+fn curvedCapsulePrism(trackRadius, width, halfAngle, depth) {
+  outerRadius = trackRadius + width / 2
+  innerRadius = trackRadius - width / 2
+  railProfile = sketch(on = XY) {
+    outerArc = arc(start = [var 38mm, var 206mm], end = [var -38mm, var 206mm], center = [var 0mm, var 0mm])
+    leftCap = arc(start = [var -38mm, var 206mm], end = [var -33mm, var 181mm], center = [var -35.5mm, var 193.5mm])
+    innerArc = arc(start = [var -33mm, var 181mm], end = [var 33mm, var 181mm], center = [var 0mm, var 0mm], direction = CW)
+    rightCap = arc(start = [var 33mm, var 181mm], end = [var 38mm, var 206mm], center = [var 35.5mm, var 193.5mm])
+    coincident([outerArc.center, ORIGIN])
+    coincident([innerArc.center, ORIGIN])
+    radius(outerArc) == outerRadius
+    radius(innerArc) == innerRadius
+    horizontalDistance([ORIGIN, outerArc.start]) == outerRadius * sin(halfAngle)
+    horizontalDistance([ORIGIN, outerArc.end]) == -outerRadius * sin(halfAngle)
+    horizontalDistance([ORIGIN, innerArc.start]) == -innerRadius * sin(halfAngle)
+    horizontalDistance([ORIGIN, innerArc.end]) == innerRadius * sin(halfAngle)
+    coincident([outerArc.end, leftCap.start])
+    coincident([leftCap.end, innerArc.start])
+    coincident([innerArc.end, rightCap.start])
+    coincident([rightCap.end, outerArc.start])
+    tangent([outerArc, leftCap])
+    tangent([outerArc, rightCap])
+  }
+  railSolid = extrude(region(segments = [railProfile.outerArc, railProfile.leftCap], intersectionIndex = -1, direction = CCW), length = depth)
+  hide(railProfile)
+  return railSolid
+}
+
+rimTrackRadius = 196.5
+rimRailWidth = 25.4
+rimHalfAngle = 10.5deg
+rimBlank = curvedCapsulePrism(trackRadius = rimTrackRadius, width = rimRailWidth, halfAngle = rimHalfAngle, depth = ribTop - 1)
+  |> translate(xyz = [0, 0, 1], global = true)
+rimPocket = curvedCapsulePrism(trackRadius = rimTrackRadius, width = rimRailWidth - 2 * ribThickness, halfAngle = rimHalfAngle, depth = ribTop + 2)
+rimRib = subtract([rimBlank], tools = [rimPocket])
+rimRibs = patternCircular3d(rimRib, instances = 10, axis = Z, center = [0, 0, 0], arcDegrees = 360deg, rotateDuplicates = true)
+coreWithRails = union(concat(keyedCore, items = rimRibs))
+
+rimGusset = rectanglePrism(width = 3.4, span = 33, depth = ribTop - 1)
+  |> translate(xyz = [0, 212, 1], global = true)
+  |> rotate(axis = Z, angle = -12.5deg, global = true)
+rimGussetOpposite = clone(rimGusset)
+  |> rotate(axis = Z, angle = 25deg, global = true)
+rimGussetsA = patternCircular3d(rimGusset, instances = 10, axis = Z, center = [0, 0, 0], arcDegrees = 360deg, rotateDuplicates = true)
+rimGussetsB = patternCircular3d(rimGussetOpposite, instances = 10, axis = Z, center = [0, 0, 0], arcDegrees = 360deg, rotateDuplicates = true)
+coreWithGussetsA = union(concat(coreWithRails, items = rimGussetsA))
+coreWithGussets = union(concat(coreWithGussetsA, items = rimGussetsB))
+
+collarTab = capsulePrism(width = 5, straightLength = 9, depth = ribTop - 1)
+  |> translate(xyz = [0, 79.5, 1], global = true)
+  |> rotate(axis = Z, angle = -36deg, global = true)
+collarTabs = patternCircular3d(collarTab, instances = 5, axis = Z, center = [0, 0, 0], arcDegrees = 360deg, rotateDuplicates = true)
+coreWithTabs = union(concat(coreWithGussets, items = collarTabs))
