@@ -47,7 +47,7 @@ current_disconnect: contextvars.ContextVar[asyncio.Event | None] = (
 )
 
 
-UI_URI = "ui://zoo/workspace-v1.html"
+UI_URI = "ui://zoo/workspace-v2.html"
 
 
 def create_app(

@@ -72,7 +72,7 @@ def test_modern_http_routing_and_ui_resource():
         )
         assert "error" in rpc(invalid)
         headers["Mcp-Method"] = "resources/read"
-        headers["Mcp-Name"] = "ui://zoo/workspace-v1.html"
+        headers["Mcp-Name"] = "ui://zoo/workspace-v2.html"
         resource = client.post(
             "/mcp",
             headers=headers,
@@ -80,7 +80,7 @@ def test_modern_http_routing_and_ui_resource():
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "resources/read",
-                "params": {"uri": "ui://zoo/workspace-v1.html", "_meta": meta},
+                "params": {"uri": "ui://zoo/workspace-v2.html", "_meta": meta},
             },
         )
         content = rpc(resource)["result"]["contents"][0]

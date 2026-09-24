@@ -337,7 +337,7 @@ async def catalog() -> list[Tool]:
             "securitySchemes": [{"type": "oauth2", "scopes": scopes_for(name)}]
         }
         if name == "open_zoo_workspace":
-            meta["ui"] = {"resourceUri": "ui://zoo/workspace-v1.html"}
+            meta["ui"] = {"resourceUri": "ui://zoo/workspace-v2.html"}
         if name == "import_attachment":
             meta["openai/fileParams"] = ["file"]
         tools.append(

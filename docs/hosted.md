@@ -90,7 +90,7 @@ into background execution.
 
 ## Browser workspace and previews
 
-`/mcp/workspace` and the `ui://zoo/workspace-v1.html` MCP app resource serve the
+`/mcp/workspace` and the `ui://zoo/workspace-v2.html` MCP app resource serve the
 same bundled workspace. It uses deployment-derived OAuth endpoints and the
 reserved workspace client supplied by the API authorization slice. Browser
 operations explicitly request background execution and poll persisted results.

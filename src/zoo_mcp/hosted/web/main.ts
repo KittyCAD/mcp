@@ -217,10 +217,35 @@ async function view(url: string) {
       throw new Error("Preview files must embed their textures and buffers.");
     return uri;
   });
-  const model = await new GLTFLoader(loading).parseAsync(
-    await response.arrayBuffer(),
-    "",
-  );
+  const loader = new GLTFLoader(loading);
+  loader.register((parser) => {
+    const loadBuffer = parser.loadBuffer.bind(parser);
+    // FileLoader uses fetch even for data URIs, which the app's CSP blocks.
+    // Decode embedded geometry locally; leave native GLB buffers to Three.js.
+    parser.loadBuffer = async (index) => {
+      const buffer = parser.json.buffers[index];
+      if (!buffer.uri?.startsWith("data:")) return loadBuffer(index);
+      const match =
+        /^data:application\/(?:octet-stream|gltf-buffer);base64,([\s\S]*)$/i.exec(
+          buffer.uri,
+        );
+      if (!match)
+        throw new Error("The preview contains an unsupported embedded buffer.");
+      let decoded: string;
+      try {
+        decoded = atob(decodeURIComponent(match[1]));
+      } catch {
+        throw new Error("The preview contains an invalid embedded buffer.");
+      }
+      if (decoded.length !== buffer.byteLength)
+        throw new Error("The preview contains an incomplete embedded buffer.");
+      const bytes = new Uint8Array(decoded.length);
+      for (let n = 0; n < decoded.length; n++) bytes[n] = decoded.charCodeAt(n);
+      return bytes.buffer;
+    };
+    return { name: "ZOO_embedded_buffers" };
+  });
+  const model = await loader.parseAsync(await response.arrayBuffer(), "");
   const previous = scene.getObjectByName("model");
   if (previous) {
     scene.remove(previous);
