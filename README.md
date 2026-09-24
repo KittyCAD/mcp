@@ -45,6 +45,26 @@ The server can also be run with the [mcp package](https://github.com/modelcontex
 uv run mcp run src/zoo_mcp/server.py
 ```
 
+### Streamable HTTP
+
+The server uses stdio by default. To serve the same tools over Streamable HTTP:
+
+```bash
+uvx zoo-mcp --transport streamable-http --host 127.0.0.1 --port 8000
+# From a local checkout:
+uv run -m zoo_mcp --transport streamable-http
+```
+
+Connect an MCP client to `http://127.0.0.1:8000/mcp`. The SDK manages HTTP
+sessions and streaming responses. `--host` and `--port` configure the HTTP
+listener; their defaults are `127.0.0.1` and `8000`.
+
+This mode uses the server process's Zoo credentials, local files, and modeling
+session. It is intended for a trusted single-user environment; it does not add
+authentication or isolation between users. File paths still refer to the
+server's filesystem. A shared hosted service and remote file transfers require
+separate support.
+
 ### Prebuilt binaries
 
 Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:
