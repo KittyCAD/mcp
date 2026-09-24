@@ -1,0 +1,10 @@
+.git
+.venv
+**/node_modules
+**/__pycache__
+**/test-results
+**/dist
+.DS_Store
+.env*
+tests
+docs
