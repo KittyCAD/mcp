@@ -202,4 +202,8 @@ uv run pytest -n auto
 
 The private hosted service exposes Zoo tools through the API's OAuth and API-key
 authentication. Calls return direct results and use grant-owned artifacts for
-remote files. See [the hosted deployment guide](docs/hosted.md).
+remote files; eligible operations can opt into background execution. The browser
+workspace adds uploads, project browsing, downloads, and the current 3D viewer.
+See [the hosted deployment guide](docs/hosted.md) and
+[catalog materials](docs/catalog/submission.md). Production enablement and
+catalog publication are separate rollout steps.
