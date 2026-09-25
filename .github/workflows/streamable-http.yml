@@ -1,0 +1,38 @@
+name: Zoo MCP OAuth adapter
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  hosted:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/kittycad/zoo-mcp-http:${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.1.0
+      - run: uv sync --frozen
+      - run: uv run pytest tests/test_http_auth.py tests/test_transports.py -q --tb=short
+      - run: docker build -f Dockerfile.http -t zoo-mcp:check .
+      - run: docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges -v "$PWD/scripts/check_http_sandbox.py:/check.py:ro" zoo-mcp:check python /check.py
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the checked image for API previews
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          docker tag zoo-mcp:check "$IMAGE"
+          docker push "$IMAGE"
