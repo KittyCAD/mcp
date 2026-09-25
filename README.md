@@ -65,11 +65,6 @@ authentication or isolation between users. File paths still refer to the
 server's filesystem. A shared hosted service and remote file transfers require
 separate support.
 
-For an authenticated ChatGPT connection, run the same entry point with
-`--zoo-oauth` behind the companion Zoo API deployment. This exposes the existing
-inline KCL, documentation, and dataset tools with delegated per-call credentials.
-See [ChatGPT HTTP setup](docs/http.md) for the deployment contract and test prompts.
-
 ### Prebuilt binaries
 
 Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:
