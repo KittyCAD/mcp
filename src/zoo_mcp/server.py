@@ -1771,27 +1771,12 @@ def main():
     parser.add_argument(
         "--port", type=int, default=8000, help="HTTP port (default: 8000)"
     )
-    parser.add_argument(
-        "--zoo-oauth",
-        action="store_true",
-        help="Authenticate HTTP clients through the companion Zoo API deployment",
-    )
     args = parser.parse_args()
-
-    if args.zoo_oauth and args.transport != "streamable-http":
-        parser.error("--zoo-oauth requires --transport streamable-http")
 
     logger.info("Starting MCP server with %s transport...", args.transport)
     install_shutdown_handlers()
     if args.transport == "streamable-http":
-        if args.zoo_oauth:
-            import uvicorn
-
-            from zoo_mcp.http_auth import create_app
-
-            uvicorn.run(create_app(), host=args.host, port=args.port, access_log=False)
-        else:
-            mcp.run(transport="streamable-http", host=args.host, port=args.port)
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
 
