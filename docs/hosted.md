@@ -76,3 +76,14 @@ worker. Completed side effects cannot be undone. A worker lost before recording
 an outcome becomes `interrupted` after its deadline and is never replayed
 automatically. Durable records retain outcomes, not credentials or running
 processes. There are at most eight active jobs per grant.
+
+## Project management
+
+Project tools list, open, create, update, publish, delete, share, and move Zoo
+projects through the existing API endpoints. This slice requires the API
+project/workspace authorization child and its `projects:read`, `projects:write`,
+and `projects:manage` scopes. Opening a project makes a temporary source copy;
+updating a project submits its complete source tree, the acknowledged revision,
+and explicit deleted paths. Existing API ownership and revision checks remain
+authoritative. Direct results remain the default; eligible operations can opt
+into background execution.

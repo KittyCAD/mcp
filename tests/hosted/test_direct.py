@@ -23,7 +23,6 @@ async def test_foundation_catalog_and_direct_results():
     assert (
         not {
             "open_zoo_workspace",
-            "list_projects",
             "import_attachment",
         }
         & tools.keys()

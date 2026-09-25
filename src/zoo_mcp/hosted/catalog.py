@@ -35,6 +35,109 @@ SCENE_READ_TOOLS = {
 
 # name: (description, properties, required, scope, mutates)
 CUSTOM: dict[str, tuple[str, dict[str, Any], list[str], str, bool]] = {
+    "list_projects": (
+        "List Zoo projects accessible to your connected account.",
+        {},
+        [],
+        "projects:read",
+        False,
+    ),
+    "get_project": (
+        "Read current project metadata, permissions, file list, and revision.",
+        {"project_id": UUID},
+        ["project_id"],
+        "projects:read",
+        False,
+    ),
+    "open_project": (
+        "Copy a Zoo project's current source into a temporary ZIP for modeling or editing.",
+        {"project_id": UUID},
+        ["project_id"],
+        "projects:read",
+        True,
+    ),
+    "create_project": (
+        "Create a private Zoo project from a complete temporary project ZIP.",
+        {
+            "project_artifact_id": UUID,
+            "title": TEXT,
+            "description": TEXT,
+            "entrypoint_path": TEXT,
+        },
+        ["project_artifact_id", "title"],
+        "projects:write",
+        True,
+    ),
+    "update_project": (
+        "Replace a project's draft with a complete source ZIP; requires its acknowledged revision and intentionally removed file paths.",
+        {
+            "project_id": UUID,
+            "project_artifact_id": UUID,
+            "title": TEXT,
+            "description": TEXT,
+            "entrypoint_path": TEXT,
+            "expected_revision": TEXT,
+            "deleted_paths": {"type": "array", "items": TEXT},
+        },
+        [
+            "project_id",
+            "project_artifact_id",
+            "title",
+            "expected_revision",
+            "deleted_paths",
+        ],
+        "projects:write",
+        True,
+    ),
+    "publish_project": (
+        "Submit a Zoo project for public review using the existing publication workflow.",
+        {"project_id": UUID},
+        ["project_id"],
+        "projects:manage",
+        True,
+    ),
+    "delete_project": (
+        "Delete a Zoo project and its stored content according to Zoo's existing deletion policy.",
+        {"project_id": UUID},
+        ["project_id"],
+        "projects:manage",
+        True,
+    ),
+    "list_project_share_links": (
+        "List a project's current share links.",
+        {"project_id": UUID},
+        ["project_id"],
+        "projects:read",
+        False,
+    ),
+    "create_project_share_link": (
+        "Create a public download share link for a Zoo project.",
+        {"project_id": UUID},
+        ["project_id"],
+        "projects:manage",
+        True,
+    ),
+    "delete_project_share_link": (
+        "Revoke a project's share link.",
+        {"project_id": UUID, "key": TEXT},
+        ["project_id", "key"],
+        "projects:manage",
+        True,
+    ),
+    "move_project_to_organization": (
+        "Move a personal project into the connected account's active organization library.",
+        {"project_id": UUID},
+        ["project_id"],
+        "projects:manage",
+        True,
+    ),
+    "move_project_to_personal": (
+        "Move an organization project back to personal ownership when permitted.",
+        {"project_id": UUID},
+        ["project_id"],
+        "projects:manage",
+        True,
+    ),
     "get_job": (
         "Retrieve operation status and results. Interrupted work is never replayed automatically.",
         {"job_id": UUID},
@@ -108,6 +211,10 @@ def scope_for(name: str) -> str:
 
 def scopes_for(name: str) -> list[str]:
     scopes = {scope_for(name)} - {""}
+    if name == "open_project":
+        scopes.add("files:write")
+    if name in {"create_project", "update_project"}:
+        scopes.add("files:read")
     if name not in CUSTOM and name not in DOC_TOOLS | DATASET_TOOLS | SCENE_READ_TOOLS:
         scopes.update({"files:read", "files:write"})
     return sorted(scopes)
