@@ -21,6 +21,16 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v10.1.0
       - run: uv sync --frozen
+      - uses: actions/setup-node@v6
+        with: {node-version: 24}
+      - run: npm ci --ignore-scripts
+        working-directory: src/zoo_mcp/hosted/web
+      - run: npm run check && npm run build
+        working-directory: src/zoo_mcp/hosted/web
+      - run: npx playwright install --with-deps chromium
+        working-directory: src/zoo_mcp/hosted/web
+      - run: npm test
+        working-directory: src/zoo_mcp/hosted/web
       - run: uv run pytest tests/hosted -q --tb=short
       - run: docker build -f Dockerfile.hosted -t zoo-mcp:check .
       - run: docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges -v "$PWD/scripts/check_worker_sandbox.py:/check.py:ro" zoo-mcp:check python /check.py

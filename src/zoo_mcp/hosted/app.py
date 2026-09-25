@@ -5,6 +5,7 @@ import contextvars
 import hmac
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -16,14 +17,18 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import (
     CallToolResult,
     ImageContent,
+    ListResourcesResult,
     ListToolsResult,
+    ReadResourceResult,
+    Resource,
     ResourceLink,
     TextContent,
+    TextResourceContents,
 )
 from starlette.applications import Starlette
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from zoo_mcp import __version__
@@ -40,6 +45,9 @@ current_principal: contextvars.ContextVar[Principal] = contextvars.ContextVar(
 current_disconnect: contextvars.ContextVar[asyncio.Event | None] = (
     contextvars.ContextVar("zoo_mcp_disconnect", default=None)
 )
+
+
+UI_URI = "ui://zoo/workspace-v2.html"
 
 
 def create_app(
@@ -72,6 +80,13 @@ def create_app(
             return await runtime.job(p, arguments["job_id"])
         if name == "cancel_job":
             return await runtime.cancel(p, arguments["job_id"])
+        if name == "open_zoo_workspace":
+            return {
+                "upload_limit_bytes": settings.max_file_bytes,
+                "retention_days": 7,
+                "workspace_url": settings.origin + "/mcp/workspace",
+                "account_url": settings.api_url + "/oauth2/mcp/connections",
+            }
         if name == "create_upload":
             row = await runtime.artifacts.create(
                 p, arguments["name"], arguments["size_bytes"]
@@ -104,6 +119,8 @@ def create_app(
             return {"deleted": True}
         if name == "write_kcl_project":
             return await runtime.artifacts.write_source(p, arguments["files"])
+        if name == "import_attachment":
+            return await runtime.artifacts.import_openai_file(p, arguments["file"])
         if name in CUSTOM:
             return await projects.call(p, name, arguments)
         # Source is retained even when callers submit inline KCL.
@@ -213,6 +230,42 @@ def create_app(
                 ],
             )
 
+    def ui_html() -> str:
+        return (Path(__file__).parent / "web" / "dist" / "index.html").read_text()
+
+    async def list_resources(ctx, params):
+        return ListResourcesResult(
+            resources=[
+                Resource(
+                    uri=UI_URI,
+                    name="Zoo workspace",
+                    mime_type="text/html;profile=mcp-app",
+                )
+            ]
+        )
+
+    async def read_resource(ctx, params):
+        if params.uri != UI_URI:
+            raise ValueError("Unknown resource")
+        return ReadResourceResult(
+            contents=[
+                TextResourceContents(
+                    uri=UI_URI,
+                    text=ui_html(),
+                    mime_type="text/html;profile=mcp-app",
+                    meta={
+                        "ui": {
+                            "csp": {
+                                "connectDomains": [settings.origin],
+                                "resourceDomains": [settings.origin],
+                            },
+                            "prefersBorder": True,
+                        }
+                    },
+                )
+            ]
+        )
+
     server = Server(
         "Zoo",
         version=__version__,
@@ -223,6 +276,8 @@ def create_app(
         ),
         on_list_tools=list_tools,
         on_call_tool=call_tool,
+        on_list_resources=list_resources,
+        on_read_resource=read_resource,
     )
 
     manager = StreamableHTTPSessionManager(
@@ -384,6 +439,49 @@ def create_app(
             },
         )
 
+    async def workspace_config(request: Request):
+        return JSONResponse(
+            {
+                "resource": settings.resource,
+                "api_url": settings.api_url,
+                "client_id": "8ee80fb5-b20c-49eb-97cc-0c218651a0a0",
+                "scopes": [
+                    "user:read",
+                    "modeling",
+                    "files:read",
+                    "files:write",
+                    "projects:read",
+                    "projects:write",
+                    "projects:manage",
+                    "datasets:read",
+                ],
+            }
+        )
+
+    async def workspace(request: Request):
+        import base64
+        import hashlib
+
+        html = ui_html()
+        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+        digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+        return HTMLResponse(
+            html,
+            headers={
+                "Referrer-Policy": "no-referrer",
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": f"default-src 'none'; script-src 'sha256-{digest}'; style-src 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' {settings.api_url}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    async def browser_call(request: Request):
+        p = await authenticate(request)
+        payload = await request.json()
+        return JSONResponse(
+            await call(p, payload["name"], payload.get("arguments", {}))
+        )
+
     async def metrics(request: Request):
         if not hmac.compare_digest(
             request.headers.get("x-zoo-mcp-service-token", ""), settings.service_secret
@@ -446,6 +544,7 @@ def create_app(
                 raise RuntimeError(
                     "Hosted MCP requires native Linux with Landlock ABI 3 or later"
                 )
+        ui_html()
         task = asyncio.create_task(runtime.maintain())
         async with manager.run():
             try:
@@ -466,6 +565,9 @@ def create_app(
             ),
             Route("/_internal/call", internal_call, methods=["POST"]),
             Route("/_internal/metrics", metrics),
+            Route("/mcp/workspace", workspace),
+            Route("/mcp/workspace/config", workspace_config),
+            Route("/mcp/workspace/call", browser_call, methods=["POST"]),
             Route("/healthz", health),
             Route("/readyz", health),
         ],

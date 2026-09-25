@@ -12,6 +12,7 @@ class Settings:
     service_secret: str = field(repr=False)
     capability_secret: str = field(repr=False)
     node_url: str = "http://127.0.0.1:8080"
+    file_hosts: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()
     max_file_bytes: int = 256 * 1024 * 1024
     max_project_bytes: int = 512 * 1024 * 1024
@@ -74,6 +75,9 @@ class Settings:
             node_url=os.environ.get("ZOO_MCP_NODE_URL", "http://127.0.0.1:8080"),
             allowed_origins=tuple(
                 filter(None, os.environ.get("ZOO_MCP_ALLOWED_ORIGINS", "").split(","))
+            ),
+            file_hosts=tuple(
+                filter(None, os.environ.get("ZOO_MCP_FILE_HOSTS", "").split(","))
             ),
             max_workers=int(os.environ.get("ZOO_MCP_MAX_WORKERS", "16")),
             unsafe_local_dev=os.environ.get("ZOO_MCP_UNSAFE_LOCAL_DEV") == "true",

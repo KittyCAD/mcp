@@ -208,3 +208,9 @@ __marimo__/
 
 CLAUDE.local.md
 .mcp.json
+
+# Hosted browser workspace
+src/zoo_mcp/hosted/web/node_modules/
+src/zoo_mcp/hosted/web/dist/
+src/zoo_mcp/hosted/web/test-results/
+src/zoo_mcp/hosted/web/playwright-report/
