@@ -181,3 +181,18 @@ async def test_list_org_skills_timeout_closes_client(
     assert isinstance(response.structured_content["result"], str)
     assert len(httpx_mock.get_requests()) == 2
     assert transport.is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 429, 500])
+async def test_list_org_skills_initial_http_error_is_not_an_empty_catalog(
+    skill_client: AsyncKittyCAD, httpx_mock: HTTPXMock, status: int
+) -> None:
+    httpx_mock.add_response(status_code=status)
+    response = await mcp.call_tool("list_org_skills", arguments={})
+    assert isinstance(response, CallToolResult)
+    assert response.structured_content is not None
+    result = response.structured_content["result"]
+    assert isinstance(result, str)
+    assert result.startswith("There was an error listing org skills")
+    assert len(httpx_mock.get_requests()) == 1
