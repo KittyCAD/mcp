@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 from typing import Any, ClassVar
 
+import anyio
 import pytest
 import pytest_asyncio
 from mcp.types import CallToolResult, TextContent
@@ -218,6 +219,20 @@ async def test_deadline_evicts_and_releases_capacity(pool):
         await pool.call(owner(), credential, "blocked", {})
     assert worker.closed == 1
     assert not pool.entries
+
+
+@pytest.mark.asyncio
+async def test_http_cancel_scope_cannot_interrupt_cleanup(pool):
+    await pool.call(owner(), credential, "first", {})
+    worker = FakeWorker.instances[0]
+    worker.block = asyncio.Event()
+    worker.entered.clear()
+    async with anyio.create_task_group() as group:
+        group.start_soon(pool.call, owner(), credential, "blocked", {})
+        await worker.entered.wait()
+        group.cancel_scope.cancel()
+    assert not pool.entries
+    assert not worker.workspace.exists()
 
 
 @pytest.mark.asyncio

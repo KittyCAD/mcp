@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import anyio
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, ErrorData
 
@@ -61,7 +62,8 @@ class Worker:
         try:
             self.process = await asyncio.shield(starting)
         except asyncio.CancelledError:
-            self.process = await starting
+            with anyio.CancelScope(shield=True):
+                self.process = await starting
             raise
         assert self.process.stdout is not None
         async with asyncio.timeout(30):
@@ -184,7 +186,8 @@ class WorkerPool:
                     raise
                 except BaseException:
                     if entry.valid:
-                        await self.evict(owner, entry)
+                        with anyio.CancelScope(shield=True):
+                            await self.evict(owner, entry)
                     raise
                 finally:
                     entry.running = None
