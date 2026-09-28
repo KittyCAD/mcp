@@ -17,13 +17,13 @@ from zoo_mcp.hosted.pool import Owner, WorkerPool
 from zoo_mcp.hosted.sandbox import confine
 
 
-def check_filesystem(workspace: Path, secret: Path) -> None:
+def check_filesystem(workspace: Path, outside_file: Path) -> None:
     confine(workspace)
     local = workspace / "allowed.kcl"
     local.write_text("x = 1\n")
     assert local.read_text() == "x = 1\n"
     for path in (
-        secret,
+        outside_file,
         workspace / "escape",
         Path("/proc/self/environ"),
         Path("/etc/passwd"),
@@ -34,7 +34,7 @@ def check_filesystem(workspace: Path, secret: Path) -> None:
             pass
         else:
             raise AssertionError(f"Read escaped confinement: {path}")
-    for path in (secret, Path("/tmp/escaped-hosted-worker")):
+    for path in (outside_file, Path("/tmp/escaped-hosted-worker")):
         try:
             path.write_text("must fail")
         except PermissionError:
@@ -44,12 +44,12 @@ def check_filesystem(workspace: Path, secret: Path) -> None:
     # Exercise a real native KCL import, which must obey the same kernel policy.
     from zoo_mcp.zoo_tools import zoo_mock_execute_kcl
 
-    code = f'import secret from "{secret}"\nx = secret\n'
+    code = f'import protectedValue from "{outside_file}"\nx = protectedValue\n'
     entry = workspace / "main.kcl"
     entry.write_text(code)
     success, message = asyncio.run(zoo_mock_execute_kcl(kcl_path=entry))
     assert not success, "KCL import escaped confinement"
-    assert "synthetic-secret-value" not in message
+    assert "synthetic-fixture-value" not in message
 
 
 async def check_workers(root: Path) -> None:
@@ -136,15 +136,15 @@ def main() -> None:
         root = Path(directory)
         workspace = root / "workspace"
         workspace.mkdir()
-        secret = root / "secret.kcl"
-        secret.write_text('export secret = "synthetic-secret-value"\n')
-        (workspace / "escape").symlink_to(secret)
+        outside_file = root / "protected.kcl"
+        outside_file.write_text('export protectedValue = "synthetic-fixture-value"\n')
+        (workspace / "escape").symlink_to(outside_file)
         subprocess.run(
-            [sys.executable, __file__, str(workspace), str(secret)],
+            [sys.executable, __file__, str(workspace), str(outside_file)],
             check=True,
             cwd=workspace,
         )
-        os.environ["SERVICE_SECRET"] = "synthetic-parent-only-secret"
+        os.environ["PARENT_ONLY_MARKER"] = "synthetic-parent-only-value"
         asyncio.run(check_workers(root / "workers"))
     print("Linux confinement and persistent worker checks passed")
 
