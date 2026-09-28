@@ -2509,7 +2509,7 @@ def zoo_lint_and_fix_kcl(
 
 def _format_constraint_status(status: kcl.SketchConstraintStatus) -> dict:
     """Format a single SketchConstraintStatus into a dict."""
-    result = {
+    return {
         "name": status.name,
         "instance_index": status.instance_index,
         "status": str(status.status).removeprefix("ConstraintKind."),
@@ -2517,10 +2517,6 @@ def _format_constraint_status(status: kcl.SketchConstraintStatus) -> dict:
         "conflict_count": status.conflict_count,
         "total_count": status.total_count,
     }
-    instance_index = getattr(status, "instance_index", None)
-    if isinstance(instance_index, int):
-        result["instance_index"] = instance_index
-    return result
 
 
 def _format_constraint_report(report: kcl.SketchConstraintReport) -> dict:
