@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import atexit
 import signal
@@ -1757,9 +1758,27 @@ def install_shutdown_handlers() -> None:
 
 
 def main():
-    logger.info("Starting MCP server...")
+    parser = argparse.ArgumentParser(description="Zoo MCP server")
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http"),
+        default="stdio",
+        help="MCP transport (default: stdio)",
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8000, help="HTTP port (default: 8000)"
+    )
+    args = parser.parse_args()
+
+    logger.info("Starting MCP server with %s transport...", args.transport)
     install_shutdown_handlers()
-    mcp.run(transport="stdio")
+    if args.transport == "streamable-http":
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
