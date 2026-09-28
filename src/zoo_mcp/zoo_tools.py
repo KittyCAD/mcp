@@ -1184,6 +1184,13 @@ async def zoo_calculate_cad_physical_properties(
     return physical_properties
 
 
+async def _measure_kcl_code(
+    code: str, request: kcl.PhysicalPropertiesRequest
+) -> kcl.PhysicalPropertiesResponse:
+    async with await kcl.new_kcl_session_code(code) as session:
+        return await session.measure(request)
+
+
 async def zoo_calculate_kcl_physical_properties(
     kcl_code: str | None,
     kcl_path: Path | str | None,
@@ -1231,7 +1238,7 @@ async def zoo_calculate_kcl_physical_properties(
 
     if kcl_code:
         response = await _execute_with_retries(
-            kcl.execute_code_and_measure,
+            _measure_kcl_code,
             kcl_code,
             request,
             _operation="calculate_kcl_physical_properties",
@@ -1320,12 +1327,17 @@ async def zoo_calculate_bounding_box_kcl(
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     if kcl_code:
-        response = await _execute_with_retries(
-            kcl.execute_code_and_bounding_box,
-            kcl_code,
-            _operation="calculate_bounding_box_kcl",
-            output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
+        request = kcl.PhysicalPropertiesRequest()
+        request.set_bounding_box(
+            _parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length")
         )
+        measurements = await _execute_with_retries(
+            _measure_kcl_code,
+            kcl_code,
+            request,
+            _operation="calculate_bounding_box_kcl",
+        )
+        response = measurements.get_bounding_box()
     else:
         response = await _execute_with_retries(
             kcl.execute_and_bounding_box,
@@ -2243,6 +2255,13 @@ async def zoo_execute_kcl(
     )
 
 
+async def _export_kcl_code(
+    code: str, export_format: kcl.FileExportFormat
+) -> list[kcl.RawFile]:
+    async with await kcl.new_kcl_session_code(code) as session:
+        return await session.export(export_format)
+
+
 async def zoo_export_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
@@ -2311,7 +2330,7 @@ async def zoo_export_kcl(
         if kcl_code:
             logger.info("Exporting KCL code to %s", str(kcl_code))
             export_response = await _execute_with_retries(
-                kcl.execute_code_and_export,
+                _export_kcl_code,
                 kcl_code,
                 export_format,
                 _operation="export_kcl",
