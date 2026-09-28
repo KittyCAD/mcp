@@ -45,6 +45,20 @@ The server can also be run with the [mcp package](https://github.com/modelcontex
 uv run mcp run src/zoo_mcp/server.py
 ```
 
+### Streamable HTTP
+
+The server uses stdio by default. To serve the same tools over Streamable HTTP:
+
+```bash
+uvx zoo-mcp --transport streamable-http --host 127.0.0.1 --port 8000
+# From a local checkout:
+uv run -m zoo_mcp --transport streamable-http
+```
+
+Connect an MCP client to `http://127.0.0.1:8000/mcp`. The SDK manages HTTP
+sessions and streaming responses. `--host` and `--port` configure the HTTP
+listener; their defaults are `127.0.0.1` and `8000`.
+
 ### Prebuilt binaries
 
 Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:
@@ -126,6 +140,34 @@ reconnect, or call `start_modeling_session` when none exists. Populate the
 session with `execute_kcl`, `exec_kcl_project`, or `import_cad_file`; pass the
 same `session_id` to `snapshot` and modeling tools; then call
 `stop_modeling_session` when finished.
+
+As of 0.28.0, `execute_kcl` and `exec_kcl_project` run mock execution before real
+execution and return separate `mock_preflight` and `real_execution` objects.
+Each contains `status` (`succeeded`, `failed`, or `not_run`), `message`, and
+`diagnostics` grouped by severity. Stage messages are short summaries; the
+top-level `message` retains the full report for existing callers. Failed stages
+also expose `error_family`, including `ZooMCPTimeoutError` for session timeouts.
+Mock errors or an aborted mock execution
+return immediately with `ok: false` and `real_execution.status: "not_run"`.
+Mock warnings remain in `mock_preflight.diagnostics` even if real execution fails.
+The known `planeOf` mock-engine limitation is reported as a warning so the real
+engine can evaluate it; other mock errors still block execution.
+Session responses expose mock diagnostics; the engine does not return real-stage
+diagnostics for session execution.
+
+Path inputs capture the entrypoint, its transitive imports (including linked
+modules and glTF buffers), and `project.toml` once. Both stages use that copy
+without scanning unrelated files in the containing directory. Dependencies and
+symlink targets must stay inside the entrypoint's directory; external paths are
+rejected before file reads or execution. Transient local real-execution failures
+retain their bounded retries using the same copy without repeating mock execution.
+Diagnostics refer to the original source paths. Inline `kcl_code` accepts
+self-contained code and standard-library imports; filesystem imports require
+`kcl_path` so their dependencies can be captured within an explicit directory.
+`exec_kcl_project` now returns
+this structured result instead of a path string: check `ok`, then read
+`path_artifact_graph` on session success. The standalone `mock_execute_kcl` tool
+continues to return its existing boolean/message pair.
 
 ## Contributing
 
