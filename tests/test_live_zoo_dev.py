@@ -8,12 +8,11 @@ when offline.
 """
 
 import json
-from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 import pytest
 import pytest_asyncio
-from mcp.types import TextContent
+from mcp.types import CallToolResult, InputRequiredResult, TextContent
 
 from zoo_mcp.kcl_docs import KCLDocs
 from zoo_mcp.kcl_samples import KCLSamples
@@ -23,18 +22,15 @@ from zoo_mcp.utils.data_retrieval_utils import ZOO_BASE_URL
 pytestmark = [pytest.mark.live, pytest.mark.asyncio]
 
 
-def _content_list(response: Sequence[Any] | dict[str, Any]) -> list[Any]:
-    assert isinstance(response, Sequence)
-    content = response[0]
-    assert isinstance(content, list)
-    return cast(list[Any], content)
+def _content_list(response: CallToolResult | InputRequiredResult) -> list[Any]:
+    assert isinstance(response, CallToolResult)
+    return list(response.content)
 
 
-def _meta_result(response: Sequence[Any] | dict[str, Any]) -> Any:
-    assert isinstance(response, Sequence)
-    meta = response[1]
-    assert isinstance(meta, dict)
-    return cast(dict[str, Any], meta)["result"]
+def _meta_result(response: CallToolResult | InputRequiredResult) -> Any:
+    assert isinstance(response, CallToolResult)
+    assert response.structured_content is not None
+    return response.structured_content["result"]
 
 
 @pytest_asyncio.fixture(scope="module")

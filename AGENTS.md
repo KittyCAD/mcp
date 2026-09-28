@@ -27,7 +27,7 @@ Before committing any code, ensure all tests pass, formatting is good, linting i
 This is a Model Context Protocol (MCP) server that exposes Zoo CAD and KCL utility tools to AI assistants. The architecture consists of:
 
 ### Core Components
-- `src/zoo_mcp/server.py` - FastMCP server that defines the MCP interface and registers all `@mcp.tool()` entry points (KCL execution, snapshots, physical-property calculations, KCL docs/samples lookup, org datasets, etc.). Owns the lifespan hook that lazily populates the KCL docs/samples indexes.
+- `src/zoo_mcp/server.py` - `MCPServer` (mcp 2.x) server that defines the MCP interface and registers all `@mcp.tool()` entry points (KCL execution, snapshots, physical-property calculations, KCL docs/samples lookup, org datasets, etc.). Owns the lifespan hook that lazily populates the KCL docs/samples indexes.
 - `src/zoo_mcp/zoo_tools.py` - Implementations of the CAD-oriented tools that talk to Zoo's KittyCAD API (executing/exporting KCL, file conversion, snapshots, physical properties, sketch constraint status, lint-and-fix, org dataset listing/semantic search, etc.).
 - `src/zoo_mcp/kcl_docs.py` - Fetches and indexes KCL documentation from `zoo.dev` (via the sitemap, with `Accept: text/markdown`) and exposes list/search/get helpers backed by a lazily-initialized index.
 - `src/zoo_mcp/kcl_samples.py` - Fetches and indexes KCL samples from `zoo.dev/aquarium` and exposes list/search/get helpers; per-sample file contents are parsed from the per-sample markdown pages on demand.

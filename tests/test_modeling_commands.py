@@ -302,7 +302,7 @@ async def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
     execute_project.assert_not_called()
 
     artifact_graph = await zoo_tools.zoo_exec_kcl_project(
-        kcl_code="code",
+        kcl_code="x = 1",
         session_id=session_id,
     )
     result = await zoo_tools.zoo_execute_modeling_command(
@@ -313,7 +313,9 @@ async def test_modeling_session_starts_empty_then_executes_and_reuses_websocket(
     )
 
     assert result == expected_response
-    assert artifact_graph == artifact_graph_path
+    assert artifact_graph.ok
+    assert isinstance(artifact_graph, zoo_tools.ResultZooExecuteKclRemote)
+    assert artifact_graph.path_artifact_graph == artifact_graph_path
     assert artifact_graph_path.exists()
     execute_project.assert_awaited_once()
     assert execute_project.call_args.args[0] is websocket
@@ -550,10 +552,10 @@ async def test_execute_kcl_executes_in_modeling_session(
 ):
     artifact_graph_path = Path("artifact-graph.json")
     execute_project = AsyncMock(return_value=artifact_graph_path)
-    monkeypatch.setattr(zoo_tools, "zoo_exec_kcl_project", execute_project)
+    monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", execute_project)
 
     result = await zoo_tools.zoo_execute_kcl(
-        kcl_code="code",
+        kcl_code="x = 1",
         session_id="session-id",
     )
 
@@ -561,9 +563,9 @@ async def test_execute_kcl_executes_in_modeling_session(
     assert result.ok is True
     assert result.path_artifact_graph == artifact_graph_path
     execute_project.assert_awaited_once_with(
-        kcl_code="code",
-        kcl_path=None,
-        session_id="session-id",
+        "session-id",
+        "main.kcl",
+        [{"path": "main.kcl", "contents": list(b"x = 1")}],
     )
 
 
@@ -574,18 +576,20 @@ async def test_execute_kcl_session_message_states_diagnostics_are_unavailable(
     """The engine's exec response carries no non_fatal list, so say so."""
     monkeypatch.setattr(
         zoo_tools,
-        "zoo_exec_kcl_project",
+        "_execute_resolved_kcl_project",
         AsyncMock(return_value=Path("artifact-graph.json")),
     )
 
     result = await zoo_tools.zoo_execute_kcl(
-        kcl_code="code",
+        kcl_code="x = 1",
         session_id="session-id",
     )
 
     assert isinstance(result, zoo_tools.ResultZooExecuteKclRemote)
-    assert "Non-fatal diagnostics" in result.message
-    assert "not" in result.message
+    assert (
+        "Real-execution diagnostics are not reported" in result.real_execution.message
+    )
+    assert result.mock_preflight.status == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -1250,7 +1254,12 @@ async def test_import_waits_within_one_budget(
 @pytest.mark.parametrize("project", [False, True])
 async def test_session_metadata_is_captured_in_both_receive_paths(monkeypatch, project):
     websocket = AsyncMock()
-    websocket.response = SimpleNamespace(headers={})
+    websocket.response = SimpleNamespace(
+        headers={
+            "x-request-id": "upgrade-request",
+            "x-api-call-id": "other-http-header",
+        }
+    )
     saw_metadata = False
 
     async def recv():
@@ -1282,8 +1291,10 @@ async def test_session_metadata_is_captured_in_both_receive_paths(monkeypatch, p
     with zoo_tools.capture_api_call_events() as events:
         session_id = await zoo_tools.zoo_start_modeling_session()
         if project:
-            path = await zoo_tools.zoo_exec_kcl_project(session_id, kcl_code="code")
-            assert path.exists()
+            result = await zoo_tools.zoo_exec_kcl_project(session_id, kcl_code="x = 1")
+            assert result.ok
+            assert isinstance(result, zoo_tools.ResultZooExecuteKclRemote)
+            assert result.path_artifact_graph.exists()
         else:
             await zoo_tools.zoo_execute_modeling_command(
                 ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
@@ -1295,10 +1306,12 @@ async def test_session_metadata_is_captured_in_both_receive_paths(monkeypatch, p
     commands = [e for e in events if e.source == "command" and e.outcome == "succeeded"]
     assert len(commands) == 1
     assert commands[0].api_call_id == "api-call-id"
+    assert commands[0].websocket_upgrade_request_id == "upgrade-request"
     assert commands[0].session_id == session_id
     assert commands[0].command_id not in {session_id, "api-call-id"}
     stopped = [e for e in events if e.operation == "zoo_stop_modeling_session"]
     assert {e.api_call_id for e in stopped} == {"api-call-id"}
+    assert {e.websocket_upgrade_request_id for e in stopped} == {"upgrade-request"}
     assert commands[0].invocation_id not in {e.invocation_id for e in stopped}
 
 
@@ -1350,7 +1363,8 @@ async def test_session_failure_retains_handshake_id_before_eviction(
         if e.source == "command" and e.outcome == ("cancelled" if cancel else "failed")
     ]
     assert len(failed_commands) == 1
-    assert failed_commands[0].api_call_id == "handshake-id"
+    assert failed_commands[0].api_call_id is None
+    assert failed_commands[0].websocket_upgrade_request_id == "handshake-id"
     assert failed_commands[0].session_id == session_id
     assert failed_commands[0].command_id
 
@@ -1371,7 +1385,8 @@ async def test_rejected_handshake_captures_fallback_header(monkeypatch):
         await zoo_tools.zoo_start_modeling_session()
     handshake = [e for e in events if e.source == "websocket"]
     assert len(handshake) == 1
-    assert handshake[0].api_call_id == "rejected-id"
+    assert handshake[0].api_call_id is None
+    assert handshake[0].websocket_upgrade_request_id == "rejected-id"
     assert handshake[0].session_id
     assert handshake[0].outcome == "failed"
     assert zoo_tools._modeling_session is None

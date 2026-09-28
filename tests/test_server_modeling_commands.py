@@ -1,5 +1,4 @@
 import asyncio
-from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -38,26 +37,29 @@ from kittycad.models.modeling_cmd import (
     OptionSelectReplace,
     OptionSetSelectionFilter,
 )
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, ImageContent, InputRequiredResult, TextContent
 
 from zoo_mcp import server
 from zoo_mcp.server import mcp
-from zoo_mcp.zoo_tools import CameraView, ResultZooExecuteKclRemote
+from zoo_mcp.zoo_tools import CameraView, KclExecutionStage, ResultZooExecuteKclRemote
 
 
-def _result(response: Sequence[Any] | dict[str, Any]) -> Any:
-    assert isinstance(response, Sequence)
-    meta = response[1]
-    assert isinstance(meta, dict)
-    return cast(dict[str, Any], meta)["result"]
+def _result(response: CallToolResult | InputRequiredResult) -> Any:
+    assert isinstance(response, CallToolResult)
+    if response.structured_content is None:
+        assert len(response.content) == 1
+        assert isinstance(response.content[0], TextContent)
+        return response.content[0].text
+    return response.structured_content["result"]
 
 
-def _structured_result(response: Sequence[Any] | dict[str, Any]) -> dict[str, Any]:
-    assert isinstance(response, Sequence)
-    result = response[1]
-    assert isinstance(result, dict)
-    return cast(dict[str, Any], result)
+def _structured_result(
+    response: CallToolResult | InputRequiredResult,
+) -> dict[str, Any]:
+    assert isinstance(response, CallToolResult)
+    assert response.structured_content is not None
+    return response.structured_content
 
 
 @pytest.mark.asyncio
@@ -300,7 +302,7 @@ async def test_scene_tools_require_a_session():
         "snapshot",
         "exec_kcl_project",
     ):
-        schema = tools[tool_name].inputSchema
+        schema = tools[tool_name].input_schema
         assert "session_id" in schema.get("required", []), tool_name
         if tool_name != "exec_kcl_project":
             properties = schema.get("properties", {})
@@ -351,11 +353,14 @@ async def test_modeling_tool_returns_error(monkeypatch: pytest.MonkeyPatch):
         AsyncMock(side_effect=RuntimeError("boom")),
     )
 
-    with pytest.raises(ToolError, match="Error executing tool entity_get_index: boom"):
+    with pytest.raises(
+        ToolError, match="^Error executing tool entity_get_index$"
+    ) as error:
         await mcp.call_tool(
             "entity_get_index",
             arguments={"entity_id": "entity-id", "session_id": "session-id"},
         )
+    assert isinstance(error.value.__cause__, RuntimeError)
 
 
 @pytest.mark.asyncio
@@ -391,8 +396,8 @@ async def test_snapshot_tool_forwards_session_and_zoom(
         arguments={"session_id": "session-id", "max_image_dimension": 256},
     )
 
-    assert isinstance(response, Sequence)
-    content = response[0]
+    assert isinstance(response, CallToolResult)
+    content = response.content
     assert isinstance(content, list)
     assert len(content) == 1
     assert isinstance(content[0], ImageContent)
@@ -588,8 +593,8 @@ async def test_snapshot_tool_returns_image_when_output_path_omitted(
 
     response = await mcp.call_tool("snapshot", arguments={"session_id": "session-id"})
 
-    assert isinstance(response, Sequence)
-    content = response[0]
+    assert isinstance(response, CallToolResult)
+    content = response.content
     assert isinstance(content, list)
     assert isinstance(content[0], ImageContent)
 
@@ -604,10 +609,12 @@ async def test_kcl_execution_tools_forward_session_id(
         return_value=ResultZooExecuteKclRemote(
             ok=True,
             message="KCL code executed successfully",
+            mock_preflight=KclExecutionStage("succeeded", "mock ok"),
+            real_execution=KclExecutionStage("succeeded", "real ok"),
             path_artifact_graph=artifact_graph_path,
         )
     )
-    exec_project = AsyncMock(return_value=artifact_graph_path)
+    exec_project = AsyncMock(return_value=execute.return_value)
     monkeypatch.setattr(server, "zoo_execute_kcl", execute)
     monkeypatch.setattr(server, "zoo_exec_kcl_project", exec_project)
 
@@ -623,9 +630,32 @@ async def test_kcl_execution_tools_forward_session_id(
     assert _result(execute_response) == {
         "ok": True,
         "message": "KCL code executed successfully",
+        "mock_preflight": {
+            "status": "succeeded",
+            "message": "mock ok",
+            "diagnostics": {},
+            "error_family": None,
+        },
+        "real_execution": {
+            "status": "succeeded",
+            "message": "real ok",
+            "diagnostics": {},
+            "error_family": None,
+        },
+        "inspection": {
+            "sketch_constraints_status": "not_run",
+            "sketch_constraints": None,
+            "rendered_snapshots_status": "not_requested",
+            "rendered_snapshot": None,
+            "completed_snapshot_views": [],
+            "snapshot_errors": {},
+            "physical_analysis_status": "not_requested",
+            "physical_properties": None,
+            "physical_property_errors": {},
+        },
         "path_artifact_graph": str(artifact_graph_path),
     }
-    assert _result(project_response) == str(artifact_graph_path)
+    assert _result(project_response) == _result(execute_response)
     execute.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,

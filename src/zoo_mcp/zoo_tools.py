@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import io
 import json
+import os
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -8,7 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -152,17 +155,23 @@ from zoo_mcp.api_call_events import (
     capture_api_call_events as capture_api_call_events,  # noqa: PLC0414 -- public re-export
 )
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
+from zoo_mcp.utils.kcl_project import check_inline_imports, load_kcl_project
 
 
-def _api_call_id_from_headers(headers: object) -> str | None:
-    """Prefer Zoo's API call header; older handshakes expose x-request-id."""
+def _api_call_id_from_headers(headers: object, *, upgrade: bool = False) -> str | None:
+    """Read response correlation headers, preferring x-request-id for upgrades."""
     if not isinstance(headers, (httpx.Headers, dict)):
         # websockets uses its own case-insensitive Headers implementation.
         from websockets.datastructures import Headers
 
         if not isinstance(headers, Headers):
             return None
-    for name in ("x-api-call-id", "x-request-id"):
+    names = (
+        ("x-request-id", "x-api-call-id")
+        if upgrade
+        else ("x-api-call-id", "x-request-id")
+    )
+    for name in names:
         value = headers.get(name)
         if isinstance(value, str) and value:
             return value
@@ -204,6 +213,7 @@ SUPPORTED_EXTS = {x.value.lower() for x in FileImportFormat} | {"stp"}
 # the conversations driving these tools, so a stalled engine surfaces as a
 # retryable error instead of an abandoned request.
 MODELING_COMMAND_TIMEOUT = 300.0
+MODELING_VIDEO_RESOLUTION = 1024
 
 # Large file-analysis requests are asynchronous. Leave enough headroom under
 # the enclosing 300-second tool budget to surface a typed timeout instead of
@@ -314,24 +324,6 @@ async def _resolve_file_api_call(
         )
 
     return current
-
-
-def load_kcl_project(path: Path | str) -> tuple[str, list[dict[str, str | list[int]]]]:
-    """Load a KCL project into the shape expected by exec_kcl_project."""
-    path = Path(path).resolve()
-    root = path if path.is_dir() else path.parent
-    entrypoint = "main.kcl" if path.is_dir() else path.name
-
-    files: list[dict[str, str | list[int]]] = [
-        {
-            "path": file.relative_to(root).as_posix(),
-            "contents": list(file.read_bytes()),
-        }
-        for file in sorted(root.rglob("*"))
-        if file.is_file()
-    ]
-
-    return entrypoint, files
 
 
 # Mappings from user-facing short strings to kcl PyO3 enum members.
@@ -656,39 +648,72 @@ async def _execute_with_retries(
     raise AssertionError("unreachable")
 
 
+async def _open_kcl_session(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    *,
+    highlight_edges: bool | None = None,
+    video_res_width: int | None = None,
+    video_res_height: int | None = None,
+) -> kcl.KclSession:
+    """Execute once and capture connection IDs before any follow-up work.
+
+    Call inside the retry attempt that owns this execution. The caller owns the
+    returned session and must close it. Failures before a session returns have
+    no accessible IDs in the KCL bindings.
+    """
+    session: kcl.KclSession | None = None
+    try:
+        if kcl_code is not None:
+            session = await kcl.new_kcl_session_code(
+                kcl_code,
+                highlight_edges=highlight_edges,
+                video_res_width=video_res_width,
+                video_res_height=video_res_height,
+            )
+        else:
+            assert kcl_path is not None
+            session = await kcl.new_kcl_session(
+                str(kcl_path),
+                highlight_edges=highlight_edges,
+                video_res_width=video_res_width,
+                video_res_height=video_res_height,
+            )
+        record_api_call_event(
+            "kcl",
+            "observed",
+            session.api_call_id,
+            websocket_upgrade_request_id=session.websocket_upgrade_request_id,
+        )
+        return session
+    except BaseException as error:
+        record_api_call_event(
+            "kcl",
+            "cancelled" if isinstance(error, asyncio.CancelledError) else "failed",
+        )
+        if session is not None:
+            await session.close()
+        raise
+
+
 @api_invocation
 async def _execute_kcl_with_retries(
-    async_fn: _KclCoro[_T],
-    *args: object,
+    use_session: Callable[[kcl.KclSession], Awaitable[_T]],
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    *,
     _operation: str,
-    _result_error_family: Callable[[_T], str | None] | None = None,
-    **kwargs: object,
 ) -> _T:
-    """Allocate one KCL trace per attempt and drain it on every exit path."""
+    """Retry execution and its requested work, closing each attempt's session."""
 
     async def invoke() -> _T:
-        trace = kcl.ApiCallTrace()
-        outcome: ApiCallOutcome = "succeeded"
+        session = await _open_kcl_session(kcl_code, kcl_path)
         try:
-            result = await async_fn(*args, trace=trace, **kwargs)
-            if _result_error_family and _result_error_family(result):
-                outcome = "failed"
-            return result
-        except asyncio.CancelledError:
-            outcome = "cancelled"
-            raise
-        except BaseException:
-            outcome = "failed"
-            raise
+            return await use_session(session)
         finally:
-            for api_call_id in trace.api_call_ids or [None]:
-                record_api_call_event("kcl", outcome, api_call_id)
+            await session.close()
 
-    return await _execute_with_retries(
-        invoke,
-        _operation=_operation,
-        _result_error_family=_result_error_family,
-    )
+    return await _execute_with_retries(invoke, _operation=_operation)
 
 
 # Issue severities surfaced from an execution outcome, in descending order of
@@ -702,7 +727,17 @@ _EXECUTION_ISSUE_SEVERITIES = (
 )
 
 
-def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]:
+# zoo-kcl 0.3.184 reports this mock-engine limitation as an error even for valid
+# planeOf calls. Match the raw diagnostic exactly, never its rendered source
+# excerpt, and leave all other errors (including fatal issues) blocking.
+_MOCK_ENGINE_LIMITATIONS = frozenset(
+    {"The engine isn't available, so returning an arbitrary incorrect plane"}
+)
+
+
+def _format_execution_issues(
+    outcome: kcl.ExecOutcome, *, mock: bool = False
+) -> dict[str, list[str]]:
     """Render compilation issues from an execution outcome, grouped by severity.
 
     ``kcl.execute`` / ``kcl.execute_code`` return an ``ExecOutcome`` whose
@@ -713,6 +748,8 @@ def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]
 
     Args:
         outcome: The outcome returned by a kcl execution call.
+        mock: Report known engine-unavailable diagnostics as warnings. This
+            applies only to mock outcomes; real execution keeps its severities.
 
     Returns:
         A mapping of severity label (``"fatal"``, ``"error"``, ``"warning"``)
@@ -723,6 +760,12 @@ def _format_execution_issues(outcome: "kcl.ExecOutcome") -> dict[str, list[str]]
     for issue in outcome.issues():
         for severity, predicate in _EXECUTION_ISSUE_SEVERITIES:
             if getattr(issue, predicate)():
+                if (
+                    mock
+                    and severity == "error"
+                    and issue.message() in _MOCK_ENGINE_LIMITATIONS
+                ):
+                    severity = "warning"
                 issues.setdefault(severity, []).append(outcome.report(issue))
                 break
     return issues
@@ -833,6 +876,14 @@ class CameraView(Enum):
                 y=view["center"][1],
                 z=view["center"][2],
             ),
+        )
+
+    @staticmethod
+    def to_kcl_camera(view: dict[str, list[float]]) -> kcl.CameraLookAt:
+        return kcl.CameraLookAt(
+            vantage=kcl.Point3d(*view["vantage"]),
+            center=kcl.Point3d(*view["center"]),
+            up=kcl.Point3d(*view["up"]),
         )
 
 
@@ -1333,20 +1384,12 @@ async def zoo_calculate_kcl_physical_properties(
         ),
     )
 
-    if kcl_code:
-        response = await _execute_kcl_with_retries(
-            kcl.execute_code_and_measure,
-            kcl_code,
-            request,
-            _operation="calculate_kcl_physical_properties",
-        )
-    else:
-        response = await _execute_kcl_with_retries(
-            kcl.execute_and_measure,
-            str(kcl_path),
-            request,
-            _operation="calculate_kcl_physical_properties",
-        )
+    async def measure(session: kcl.KclSession) -> kcl.PhysicalPropertiesResponse:
+        return await session.measure(request)
+
+    response = await _execute_kcl_with_retries(
+        measure, kcl_code, kcl_path, _operation="calculate_kcl_physical_properties"
+    )
 
     volume = response.get_volume()
     com = response.get_center_of_mass()
@@ -1424,20 +1467,16 @@ async def zoo_calculate_bounding_box_kcl(
 
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
-    if kcl_code:
-        response = await _execute_kcl_with_retries(
-            kcl.execute_code_and_bounding_box,
-            kcl_code,
-            _operation="calculate_bounding_box_kcl",
-            output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
-        )
-    else:
-        response = await _execute_kcl_with_retries(
-            kcl.execute_and_bounding_box,
-            str(kcl_path),
-            _operation="calculate_bounding_box_kcl",
-            output_unit=_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"),
-        )
+    request = kcl.PhysicalPropertiesRequest()
+    request.set_bounding_box(_parse_unit(unit_length, UNIT_LENGTH_MAP, "unit_length"))
+
+    async def measure(session: kcl.KclSession) -> kcl.PhysicalPropertiesResponse:
+        return await session.measure(request)
+
+    measurements = await _execute_kcl_with_retries(
+        measure, kcl_code, kcl_path, _operation="calculate_bounding_box_kcl"
+    )
+    response = measurements.get_bounding_box()
 
     center = response.get_center()
     dims = response.get_dimensions()
@@ -1530,13 +1569,13 @@ async def zoo_convert_cad_file(
         logger.warning("No export format provided, defaulting to step")
         export_format = FileExportFormat.STEP
     else:
-        if export_format not in FileExportFormat:
+        try:
+            export_format = FileExportFormat(export_format)
+        except ValueError:
             logger.warning(
                 "Invalid export format %s provided, defaulting to step", export_format
             )
             export_format = FileExportFormat.STEP
-        else:
-            export_format = FileExportFormat(export_format)
 
     if export_path is None:
         logger.warning("No export path provided, creating a temporary file")
@@ -1596,19 +1635,693 @@ async def zoo_convert_cad_file(
 
 
 @dataclass
-class ResultZooExecuteKclLocal:
-    ok: bool
+class KclExecutionStage:
+    status: Literal["succeeded", "failed", "not_run"]
     message: str
+    diagnostics: dict[str, list[str]] = field(default_factory=dict)
+    error_family: str | None = None
+
+
+KclPhysicalProperty: TypeAlias = Literal[
+    "volume",
+    "mass",
+    "surface_area",
+    "center_of_mass",
+    "bounding_box",
+]
+KclInspectionStatus: TypeAlias = Literal[
+    "not_requested", "not_run", "succeeded", "partial", "failed"
+]
+
+
+@dataclass(frozen=True)
+class KclSnapshotRequest:
+    views: tuple[str | kcl.CameraLookAt, ...]
+    padding: float = 0.1
+    zoom: bool | None = None
+    highlight_edges: bool = False
+    max_image_dimension: int = 512
+
+
+@dataclass(frozen=True)
+class KclPhysicalPropertiesRequest:
+    properties: tuple[KclPhysicalProperty, ...]
+    unit_length: str = "mm"
+    unit_mass: str = "g"
+    unit_density: str | None = None
+    density: float | None = None
+    unit_area: str = "mm2"
+    unit_volume: str = "mm3"
 
 
 @dataclass
-class ResultZooExecuteKclRemote:
+class KclExecutionInspection:
+    sketch_constraints_status: KclInspectionStatus = "not_run"
+    sketch_constraints: dict[str, object] | None = None
+    rendered_snapshots_status: KclInspectionStatus = "not_requested"
+    rendered_snapshot: bytes | None = field(default=None, repr=False)
+    completed_snapshot_views: list[str] = field(default_factory=list)
+    snapshot_errors: dict[str, str] = field(default_factory=dict)
+    physical_analysis_status: KclInspectionStatus = "not_requested"
+    physical_properties: dict[str, object] | None = None
+    physical_property_errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class ResultZooExecuteKclLocal:
     ok: bool
     message: str
+    mock_preflight: KclExecutionStage
+    real_execution: KclExecutionStage
+    inspection: KclExecutionInspection = field(
+        default_factory=KclExecutionInspection, kw_only=True
+    )
+
+
+@dataclass
+class ResultZooExecuteKclRemote(ResultZooExecuteKclLocal):
     path_artifact_graph: Path
 
 
 ResultZooExecuteKcl: TypeAlias = ResultZooExecuteKclLocal | ResultZooExecuteKclRemote
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionStageEvent:
+    """Stage timing and outcome, without source code or diagnostic details."""
+
+    operation: str
+    stage: Literal["mock_preflight", "real_execution"]
+    outcome: Literal["succeeded", "failed", "not_run", "cancelled"]
+    elapsed_seconds: float
+    attempts: int
+    error_family: str | None
+
+
+_execution_stage_event_buffer: ContextVar[list[ExecutionStageEvent] | None] = (
+    ContextVar("execution_stage_event_buffer", default=None)
+)
+
+
+@contextmanager
+def capture_execution_stage_events() -> Iterator[list[ExecutionStageEvent]]:
+    """Collect execution stage events emitted in the current async context."""
+    events: list[ExecutionStageEvent] = []
+    token = _execution_stage_event_buffer.set(events)
+    try:
+        yield events
+    finally:
+        _execution_stage_event_buffer.reset(token)
+
+
+def _report_execution_stage_event(
+    operation: str,
+    stage: Literal["mock_preflight", "real_execution"],
+    outcome: Literal["succeeded", "failed", "not_run", "cancelled"],
+    started_at: float,
+    attempts: int,
+    error_family: str | None = None,
+) -> None:
+    elapsed = 0.0 if outcome == "not_run" else monotonic() - started_at
+    event = ExecutionStageEvent(
+        operation, stage, outcome, elapsed, attempts, error_family
+    )
+    events = _execution_stage_event_buffer.get()
+    if events is not None:
+        events.append(event)
+    logger.info(
+        "KCL execution operation=%s stage=%s outcome=%s elapsed_seconds=%.3f "
+        "attempts=%d error_family=%s",
+        operation,
+        stage,
+        outcome,
+        elapsed,
+        attempts,
+        error_family,
+    )
+
+
+@dataclass
+class _ResolvedKclExecution:
+    code: str | None
+    path: str | None
+    entrypoint: str
+    files: dict[str, bytes]
+    source_paths: dict[str, str] = field(default_factory=dict)
+
+    def source_report(self, report: str) -> str:
+        for captured, original in self.source_paths.items():
+            report = report.replace(captured, original)
+        return report
+
+    def remap_diagnostics(self, stage: KclExecutionStage) -> None:
+        stage.diagnostics = {
+            severity: [self.source_report(report) for report in reports]
+            for severity, reports in stage.diagnostics.items()
+        }
+
+
+def _capture_execution_project(
+    path: Path | str, destination: Path
+) -> _ResolvedKclExecution:
+    project = load_kcl_project(path)
+    for name, contents in project.files.items():
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+    source_paths = {}
+    for captured_root in (destination, destination.resolve()):
+        for captured, original in (
+            (str(captured_root) + os.sep, str(project.source_root) + os.sep),
+            (captured_root.as_posix() + "/", project.source_root.as_posix() + "/"),
+        ):
+            source_paths[captured] = original
+            # KclError renders reports inside a repr, escaping Windows separators.
+            source_paths[repr(captured)[1:-1]] = repr(original)[1:-1]
+    return _ResolvedKclExecution(
+        None,
+        str(destination / project.entrypoint),
+        project.entrypoint,
+        project.files,
+        source_paths,
+    )
+
+
+@asynccontextmanager
+async def _resolve_kcl_execution(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+) -> AsyncIterator[_ResolvedKclExecution]:
+    """Capture input once and retain it through mock, real execution, and retries."""
+    _check_kcl_code_or_path(kcl_code, kcl_path)
+    if kcl_code:
+        check_inline_imports(kcl_code)
+        yield _ResolvedKclExecution(
+            kcl_code,
+            None,
+            "main.kcl",
+            {"main.kcl": kcl_code.encode()},
+        )
+        return
+
+    assert kcl_path is not None
+    with TemporaryDirectory(prefix="zoo-mcp-preflight-") as directory:
+        pending = asyncio.create_task(
+            asyncio.to_thread(_capture_execution_project, kcl_path, Path(directory))
+        )
+        try:
+            resolved = await asyncio.shield(pending)
+        except asyncio.CancelledError as cancellation:
+            # A filesystem worker cannot be cancelled. Let it finish before the
+            # temporary directory is removed so it cannot recreate leaked files.
+            try:
+                await pending
+            finally:
+                raise cancellation
+        yield resolved
+
+
+async def _mock_execution_stage(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+) -> KclExecutionStage:
+    if kcl_code:
+        outcome = await kcl.mock_execute_code(kcl_code)
+    else:
+        outcome = await kcl.mock_execute(str(kcl_path))
+    issues = _format_execution_issues(outcome, mock=True)
+    failed = "fatal" in issues or "error" in issues
+    return KclExecutionStage(
+        status="failed" if failed else "succeeded",
+        message=(
+            "Mock preflight failed"
+            if failed
+            else "Mock preflight succeeded with diagnostics"
+            if issues
+            else "KCL code mock executed successfully"
+        ),
+        diagnostics=issues,
+        error_family="CompilationIssue" if failed else None,
+    )
+
+
+def _execution_result_message(stage: KclExecutionStage) -> str:
+    return (
+        _execution_issues_message(stage.diagnostics)
+        if stage.diagnostics
+        else stage.message
+    )
+
+
+def _new_execution_inspection(
+    snapshot_request: KclSnapshotRequest | None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None,
+) -> KclExecutionInspection:
+    return KclExecutionInspection(
+        rendered_snapshots_status=(
+            "not_run" if snapshot_request is not None else "not_requested"
+        ),
+        physical_analysis_status=(
+            "not_run" if physical_properties_request is not None else "not_requested"
+        ),
+    )
+
+
+def _validate_execution_inspection_requests(
+    snapshot_request: KclSnapshotRequest | None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None,
+) -> None:
+    if snapshot_request is not None:
+        if not 1 <= len(snapshot_request.views) <= 4:
+            raise ValueError(
+                "snapshot requests must contain between one and four views"
+            )
+        if snapshot_request.max_image_dimension <= 0:
+            raise ValueError("max_image_dimension must be positive")
+        unknown_views = [
+            view
+            for view in snapshot_request.views
+            if isinstance(view, str) and view not in CameraView.views.value
+        ]
+        if unknown_views:
+            raise ValueError(f"Unknown snapshot views: {unknown_views}")
+        if snapshot_request.zoom is False and any(
+            isinstance(view, str) for view in snapshot_request.views
+        ):
+            raise ValueError("Named snapshot views require zoom-to-fit")
+
+    if physical_properties_request is None:
+        return
+    if not physical_properties_request.properties:
+        raise ValueError("physical properties must not be empty")
+    unknown_properties = set(physical_properties_request.properties) - {
+        "volume",
+        "mass",
+        "surface_area",
+        "center_of_mass",
+        "bounding_box",
+    }
+    if unknown_properties:
+        raise ValueError(f"Unknown physical properties: {sorted(unknown_properties)}")
+    if "mass" in physical_properties_request.properties:
+        if physical_properties_request.density is None:
+            raise ValueError("density is required when requesting mass")
+        if physical_properties_request.unit_density is None:
+            raise ValueError("unit_density is required when requesting mass")
+
+    for property_name in physical_properties_request.properties:
+        if property_name in {"center_of_mass", "bounding_box"}:
+            _parse_unit(
+                physical_properties_request.unit_length,
+                UNIT_LENGTH_MAP,
+                "unit_length",
+            )
+        elif property_name == "volume":
+            _parse_unit(
+                physical_properties_request.unit_volume,
+                UNIT_VOLUME_MAP,
+                "unit_volume",
+            )
+        elif property_name == "surface_area":
+            _parse_unit(
+                physical_properties_request.unit_area,
+                UNIT_AREA_MAP,
+                "unit_area",
+            )
+        elif property_name == "mass":
+            assert physical_properties_request.unit_density is not None
+            _parse_unit(
+                physical_properties_request.unit_mass,
+                UNIT_MASS_MAP,
+                "unit_mass",
+            )
+            _parse_unit(
+                physical_properties_request.unit_density,
+                UNIT_DENSITY_MAP,
+                "unit_density",
+            )
+
+
+async def _collect_session_snapshots(
+    session: kcl.KclSession,
+    request: KclSnapshotRequest,
+    inspection: KclExecutionInspection,
+) -> None:
+    images: list[bytes] = []
+    for index, view in enumerate(request.views):
+        named = isinstance(view, str)
+        view_name = view if isinstance(view, str) else f"custom_{index + 1}"
+        options = [
+            kcl.SnapshotOptions(
+                camera=(
+                    CameraView.to_kcl_camera(CameraView.views.value[view])
+                    if isinstance(view, str)
+                    else view
+                ),
+                padding=request.padding,
+            )
+        ]
+        try:
+            rendered = await session.snapshots(
+                kcl.ImageFormat.Jpeg,
+                options,
+                zoom=named if request.zoom is None else request.zoom,
+            )
+            if not rendered:
+                raise ZooMCPException("snapshot returned no image")
+            images.append(bytes(rendered[0]))
+            inspection.completed_snapshot_views.append(view_name)
+        except Exception as error:
+            inspection.snapshot_errors[view_name] = str(error)
+
+    if images:
+        try:
+            inspection.rendered_snapshot = await asyncio.to_thread(
+                lambda: resize_image(
+                    images[0] if len(images) == 1 else create_image_collage(images),
+                    request.max_image_dimension,
+                )
+            )
+        except Exception as error:
+            inspection.snapshot_errors["post_processing"] = str(error)
+            inspection.rendered_snapshots_status = "failed"
+        else:
+            inspection.rendered_snapshots_status = (
+                "partial" if inspection.snapshot_errors else "succeeded"
+            )
+    else:
+        inspection.rendered_snapshots_status = "failed"
+
+
+def _physical_properties_request(
+    options: KclPhysicalPropertiesRequest,
+) -> kcl.PhysicalPropertiesRequest:
+    request = kcl.PhysicalPropertiesRequest()
+    for property_name in options.properties:
+        if property_name == "volume":
+            request.set_volume(
+                _parse_unit(options.unit_volume, UNIT_VOLUME_MAP, "unit_volume")
+            )
+        elif property_name == "surface_area":
+            request.set_surface_area(
+                _parse_unit(options.unit_area, UNIT_AREA_MAP, "unit_area")
+            )
+        elif property_name == "center_of_mass":
+            request.set_center_of_mass(
+                _parse_unit(options.unit_length, UNIT_LENGTH_MAP, "unit_length")
+            )
+        elif property_name == "bounding_box":
+            request.set_bounding_box(
+                _parse_unit(options.unit_length, UNIT_LENGTH_MAP, "unit_length")
+            )
+        else:
+            assert options.density is not None
+            assert options.unit_density is not None
+            request.set_mass(
+                output_unit=_parse_unit(options.unit_mass, UNIT_MASS_MAP, "unit_mass"),
+                material_density=options.density,
+                material_density_unit=_parse_unit(
+                    options.unit_density,
+                    UNIT_DENSITY_MAP,
+                    "unit_density",
+                ),
+            )
+    return request
+
+
+def _physical_property_value(
+    property_name: KclPhysicalProperty,
+    response: kcl.PhysicalPropertiesResponse,
+    options: KclPhysicalPropertiesRequest,
+) -> object:
+    if property_name == "volume":
+        return {"value": response.get_volume(), "unit": options.unit_volume}
+    if property_name == "mass":
+        return {"value": response.get_mass(), "unit": options.unit_mass}
+    if property_name == "surface_area":
+        return {"value": response.get_surface_area(), "unit": options.unit_area}
+    if property_name == "center_of_mass":
+        center = response.get_center_of_mass()
+        return {
+            "value": {"x": center.x, "y": center.y, "z": center.z},
+            "unit": options.unit_length,
+        }
+    bounding_box = response.get_bounding_box()
+    center = bounding_box.get_center()
+    dimensions = bounding_box.get_dimensions()
+    return {
+        "center": {"x": center.x, "y": center.y, "z": center.z},
+        "dimensions": {
+            "x": dimensions.x,
+            "y": dimensions.y,
+            "z": dimensions.z,
+        },
+        "unit": options.unit_length,
+    }
+
+
+async def _collect_session_physical_properties(
+    session: kcl.KclSession,
+    request: KclPhysicalPropertiesRequest,
+    inspection: KclExecutionInspection,
+) -> None:
+    values: dict[str, object] = {}
+    try:
+        response = await session.measure(_physical_properties_request(request))
+    except Exception as error:
+        inspection.physical_property_errors = {
+            property_name: str(error) for property_name in request.properties
+        }
+        inspection.physical_analysis_status = "failed"
+        return
+
+    for property_name in request.properties:
+        try:
+            values[property_name] = _physical_property_value(
+                property_name, response, request
+            )
+        except Exception as error:
+            inspection.physical_property_errors[property_name] = str(error)
+
+    inspection.physical_properties = values or None
+    if values:
+        inspection.physical_analysis_status = (
+            "partial" if inspection.physical_property_errors else "succeeded"
+        )
+    else:
+        inspection.physical_analysis_status = "failed"
+
+
+async def _execute_kcl_with_preflight(
+    kcl_code: str | None,
+    kcl_path: Path | str | None,
+    session_id: str | None,
+    *,
+    operation: str,
+    snapshot_request: KclSnapshotRequest | None = None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None = None,
+) -> ResultZooExecuteKcl:
+    if session_id is not None and (
+        snapshot_request is not None or physical_properties_request is not None
+    ):
+        raise ValueError(
+            "snapshot and physical-property outputs are only available for local execution"
+        )
+    _validate_execution_inspection_requests(
+        snapshot_request, physical_properties_request
+    )
+    inspection = _new_execution_inspection(
+        snapshot_request, physical_properties_request
+    )
+    mock = KclExecutionStage("not_run", "Mock preflight has not run")
+    real = KclExecutionStage("not_run", "Real execution was not started")
+    stage: Literal["mock_preflight", "real_execution"] = "mock_preflight"
+    started_at = monotonic()
+    attempts = 0
+    resolved: _ResolvedKclExecution | None = None
+    try:
+        async with _resolve_kcl_execution(kcl_code, kcl_path) as resolved:
+            attempts = 1
+            mock = await _mock_execution_stage(resolved.code, resolved.path)
+            resolved.remap_diagnostics(mock)
+            _report_execution_stage_event(
+                operation,
+                stage,
+                mock.status,
+                started_at,
+                attempts,
+                "CompilationIssue" if mock.status == "failed" else None,
+            )
+            if mock.status == "failed":
+                mark_api_call_failed()
+                _report_execution_stage_event(
+                    operation,
+                    "real_execution",
+                    "not_run",
+                    started_at,
+                    0,
+                )
+                return ResultZooExecuteKclLocal(
+                    False,
+                    _execution_result_message(mock),
+                    mock,
+                    real,
+                    inspection=inspection,
+                )
+
+            stage = "real_execution"
+            started_at = monotonic()
+            attempts = 0
+            artifact_graph: Path | None = None
+            if session_id is not None:
+                attempts = 1
+                artifact_graph = await _execute_resolved_kcl_project(
+                    session_id,
+                    resolved.entrypoint,
+                    [
+                        {"path": name, "contents": list(contents)}
+                        for name, contents in resolved.files.items()
+                    ],
+                )
+                real = KclExecutionStage(
+                    "succeeded",
+                    "KCL code executed successfully in the modeling session. "
+                    "Real-execution diagnostics are not reported for session runs; "
+                    "mock-preflight diagnostics are available in mock_preflight.",
+                )
+            else:
+
+                async def execute_session() -> kcl.KclSession:
+                    nonlocal attempts
+                    attempts += 1
+                    return await _open_kcl_session(
+                        resolved.code,
+                        resolved.path,
+                        highlight_edges=snapshot_request.highlight_edges
+                        if snapshot_request is not None
+                        else None,
+                        video_res_width=MODELING_VIDEO_RESOLUTION,
+                        video_res_height=MODELING_VIDEO_RESOLUTION,
+                    )
+
+                session = await _execute_with_retries(
+                    execute_session, _operation=operation
+                )
+                try:
+                    outcome = session.outcome
+                    constraint_report = outcome.sketch_constraint_report()
+                    inspection.sketch_constraints = _format_session_constraint_report(
+                        constraint_report, resolved
+                    )
+                    inspection.sketch_constraints_status = (
+                        "succeeded" if constraint_report.is_complete else "partial"
+                    )
+                    issues = _format_execution_issues(outcome)
+                    if "fatal" not in issues and "error" not in issues:
+                        if snapshot_request is not None:
+                            await _collect_session_snapshots(
+                                session, snapshot_request, inspection
+                            )
+                        if physical_properties_request is not None:
+                            await _collect_session_physical_properties(
+                                session, physical_properties_request, inspection
+                            )
+                finally:
+                    await session.close()
+
+                has_blocking_issues = "fatal" in issues or "error" in issues
+                real = KclExecutionStage(
+                    "failed" if has_blocking_issues else "succeeded",
+                    "KCL code executed with diagnostics"
+                    if issues
+                    else "KCL code executed successfully",
+                    issues,
+                    "CompilationIssue" if has_blocking_issues else None,
+                )
+                resolved.remap_diagnostics(real)
+            _report_execution_stage_event(
+                operation,
+                stage,
+                real.status,
+                started_at,
+                attempts,
+                real.error_family,
+            )
+            if artifact_graph is not None:
+                return ResultZooExecuteKclRemote(
+                    True,
+                    real.message,
+                    mock,
+                    real,
+                    artifact_graph,
+                    inspection=inspection,
+                )
+            if real.status == "failed":
+                mark_api_call_failed()
+            return ResultZooExecuteKclLocal(
+                real.status == "succeeded",
+                _execution_result_message(real),
+                mock,
+                real,
+                inspection=inspection,
+            )
+    except asyncio.CancelledError:
+        _report_execution_stage_event(
+            operation,
+            stage,
+            "cancelled",
+            started_at,
+            attempts,
+        )
+        raise
+    except Exception as error:
+        mark_api_call_failed()
+        detail = resolved.source_report(str(error)) if resolved else str(error)
+        error_family = _execution_error_family(error)
+        _report_execution_stage_event(
+            operation,
+            stage,
+            "failed",
+            started_at,
+            attempts,
+            error_family,
+        )
+        if stage == "mock_preflight":
+            mock = KclExecutionStage(
+                "failed", "Mock preflight failed", {"error": [detail]}, error_family
+            )
+            _report_execution_stage_event(
+                operation,
+                "real_execution",
+                "not_run",
+                started_at,
+                0,
+            )
+            return ResultZooExecuteKclLocal(
+                False,
+                f"Failed to mock execute KCL code: {detail}",
+                mock,
+                real,
+                inspection=inspection,
+            )
+        constraint_report = getattr(error, "sketch_constraint_report", None)
+        if constraint_report is not None:
+            inspection.sketch_constraints = _format_session_constraint_report(
+                constraint_report, resolved
+            )
+            inspection.sketch_constraints_status = "partial"
+        else:
+            inspection.sketch_constraints_status = "failed"
+        real = KclExecutionStage(
+            "failed", "Real execution failed", {"error": [detail]}, error_family
+        )
+        return ResultZooExecuteKclLocal(
+            False,
+            f"Failed to execute KCL code: {detail}",
+            mock,
+            real,
+            inspection=inspection,
+        )
 
 
 @api_invocation
@@ -1616,79 +2329,37 @@ async def zoo_execute_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
     session_id: str | None = None,
+    *,
+    snapshot_request: KclSnapshotRequest | None = None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None = None,
 ) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
     Args:
-        kcl_code (str | None): KCL code
+        kcl_code (str | None): Self-contained KCL code. Standard-library imports are allowed; filesystem imports require kcl_path.
         kcl_path (Path | str | None): KCL path, the path should point to a .kcl file or a directory containing a main.kcl file.
         session_id (str | None): An open modeling session in which to execute the KCL.
+        snapshot_request: Optional views to render from the local real-execution session.
+        physical_properties_request: Optional properties to measure from that same session.
 
     Returns:
-        ResultZooExecuteKcl: The execution status and message. Session executions
-        also include the artifact graph's temporary JSON file path. When a local
-        run completes, compilation issues are appended to the message rather than
-        treated as a hard failure. Session runs cannot report non-fatal diagnostics.
+        ResultZooExecuteKcl: Separate mock-preflight and real-execution outcomes.
+        Mock errors block real execution; warnings are retained and allow it.
+        Session successes include the artifact graph's temporary JSON file path.
+        Transient local real-execution failures retry the same captured input
+        without repeating preflight.
+        Local execution includes a full sketch-constraint report, or the partial
+        report retained by KclError. Requested snapshots and physical properties
+        are collected serially before the real-execution session closes.
     """
-    logger.info("Executing KCL code")
-
-    _check_kcl_code_or_path(kcl_code, kcl_path)
-
-    try:
-        if session_id is not None:
-            path_artifact_graph = await zoo_exec_kcl_project(
-                kcl_code=kcl_code,
-                kcl_path=kcl_path,
-                session_id=session_id,
-            )
-            logger.info("KCL code executed in modeling session")
-            # The engine's exec_kcl_project response carries only an artifact
-            # graph, so warnings the local compiler would surface are not
-            # available here. Say so rather than report an unqualified success.
-            return ResultZooExecuteKclRemote(
-                ok=True,
-                message=(
-                    "KCL code executed successfully in the modeling session. "
-                    "Non-fatal diagnostics (warnings and non-fatal errors) are not "
-                    "reported for session runs; re-run without session_id to check "
-                    "them."
-                ),
-                path_artifact_graph=path_artifact_graph,
-            )
-
-        if kcl_code:
-            outcome = await _execute_kcl_with_retries(
-                kcl.execute_code,
-                kcl_code,
-                _operation="execute_kcl",
-            )
-        else:
-            outcome = await _execute_kcl_with_retries(
-                kcl.execute,
-                str(kcl_path),
-                _operation="execute_kcl",
-            )
-
-        issues = _format_execution_issues(outcome)
-        if issues:
-            total = sum(len(reports) for reports in issues.values())
-            logger.info("KCL code execution reported %d issue(s)", total)
-            message = _execution_issues_message(issues)
-            return ResultZooExecuteKclLocal(ok=True, message=message)
-
-        logger.info("KCL code executed successfully")
-        return ResultZooExecuteKclLocal(
-            ok=True, message="KCL code executed successfully"
-        )
-    except Exception as e:
-        logger.info(
-            "Failed to execute KCL code (error_family=%s)",
-            _execution_error_family(e),
-        )
-        mark_api_call_failed()
-        return ResultZooExecuteKclLocal(
-            ok=False, message=f"Failed to execute KCL code: {e}"
-        )
+    return await _execute_kcl_with_preflight(
+        kcl_code,
+        kcl_path,
+        session_id,
+        operation="execute_kcl",
+        snapshot_request=snapshot_request,
+        physical_properties_request=physical_properties_request,
+    )
 
 
 @api_invocation
@@ -1757,24 +2428,13 @@ async def zoo_export_kcl(
             logger.info("Using provided export path: %s", str(export_path.name))
 
     async with aiofiles.open(export_path, "wb") as out:
-        if kcl_code:
-            logger.info("Exporting KCL code")
-            export_response = await _execute_kcl_with_retries(
-                kcl.execute_code_and_export,
-                kcl_code,
-                export_format,
-                _operation="export_kcl",
-            )
-        else:
-            logger.info("Exporting KCL project to %s", str(kcl_path))
-            assert kcl_path is not None  # _check_kcl_code_or_path ensures this
-            kcl_path_resolved = Path(kcl_path)
-            export_response = await _execute_kcl_with_retries(
-                kcl.execute_and_export,
-                str(kcl_path_resolved.resolve()),
-                export_format,
-                _operation="export_kcl",
-            )
+
+        async def export(session: kcl.KclSession) -> list[kcl.RawFile]:
+            return await session.export(export_format)
+
+        export_response = await _execute_kcl_with_retries(
+            export, kcl_code, kcl_path, _operation="export_kcl"
+        )
         await out.write(bytes(export_response[0].contents))
 
     logger.info("KCL exported successfully to %s", str(export_path))
@@ -1888,6 +2548,7 @@ def _format_constraint_status(status: kcl.SketchConstraintStatus) -> dict:
     """Format a single SketchConstraintStatus into a dict."""
     return {
         "name": status.name,
+        "instance_index": status.instance_index,
         "status": str(status.status).removeprefix("ConstraintKind."),
         "free_count": status.free_count,
         "conflict_count": status.conflict_count,
@@ -1925,17 +2586,33 @@ def _format_constraint_report(report: kcl.SketchConstraintReport) -> dict:
     return result
 
 
-def _constraint_report_error_family(
+def _format_session_constraint_report(
     report: kcl.SketchConstraintReport,
-) -> str | None:
+    resolved: _ResolvedKclExecution | None,
+) -> dict[str, object]:
+    result = _format_constraint_report(report)
+    remap = resolved.source_report if resolved is not None else lambda value: value
+    result.update(
+        warnings=[remap(value) for value in report.warnings],
+        execution_errors=[remap(value) for value in report.execution_errors],
+        execution_fatals=[remap(value) for value in report.execution_fatals],
+    )
+    kcl_error = result.get("kcl_error")
+    if isinstance(kcl_error, dict) and isinstance(kcl_error.get("text"), str):
+        kcl_error["text"] = remap(kcl_error["text"])
+    return result
+
+
+def _constraint_report_error_family(report: dict) -> str | None:
     """Classify an incomplete constraint report without exposing its message."""
-    if report.is_complete:
+    if report["kcl_executes_successfully"]:
         return None
-    if report.kcl_error is None:
+    error = report["kcl_error"]
+    if error is None:
         return "IncompleteConstraintReport"
-    if report.kcl_error.phase == "parse":
+    if error["phase"] == "parse":
         return "KclParseError"
-    if report.kcl_error.phase == "execution":
+    if error["phase"] == "execution":
         return "KclExecutionError"
     return "KclConstraintError"
 
@@ -1959,23 +2636,36 @@ async def zoo_get_sketch_constraint_status(
 
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
+    async def constraint_report() -> dict:
+        try:
+            session = await _open_kcl_session(kcl_code, kcl_path)
+        except kcl.KclError as error:
+            if error.is_retryable():
+                raise
+            if error.sketch_constraint_report is not None:
+                return _format_constraint_report(error.sketch_constraint_report)
+            # The session API attaches reports to execution errors, but parse
+            # and language-version errors carry only their rendered diagnostic.
+            return {
+                "fully_constrained": [],
+                "under_constrained": [],
+                "over_constrained": [],
+                "errors": [],
+                "total_sketches": 0,
+                "kcl_executes_successfully": False,
+                "kcl_error": {"phase": "parse", "text": str(error)},
+            }
+        try:
+            return _format_constraint_report(session.outcome.sketch_constraint_report())
+        finally:
+            await session.close()
+
     try:
-        if kcl_code:
-            report = await _execute_kcl_with_retries(
-                kcl.get_sketch_constraint_status_code,
-                kcl_code,
-                _operation="get_sketch_constraint_status",
-                _result_error_family=_constraint_report_error_family,
-            )
-        else:
-            assert kcl_path is not None
-            report = await _execute_kcl_with_retries(
-                kcl.get_sketch_constraint_status,
-                str(kcl_path),
-                _operation="get_sketch_constraint_status",
-                _result_error_family=_constraint_report_error_family,
-            )
-        return _format_constraint_report(report)
+        return await _execute_with_retries(
+            constraint_report,
+            _operation="get_sketch_constraint_status",
+            _result_error_family=_constraint_report_error_family,
+        )
     except Exception as e:
         logger.error(
             "Failed to get sketch constraint status (error_family=%s)",
@@ -2009,20 +2699,13 @@ async def zoo_visualize_sketch(
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
-        if kcl_code:
-            outcome = await _execute_kcl_with_retries(
-                kcl.execute_code,
-                kcl_code,
-                _operation="visualize_sketch",
-            )
-        else:
-            assert kcl_path is not None
-            outcome = await _execute_kcl_with_retries(
-                kcl.execute,
-                str(kcl_path),
-                _operation="visualize_sketch",
-            )
-        return bytes(outcome.render_sketch_png(sketch_name))
+
+        async def render(session: kcl.KclSession) -> bytes:
+            return bytes(session.outcome.render_sketch_png(sketch_name))
+
+        return await _execute_kcl_with_retries(
+            render, kcl_code, kcl_path, _operation="visualize_sketch"
+        )
     except Exception as e:
         logger.error(
             "Failed to visualize sketch (error_family=%s)",
@@ -2043,30 +2726,20 @@ async def zoo_mock_execute_kcl(
 
     Returns:
         tuple(bool, str): Returns ``False`` when execution aborts or reports an
-        error/fatal compilation issue. Warning-only outcomes remain successful
-        and include their rendered diagnostics in the message.
+        error/fatal compilation issue. Known mock-engine limitations are treated
+        as warnings. Warning-only outcomes remain successful and include their
+        rendered diagnostics in the message.
     """
-    logger.info("Executing KCL code")
-
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
-        if kcl_code:
-            outcome = await kcl.mock_execute_code(kcl_code)
-        else:
-            outcome = await kcl.mock_execute(str(kcl_path))
-
-        issues = _format_execution_issues(outcome)
-        if issues:
-            total = sum(len(reports) for reports in issues.values())
-            logger.info("KCL mock execution reported %d issue(s)", total)
-            has_blocking_issues = "fatal" in issues or "error" in issues
-            return not has_blocking_issues, _execution_issues_message(issues)
-
-        logger.info("KCL mock executed successfully")
-        return True, "KCL code mock executed successfully"
+        result = await _mock_execution_stage(kcl_code, kcl_path)
+        return result.status == "succeeded", _execution_result_message(result)
     except Exception as e:
-        logger.info("Failed to mock execute KCL code: %s", e)
+        logger.info(
+            "Failed to mock execute KCL code (error_family=%s)",
+            _execution_error_family(e),
+        )
         return False, f"Failed to mock execute KCL code: {e}"
 
 
@@ -2075,24 +2748,6 @@ class FaceInfo:
     face_get_position: FaceGetPosition
     face_get_gradient: FaceGetGradient
     face_get_center: FaceGetCenter
-
-
-def _prepare_kcl_project(
-    kcl_code: str | None,
-    kcl_path: Path | str | None,
-) -> tuple[str, list[dict[str, str | list[int]]]]:
-    _check_kcl_code_or_path(kcl_code, kcl_path)
-
-    if kcl_code:
-        return "main.kcl", [
-            {
-                "path": "main.kcl",
-                "contents": list(kcl_code.encode()),
-            }
-        ]
-
-    assert kcl_path is not None
-    return load_kcl_project(kcl_path)
 
 
 async def _exec_kcl_project(
@@ -2174,6 +2829,7 @@ class _ModelingSession:
     lock: asyncio.Lock
     artifact_graph_paths: set[Path] = field(default_factory=set)
     api_call_id: str | None = None
+    websocket_upgrade_request_id: str | None = None
 
 
 @dataclass
@@ -2194,6 +2850,7 @@ def _record_session_event(
         "command" if command_id else "session",
         outcome,
         session.api_call_id,
+        websocket_upgrade_request_id=session.websocket_upgrade_request_id,
         session_id=session.session_id,
         command_id=command_id,
     )
@@ -2287,8 +2944,8 @@ async def _open_modeling_websocket(client: AsyncKittyCAD) -> ClientConnection:
             "post_effect": PostEffectType.SSAO,
             "show_grid": "false",
             "unlocked_framerate": "false",
-            "video_res_height": 1024,
-            "video_res_width": 1024,
+            "video_res_height": MODELING_VIDEO_RESOLUTION,
+            "video_res_width": MODELING_VIDEO_RESOLUTION,
             "webrtc": "false",
         }
     )
@@ -2401,7 +3058,9 @@ async def zoo_start_modeling_session() -> str:
         record_api_call_event(
             "websocket",
             "cancelled" if isinstance(error, asyncio.CancelledError) else "failed",
-            _api_call_id_from_headers(getattr(response, "headers", None)),
+            websocket_upgrade_request_id=_api_call_id_from_headers(
+                getattr(response, "headers", None), upgrade=True
+            ),
             session_id=session_id,
         )
         if _modeling_session is starting:
@@ -2418,12 +3077,15 @@ async def zoo_start_modeling_session() -> str:
         client=client,
         websocket=websocket,
         lock=asyncio.Lock(),
-        api_call_id=_api_call_id_from_headers(
-            getattr(getattr(websocket, "response", None), "headers", None)
+        websocket_upgrade_request_id=_api_call_id_from_headers(
+            getattr(getattr(websocket, "response", None), "headers", None), upgrade=True
         ),
     )
     record_api_call_event(
-        "websocket", "observed", session.api_call_id, session_id=session_id
+        "websocket",
+        "observed",
+        websocket_upgrade_request_id=session.websocket_upgrade_request_id,
+        session_id=session_id,
     )
     if _modeling_session is starting:
         _modeling_session = session
@@ -2565,11 +3227,22 @@ async def zoo_exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
-) -> Path:
-    entrypoint, files = await asyncio.to_thread(
-        _prepare_kcl_project, kcl_code, kcl_path
+) -> ResultZooExecuteKcl:
+    """Mock preflight a captured project, then execute it in a modeling session."""
+    return await _execute_kcl_with_preflight(
+        kcl_code,
+        kcl_path,
+        session_id,
+        operation="exec_kcl_project",
     )
 
+
+async def _execute_resolved_kcl_project(
+    session_id: str,
+    entrypoint: str,
+    files: list[dict[str, str | list[int]]],
+) -> Path:
+    """Execute already-preflighted input and register its session artifact graph."""
     async with _modeling_websocket(session_id) as ws:
         path = await _exec_kcl_project(ws, entrypoint, files)
         if (

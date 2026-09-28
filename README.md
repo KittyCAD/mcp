@@ -45,6 +45,20 @@ The server can also be run with the [mcp package](https://github.com/modelcontex
 uv run mcp run src/zoo_mcp/server.py
 ```
 
+### Streamable HTTP
+
+The server uses stdio by default. To serve the same tools over Streamable HTTP:
+
+```bash
+uvx zoo-mcp --transport streamable-http --host 127.0.0.1 --port 8000
+# From a local checkout:
+uv run -m zoo_mcp --transport streamable-http
+```
+
+Connect an MCP client to `http://127.0.0.1:8000/mcp`. The SDK manages HTTP
+sessions and streaming responses. `--host` and `--port` configure the HTTP
+listener; their defaults are `127.0.0.1` and `8000`.
+
 ### Prebuilt binaries
 
 Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:
@@ -76,25 +90,49 @@ child tasks inherit their parent's capture contexts, so await them before consum
 the completed event list.
 
 `ApiCallEvent` contains `operation`, `invocation_id`, `api_call_id`, `source`,
-`attempt`, and `outcome`, with optional `session_id`, `command_id`,
-`async_operation_id`, and HTTP `status_code`. A missing backend ID is `None`.
-The source distinguishes KCL attempts, REST responses, file operations, WebSocket
-handshakes, session use, commands, and invocation completion. An `observed` event
-records information already received; parsing or a later operation can still fail.
-Invocation completion describes the whole Python call, while KCL and command
-outcomes describe their individual attempts. A recovered invocation can therefore
-contain both failed and successful KCL attempts.
+`attempt`, and `outcome`, with optional `websocket_upgrade_request_id`,
+`session_id`, `command_id`, `async_operation_id`, and HTTP `status_code`.
+Missing identifiers are `None`. The backend `api_call_id` and HTTP WebSocket
+upgrade request ID are distinct; neither is replaced by a local session or
+command ID. Invocation summaries preserve both connection identifiers and their
+retry attempt.
+
+Every real local KCL execution opens a `KclSession`. Capture reads its
+`api_call_id` and `websocket_upgrade_request_id` properties immediately after
+creation, inside the owning retry attempt. Measurements, exports, snapshots,
+constraints, and sketch rendering reuse that execution, and the session closes
+after its requested work, including on errors or cancellation. Mock preflight
+produces no backend IDs and runs once before real-execution retries.
+
+An `observed` event records information already received; a later operation can
+still fail. Invocation completion describes the whole Python call. Existing
+execution retry events expose `api_call_ids` for that attempt, containing only
+backend API call IDs. A failure before the KCL binding returns a session can have
+no IDs, even if the backend received the request. Capturing IDs on these failures
+is intentionally deferred; IDs are never parsed from error messages.
 
 Events are observations, not a count of backend requests. A persistent modeling
-session reuses one backend ID across many command IDs. A file operation's `id` is
-also retained as `async_operation_id`; each polling HTTP request has its own
-`api_call_id`. Repeated observations of an ID are expected. Existing execution
-retry events additionally expose `api_call_ids` for that attempt.
+session reuses its backend and upgrade request IDs across many command IDs. Its
+backend ID becomes available from session metadata; the handshake ID remains in
+`websocket_upgrade_request_id`. A file operation's `id` is also retained as
+`async_operation_id`; each polling HTTP request has its own `api_call_id`.
+Repeated observations of an ID are expected.
 
 The same events are logged at INFO even without a capture context. Log records
 include searchable identifiers and a structured `api_call_event` attribute;
 tracing does not include credentials, source code, request bodies, or query text.
 MCP tool response schemas are unchanged.
+
+**Draft dependency blocker:** This integration requires the session properties
+from [modeling-app PR #14156](https://github.com/KittyCAD/modeling-app/pull/14156).
+The published `zoo-kcl` `0.3.186` does not contain them. The branch retains main's
+dependency and lockfile until the first release containing those properties is
+published; it is not ready to merge or release with that dependency. Set that
+published version as the exact minimum and regenerate `uv.lock` before removing
+the blocker. A local build of the upstream merge commit
+`380e6858d4d9f1808111657fc98c56f5844a959a` provides the required API for development;
+its wheel also reports `0.3.186`, but it is not the published wheel. Missing session
+properties are errors; a property whose value is `None` remains valid.
 
 ## Integrations
 
@@ -111,10 +149,10 @@ one MCP server per agent, each agent in a sense "embeds" the server in their own
 runtime. It has the additional benefit of preventing shared state.
 
 ```python
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from zoo_mcp.zoo_tools import ResultZooExecuteKcl, zoo_execute_kcl
 
-mcp = FastMCP(name="My Example Server")
+mcp = MCPServer(name="My Example Server")
 
 
 @mcp.tool()
@@ -169,6 +207,34 @@ reconnect, or call `start_modeling_session` when none exists. Populate the
 session with `execute_kcl`, `exec_kcl_project`, or `import_cad_file`; pass the
 same `session_id` to `snapshot` and modeling tools; then call
 `stop_modeling_session` when finished.
+
+As of 0.28.0, `execute_kcl` and `exec_kcl_project` run mock execution before real
+execution and return separate `mock_preflight` and `real_execution` objects.
+Each contains `status` (`succeeded`, `failed`, or `not_run`), `message`, and
+`diagnostics` grouped by severity. Stage messages are short summaries; the
+top-level `message` retains the full report for existing callers. Failed stages
+also expose `error_family`, including `ZooMCPTimeoutError` for session timeouts.
+Mock errors or an aborted mock execution
+return immediately with `ok: false` and `real_execution.status: "not_run"`.
+Mock warnings remain in `mock_preflight.diagnostics` even if real execution fails.
+The known `planeOf` mock-engine limitation is reported as a warning so the real
+engine can evaluate it; other mock errors still block execution.
+Session responses expose mock diagnostics; the engine does not return real-stage
+diagnostics for session execution.
+
+Path inputs capture the entrypoint, its transitive imports (including linked
+modules and glTF buffers), and `project.toml` once. Both stages use that copy
+without scanning unrelated files in the containing directory. Dependencies and
+symlink targets must stay inside the entrypoint's directory; external paths are
+rejected before file reads or execution. Transient local real-execution failures
+retain their bounded retries using the same copy without repeating mock execution.
+Diagnostics refer to the original source paths. Inline `kcl_code` accepts
+self-contained code and standard-library imports; filesystem imports require
+`kcl_path` so their dependencies can be captured within an explicit directory.
+`exec_kcl_project` now returns
+this structured result instead of a path string: check `ok`, then read
+`path_artifact_graph` on session success. The standalone `mock_execute_kcl` tool
+continues to return its existing boolean/message pair.
 
 ## Contributing
 

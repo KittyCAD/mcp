@@ -34,6 +34,7 @@ class ApiCallEvent:
     command_id: str | None = None
     async_operation_id: str | None = None
     status_code: int | None = None
+    websocket_upgrade_request_id: str | None = None
 
 
 @dataclass
@@ -41,9 +42,9 @@ class _Invocation:
     operation: str
     owner: asyncio.Task | None
     invocation_id: str = field(default_factory=lambda: str(uuid4()))
-    observations: dict[tuple[str | None, str | None, str | None], int] = field(
-        default_factory=dict
-    )
+    observations: dict[
+        tuple[str | None, str | None, str | None, str | None, int], None
+    ] = field(default_factory=dict)
     result_failed: bool = False
     pending_requests: dict[object, tuple[int, str | None]] = field(default_factory=dict)
 
@@ -137,6 +138,7 @@ def record_api_call_event(
     command_id: str | None = None,
     async_operation_id: str | None = None,
     status_code: int | None = None,
+    websocket_upgrade_request_id: str | None = None,
 ) -> None:
     invocation = _invocation.get()
     if invocation is None:
@@ -154,9 +156,18 @@ def record_api_call_event(
         command_id=command_id,
         async_operation_id=operation_id,
         status_code=status_code,
+        websocket_upgrade_request_id=websocket_upgrade_request_id,
     )
     if source != "invocation":
-        invocation.observations[(api_call_id, session_id, operation_id)] = event.attempt
+        invocation.observations[
+            (
+                api_call_id,
+                websocket_upgrade_request_id,
+                session_id,
+                operation_id,
+                event.attempt,
+            )
+        ] = None
     if api_call_id and attempt and api_call_id not in attempt.api_call_ids:
         attempt.api_call_ids.append(api_call_id)
     _emit(event)
@@ -218,14 +229,25 @@ def api_invocation(fn: Callable[_P, Awaitable[_T]]) -> Callable[_P, Awaitable[_T
                             async_operation_id=operation_id,
                         )
                     )
-                    invocation.observations[(None, None, operation_id)] = attempt
-                observations = invocation.observations or {(None, None, None): 1}
-                for (api_id, session_id, operation_id), attempt in observations.items():
+                    invocation.observations[
+                        (None, None, None, operation_id, attempt)
+                    ] = None
+                observations = invocation.observations or {
+                    (None, None, None, None, 1): None
+                }
+                for (
+                    api_id,
+                    upgrade_id,
+                    session_id,
+                    operation_id,
+                    attempt,
+                ) in observations:
                     _emit(
                         ApiCallEvent(
                             operation=invocation.operation,
                             invocation_id=invocation.invocation_id,
                             api_call_id=api_id,
+                            websocket_upgrade_request_id=upgrade_id,
                             source="invocation",
                             attempt=attempt,
                             outcome=outcome,

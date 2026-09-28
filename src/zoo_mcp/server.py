@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import atexit
 import signal
@@ -83,7 +84,8 @@ from kittycad.models.ok_modeling_cmd_response import (
     OptionSetSelectionFilter as ResponseSetSelectionFilter,
 )
 from kittycad.models.uuid import Uuid
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ImageContent
 
 from zoo_mcp import ZooMCPException, logger
@@ -109,7 +111,6 @@ from zoo_mcp.zoo_tools import (
     CameraView,
     FaceInfo,
     ResultZooExecuteKcl,
-    ResultZooExecuteKclLocal,
     _abort_all_modeling_sessions,
     zoo_calculate_bounding_box_cad,
     zoo_calculate_bounding_box_kcl,
@@ -177,7 +178,7 @@ async def _ensure_kcl_indexes() -> None:
 
 
 @asynccontextmanager
-async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
+async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
     """Eagerly start index population when the server starts.
 
     Tools still ``await _ensure_kcl_indexes()`` so they wait for completion
@@ -197,7 +198,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
         KCLSamples._instance = None
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     name="Zoo MCP Server",
     log_level="INFO",
     lifespan=_lifespan,
@@ -502,32 +503,38 @@ async def execute_kcl(
 ) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
+    Executing kcl_code does not save a .kcl source file. For model creation,
+    save the source and required project files with the client's authorized
+    file-editing tools, then validate the saved project using kcl_path and
+    include the editable KCL files in the handoff.
+
       Session executions save the artifact graph to a temporary JSON file and
       return its path. Local executions do not produce an artifact graph and can
       have large network overhead depending on the model.
 
     Args:
-        kcl_code (str | None): The KCL code to execute.
-        kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file.
+        kcl_code (str | None): Self-contained KCL code to execute. Standard-library imports are allowed; filesystem imports require kcl_path.
+        kcl_path (str | None): The path to a KCL file to execute. The path should point to a .kcl file or a directory containing a main.kcl file. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: An open modeling session in which to execute the KCL.
 
     Returns:
-        ResultZooExecuteKcl: The execution status and message. Session executions
-                            also include the artifact graph's JSON file path.
+        ResultZooExecuteKcl: Separate mock_preflight and real_execution outcomes,
+                            each with status, message, and diagnostics. Mock errors
+                            return immediately with real_execution not_run; mock
+                            warnings remain visible and allow real execution.
+                            Known mock-engine limitations are warnings.
+                            Session successes include path_artifact_graph.
+                            Transient local failures may retry real execution
+                            without repeating preflight.
     """
 
     logger.info("execute_kcl tool called")
 
-    try:
-        return await zoo_execute_kcl(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            session_id=session_id,
-        )
-    except Exception as e:
-        return ResultZooExecuteKclLocal(
-            ok=False, message=f"Failed to execute KCL code: {e}"
-        )
+    return await zoo_execute_kcl(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        session_id=session_id,
+    )
 
 
 @mcp.tool()
@@ -535,23 +542,28 @@ async def exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
     kcl_path: str | None = None,
-) -> str:
-    """Run a KCL project on the server side and save its artifact graph.
+) -> ResultZooExecuteKcl:
+    """Mock preflight a KCL project, then run it in the session and save its artifact graph.
+
+    Both stages use the same captured project. Mock errors return immediately
+    without starting real execution. Mock warnings remain visible and allow it.
+    Known mock-engine limitations are reported as warnings for real execution.
 
     Args:
-        kcl_code (str | None): KCL code to run as a single-file project.
-        kcl_path (str | None): A .kcl file or project directory containing main.kcl.
+        kcl_code (str | None): Self-contained KCL code to run as a single-file project. Standard-library imports are allowed; filesystem imports require kcl_path.
+        kcl_path (str | None): A .kcl file or project directory containing main.kcl. Dependencies and symlink targets must remain inside the entrypoint's directory.
         session_id: The modeling session in which to execute the project.
 
     Returns:
-        str: The path to the JSON file containing the artifact graph.
+        ResultZooExecuteKcl: Separate mock_preflight and real_execution outcomes,
+                            each with status, message, and diagnostics. Session
+                            success includes path_artifact_graph. Mock failures
+                            set real_execution.status to not_run.
     """
     logger.info("exec_kcl_project tool called")
 
-    return str(
-        await zoo_exec_kcl_project(
-            kcl_code=kcl_code, kcl_path=kcl_path, session_id=session_id
-        )
+    return await zoo_exec_kcl_project(
+        kcl_code=kcl_code, kcl_path=kcl_path, session_id=session_id
     )
 
 
@@ -635,6 +647,10 @@ async def export_kcl(
     export_format: str | None = None,
 ) -> str:
     """Export KCL code to a CAD file. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
+
+    This tool does not save editable KCL source. For model creation, include
+    the saved KCL project alongside any requested CAD exports unless the user
+    explicitly requests export-only output.
 
     Args:
         kcl_code (str | None): The KCL code to export to a CAD file.
@@ -1367,9 +1383,13 @@ async def snapshot(
     """
     logger.info("snapshot tool called")
 
+    try:
+        views = _resolve_camera_views(camera_view)
+    except ZooMCPException as error:
+        raise ToolError(str(error)) from error
     image = await zoo_snapshot(
         session_id=session_id,
-        views=_resolve_camera_views(camera_view),
+        views=views,
         max_image_dimension=max_image_dimension,
         padding=padding,
         zoom=zoom,
@@ -1721,7 +1741,7 @@ def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:
 
 
 def _abort_modeling_sessions_at_exit() -> None:
-    """Best-effort fallback for exits outside the FastMCP lifespan."""
+    """Best-effort fallback for exits outside the MCPServer lifespan."""
     _abort_all_modeling_sessions()
 
 
@@ -1738,9 +1758,27 @@ def install_shutdown_handlers() -> None:
 
 
 def main():
-    logger.info("Starting MCP server...")
+    parser = argparse.ArgumentParser(description="Zoo MCP server")
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "streamable-http"),
+        default="stdio",
+        help="MCP transport (default: stdio)",
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8000, help="HTTP port (default: 8000)"
+    )
+    args = parser.parse_args()
+
+    logger.info("Starting MCP server with %s transport...", args.transport)
     install_shutdown_handlers()
-    mcp.run(transport="stdio")
+    if args.transport == "streamable-http":
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

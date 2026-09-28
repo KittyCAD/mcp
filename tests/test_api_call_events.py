@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import asdict
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import kcl
@@ -93,77 +94,389 @@ async def test_logs_without_capture_omit_inputs(caplog):
     assert "api_call_id=backend" in caplog.text
 
 
-class _Trace:
-    def __init__(self):
-        self.api_call_ids = []
+class _Outcome:
+    def __init__(self, report=None):
+        self.report_value = report or SimpleNamespace(
+            fully_constrained=[],
+            under_constrained=[],
+            over_constrained=[],
+            errors=[],
+            warnings=[],
+            execution_errors=[],
+            execution_fatals=[],
+            is_complete=True,
+            kcl_error=None,
+        )
+
+    def issues(self):
+        return []
+
+    def sketch_constraint_report(self):
+        return self.report_value
+
+    def render_sketch_png(self, name):
+        assert name == "profile"
+        return b"png"
+
+
+class _Session:
+    def __init__(self, api_id="backend", upgrade_id="upgrade", outcome=None):
+        self.api_call_id = api_id
+        self.websocket_upgrade_request_id = upgrade_id
+        self.outcome = outcome or _Outcome()
+        self.close = AsyncMock()
+        self.export = AsyncMock(return_value=[SimpleNamespace(contents=b"step")])
+        self.measure = AsyncMock()
 
 
 @pytest.mark.asyncio
-async def test_kcl_failed_attempt_then_success_keeps_both_ids(monkeypatch):
-    monkeypatch.setattr(kcl, "ApiCallTrace", _Trace)
-    monkeypatch.setattr(zoo_tools, "_execution_retry_delay", lambda _: 0)
-    traces = []
-    result = [b"unchanged export bytes"]
+@pytest.mark.parametrize("from_file", [False, True])
+@pytest.mark.parametrize(
+    "operation", ["properties", "bounding_box", "export", "constraints", "visualize"]
+)
+async def test_standalone_tools_use_one_session(
+    monkeypatch, tmp_path, from_file, operation
+):
+    session = _Session()
+    point = SimpleNamespace(x=1, y=2, z=3)
+    bbox = SimpleNamespace(get_center=lambda: point, get_dimensions=lambda: point)
+    session.measure.return_value = SimpleNamespace(
+        get_volume=lambda: 10,
+        get_mass=lambda: 20,
+        get_surface_area=lambda: 30,
+        get_center_of_mass=lambda: point,
+        get_bounding_box=lambda: bbox,
+    )
+    open_code = AsyncMock(return_value=session)
+    open_file = AsyncMock(return_value=session)
+    monkeypatch.setattr(kcl, "new_kcl_session_code", open_code)
+    monkeypatch.setattr(kcl, "new_kcl_session", open_file)
+    path = tmp_path / "part.kcl"
+    path.write_text("x = 1")
+    arguments = {"kcl_path": path} if from_file else {"kcl_code": "x = 1"}
 
-    async def execute(*, trace):
-        traces.append(trace)
-        trace.api_call_ids.append(f"backend-{len(traces)}")
-        if len(traces) == 1:
-            raise kcl.KclError("retry", True)
-        return result
+    with capture_api_call_events() as events:
+        if operation == "properties":
+            result = await zoo_tools.zoo_calculate_kcl_physical_properties(
+                arguments.get("kcl_code"),
+                arguments.get("kcl_path"),
+                "mm",
+                "g",
+                "kg:m3",
+                1000,
+                "mm2",
+                "mm3",
+            )
+            assert result == {
+                "volume": 10,
+                "mass": 20,
+                "surface_area": 30,
+                "center_of_mass": {"x": 1, "y": 2, "z": 3},
+                "bounding_box": {
+                    "center": {"x": 1, "y": 2, "z": 3},
+                    "dimensions": {"x": 1, "y": 2, "z": 3},
+                },
+            }
+        elif operation == "bounding_box":
+            assert await zoo_tools.zoo_calculate_bounding_box_kcl(
+                "mm", **arguments
+            ) == {
+                "center": {"x": 1, "y": 2, "z": 3},
+                "dimensions": {"x": 1, "y": 2, "z": 3},
+            }
+        elif operation == "export":
+            output = await zoo_tools.zoo_export_kcl(
+                export_path=tmp_path / "part.step", **arguments
+            )
+            assert output.read_bytes() == b"step"
+            session.export.assert_awaited_once_with(kcl.FileExportFormat.Step)
+        elif operation == "constraints":
+            result = await zoo_tools.zoo_get_sketch_constraint_status(**arguments)
+            assert result == {
+                "fully_constrained": [],
+                "under_constrained": [],
+                "over_constrained": [],
+                "errors": [],
+                "total_sketches": 0,
+                "kcl_executes_successfully": True,
+                "kcl_error": None,
+            }
+        else:
+            assert (
+                await zoo_tools.zoo_visualize_sketch("profile", **arguments) == b"png"
+            )
+    assert open_code.await_count == int(not from_file)
+    assert open_file.await_count == int(from_file)
+    session.close.assert_awaited_once()
+    assert session.measure.await_count == int(
+        operation in ("properties", "bounding_box")
+    )
+    assert {e.api_call_id for e in events} == {"backend"}
+    assert {e.websocket_upgrade_request_id for e in events} == {"upgrade"}
+    assert events[-1].source == "invocation" and events[-1].outcome == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_inspection_retains_successful_attempt(monkeypatch):
+    session = _Session()
+    ready = asyncio.Event()
+
+    async def measure(_request):
+        ready.set()
+        await asyncio.Event().wait()
+
+    session.measure.side_effect = measure
+    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=_Outcome()))
+    monkeypatch.setattr(
+        kcl,
+        "new_kcl_session_code",
+        AsyncMock(side_effect=[kcl.KclError("retry", True), session]),
+    )
+    monkeypatch.setattr(zoo_tools, "_execution_retry_delay", lambda _: 0)
+    with capture_api_call_events() as events:
+        task = asyncio.create_task(
+            zoo_tools.zoo_execute_kcl(
+                kcl_code="x = 1",
+                physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(
+                    ("volume",)
+                ),
+            )
+        )
+        await ready.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    session.close.assert_awaited_once()
+    summary = events[-1]
+    assert (summary.source, summary.attempt, summary.outcome) == (
+        "invocation",
+        2,
+        "cancelled",
+    )
+    assert (summary.api_call_id, summary.websocket_upgrade_request_id) == (
+        "backend",
+        "upgrade",
+    )
+
+
+@pytest.mark.asyncio
+async def test_kcl_followup_retry_keeps_both_ids_and_closes_each_attempt(monkeypatch):
+    monkeypatch.setattr(zoo_tools, "_execution_retry_delay", lambda _: 0)
+    sessions = [_Session("backend-1", "upgrade-1"), _Session("backend-2", "upgrade-2")]
+    sessions[0].export.side_effect = kcl.KclError("retry", True)
+    open_session = AsyncMock(side_effect=sessions)
+    monkeypatch.setattr(kcl, "new_kcl_session_code", open_session)
+
+    async def export(session):
+        return await session.export(kcl.FileExportFormat.Step)
 
     with (
         capture_api_call_events() as events,
         zoo_tools.capture_execution_retry_events() as retries,
     ):
         actual = await zoo_tools._execute_kcl_with_retries(
-            execute, _operation="export_kcl"
+            export, "code", None, _operation="export_kcl"
         )
-    assert actual is result
-    assert traces[0] is not traces[1]
+    assert actual is sessions[1].export.return_value
+    assert open_session.await_count == 2
+    for session in sessions:
+        session.close.assert_awaited_once()
     kcl_events = [e for e in events if e.source == "kcl"]
-    assert [(e.attempt, e.api_call_id, e.outcome) for e in kcl_events] == [
-        (1, "backend-1", "failed"),
-        (2, "backend-2", "succeeded"),
+    assert [
+        (e.attempt, e.api_call_id, e.websocket_upgrade_request_id) for e in kcl_events
+    ] == [
+        (1, "backend-1", "upgrade-1"),
+        (2, "backend-2", "upgrade-2"),
     ]
     assert [e.api_call_ids for e in retries] == [("backend-1",), ("backend-2",)]
     assert [e.outcome for e in retries] == ["retry_scheduled", "recovered"]
+    assert [
+        (e.attempt, e.api_call_id, e.websocket_upgrade_request_id)
+        for e in events
+        if e.source == "invocation"
+    ] == [(1, "backend-1", "upgrade-1"), (2, "backend-2", "upgrade-2")]
 
 
 @pytest.mark.asyncio
-async def test_kcl_cancellation_and_pre_response_failure(monkeypatch):
-    monkeypatch.setattr(kcl, "ApiCallTrace", _Trace)
-    ready = asyncio.Event()
-
-    async def execute(*, trace):
-        trace.api_call_ids.append("cancelled-backend")
-        ready.set()
-        await asyncio.Event().wait()
-
-    with capture_api_call_events() as events:
-        task = asyncio.create_task(
-            zoo_tools._execute_kcl_with_retries(execute, _operation="execute")
+@pytest.mark.parametrize("inspections", [False, True])
+async def test_execution_session_retry_does_not_repeat_mock_or_execution(
+    monkeypatch, inspections
+):
+    session = _Session()
+    mock = AsyncMock(return_value=_Outcome())
+    open_session = AsyncMock(side_effect=[kcl.KclError("retry", True), session])
+    monkeypatch.setattr(kcl, "mock_execute_code", mock)
+    monkeypatch.setattr(kcl, "new_kcl_session_code", open_session)
+    monkeypatch.setattr(zoo_tools, "_execution_retry_delay", lambda _: 0)
+    legacy = AsyncMock(side_effect=AssertionError("duplicate execution"))
+    monkeypatch.setattr(kcl, "execute_code", legacy)
+    session.measure.return_value = SimpleNamespace(get_volume=lambda: 12.5)
+    with (
+        capture_api_call_events() as events,
+        zoo_tools.capture_execution_retry_events() as retries,
+    ):
+        result = await zoo_tools.zoo_execute_kcl(
+            kcl_code="x = 1",
+            physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(
+                ("volume",)
+            )
+            if inspections
+            else None,
         )
-        await ready.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    assert [(e.api_call_id, e.outcome) for e in events if e.source == "kcl"] == [
-        ("cancelled-backend", "cancelled")
+    assert result.ok
+    mock.assert_awaited_once()
+    legacy.assert_not_called()
+    assert open_session.await_count == 2
+    session.close.assert_awaited_once()
+    assert session.measure.await_count == int(inspections)
+    assert [(e.attempt, e.api_call_ids) for e in retries] == [
+        (1, None),
+        (2, ("backend",)),
+    ]
+    assert [
+        (e.attempt, e.api_call_id, e.websocket_upgrade_request_id)
+        for e in events
+        if e.source == "kcl"
+    ] == [(1, None, None), (2, "backend", "upgrade")]
+    summaries = [e for e in events if e.source == "invocation"]
+    assert [(e.attempt, e.api_call_id) for e in summaries] == [
+        (1, None),
+        (2, "backend"),
     ]
 
-    async def invalid(*, trace):
-        raise ValueError("no response")
 
-    with capture_api_call_events() as failed, pytest.raises(ValueError):
-        await zoo_tools._execute_kcl_with_retries(invalid, _operation="execute")
-    assert all(e.api_call_id is None for e in failed)
-    assert all(e.outcome == "failed" for e in failed)
-    assert {e.invocation_id for e in events}.isdisjoint(e.invocation_id for e in failed)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_kcl_followup_failure_closes_session_and_retains_ids(
+    monkeypatch, caplog, cancel
+):
+    session = _Session()
+    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(return_value=session))
+    ready = asyncio.Event()
+
+    async def followup(session):
+        ready.set()
+        if cancel:
+            await asyncio.Event().wait()
+        raise ValueError("private follow-up error")
+
+    with capture_api_call_events() as events, caplog.at_level("INFO", logger="zoo_mcp"):
+        task = asyncio.create_task(
+            zoo_tools._execute_kcl_with_retries(
+                followup, "code", None, _operation="execute"
+            )
+        )
+        await ready.wait()
+        if cancel:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else ValueError):
+            await task
+    session.close.assert_awaited_once()
+    summary = [e for e in events if e.source == "invocation"]
+    assert len(summary) == 1
+    assert (summary[0].api_call_id, summary[0].websocket_upgrade_request_id) == (
+        "backend",
+        "upgrade",
+    )
+    assert summary[0].outcome == ("cancelled" if cancel else "failed")
+    record = [r.api_call_event for r in caplog.records if hasattr(r, "api_call_event")][
+        -1
+    ]
+    assert record == asdict(summary[0])
+    assert "api_call_id=backend" in caplog.text
+    assert "websocket_upgrade_request_id=upgrade" in caplog.text
+    assert "private follow-up error" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_generic_retries_do_not_inject_a_trace():
+async def test_pre_session_failure_does_not_parse_ids_from_error(monkeypatch):
+    monkeypatch.setattr(
+        kcl,
+        "new_kcl_session_code",
+        AsyncMock(side_effect=ValueError("api_call_id=untrusted")),
+    )
+    with capture_api_call_events() as events, pytest.raises(ValueError):
+        await zoo_tools._execute_kcl_with_retries(
+            AsyncMock(), "code", None, _operation="execute"
+        )
+    assert events
+    assert all(
+        e.api_call_id is None and e.websocket_upgrade_request_id is None for e in events
+    )
+    assert all(e.outcome == "failed" for e in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "missing_property", [None, "api_call_id", "websocket_upgrade_request_id"]
+)
+async def test_session_properties_are_required_but_none_is_valid(
+    monkeypatch, missing_property
+):
+    session = _Session(None, None)
+    if missing_property:
+        delattr(session, missing_property)
+    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(return_value=session))
+    use_session = AsyncMock(return_value=42)
+    with capture_api_call_events() as events:
+        if missing_property:
+            with pytest.raises(AttributeError, match=missing_property):
+                await zoo_tools._execute_kcl_with_retries(
+                    use_session, "code", None, _operation="execute"
+                )
+            use_session.assert_not_called()
+        else:
+            assert (
+                await zoo_tools._execute_kcl_with_retries(
+                    use_session, "code", None, _operation="execute"
+                )
+                == 42
+            )
+    session.close.assert_awaited_once()
+    assert all(
+        e.api_call_id is None and e.websocket_upgrade_request_id is None for e in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_mock_preflight_failure_records_no_backend_ids(monkeypatch):
+    monkeypatch.setattr(
+        kcl, "mock_execute_code", AsyncMock(side_effect=ValueError("invalid"))
+    )
+    open_session = AsyncMock()
+    monkeypatch.setattr(kcl, "new_kcl_session_code", open_session)
+    with capture_api_call_events() as events:
+        result = await zoo_tools.zoo_execute_kcl(kcl_code="code")
+    assert not result.ok
+    open_session.assert_not_called()
+    assert len(events) == 1
+    assert events[0].source == "invocation" and events[0].outcome == "failed"
+    assert (
+        events[0].api_call_id is None and events[0].websocket_upgrade_request_id is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_invocation_preserves_distinct_upgrade_ids_and_attempts():
+    @api_invocation
+    async def call():
+        for attempt, upgrade in ((1, "first"), (2, "second"), (3, "second")):
+            with zoo_tools.api_call_attempt(attempt):
+                record_api_call_event(
+                    "kcl", "observed", "backend", websocket_upgrade_request_id=upgrade
+                )
+
+    with capture_api_call_events() as events:
+        await call()
+    assert [
+        (e.attempt, e.api_call_id, e.websocket_upgrade_request_id)
+        for e in events
+        if e.source == "invocation"
+    ] == [(1, "backend", "first"), (2, "backend", "second"), (3, "backend", "second")]
+
+
+@pytest.mark.asyncio
+async def test_generic_retries_do_not_inject_session_arguments():
     async def arbitrary(value):
         return value
 
@@ -311,22 +624,26 @@ async def test_successful_sdk_pagination_captures_every_request(client, httpx_mo
 
 @pytest.mark.asyncio
 async def test_execute_failure_value_has_failed_invocation(monkeypatch):
-    monkeypatch.setattr(kcl, "ApiCallTrace", _Trace)
+    class FailedOutcome(_Outcome):
+        def sketch_constraint_report(self):
+            raise ValueError("failed")
 
-    async def execute(code, *, trace):
-        trace.api_call_ids.append("failed-execution")
-        raise ValueError("failed")
-
-    monkeypatch.setattr(kcl, "execute_code", execute)
+    session = _Session(outcome=FailedOutcome())
+    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=_Outcome()))
+    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(return_value=session))
     with capture_api_call_events() as events:
         result = await zoo_tools.zoo_execute_kcl(kcl_code="x = 1")
     assert not result.ok
-    assert [(e.api_call_id, e.outcome) for e in events if e.source == "invocation"] == [
-        ("failed-execution", "failed")
-    ]
+    session.close.assert_awaited_once()
+    assert [
+        (e.api_call_id, e.websocket_upgrade_request_id, e.outcome)
+        for e in events
+        if e.source == "invocation"
+    ] == [("backend", "upgrade", "failed")]
 
 
 @pytest.mark.live
+@pytest.mark.xdist_group(name="engine")
 @pytest.mark.asyncio
 async def test_live_kcl_measurement_and_export_capture_backend_ids(cube_kcl, tmp_path):
     with capture_api_call_events() as events:
@@ -339,12 +656,12 @@ async def test_live_kcl_measurement_and_export_capture_backend_ids(cube_kcl, tmp
     assert isinstance(properties["volume"], float)
     assert output == tmp_path / "cube.step"
     assert output.read_bytes()
-    succeeded = [e for e in events if e.source == "kcl" and e.outcome == "succeeded"]
+    succeeded = [e for e in events if e.source == "kcl" and e.outcome == "observed"]
     assert {e.operation for e in succeeded} == {
         "zoo_calculate_kcl_physical_properties",
         "zoo_export_kcl",
     }
-    assert all(e.api_call_id for e in succeeded)
+    assert all(e.api_call_id and e.websocket_upgrade_request_id for e in succeeded)
     assert len({e.invocation_id for e in succeeded}) == 2
 
 
