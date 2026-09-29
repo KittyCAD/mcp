@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock
 
 import anyio
 import pytest
@@ -164,17 +165,14 @@ async def test_failed_start_releases_capacity_and_workspace(pool, monkeypatch):
 async def test_delegation_happens_after_queue_wait(pool):
     await pool.call(owner(), credential, "first", {})
     entry = pool.entries[owner()]
-    delegated = []
-
-    async def fresh():
-        delegated.append(True)
-        return "fresh"
+    delegate = AsyncMock(return_value="fresh")
 
     async with entry.lock:
-        queued = asyncio.create_task(pool.call(owner(), fresh, "tool", {}))
+        queued = asyncio.create_task(pool.call(owner(), delegate, "tool", {}))
         await asyncio.sleep(0)
-        assert not delegated
+        delegate.assert_not_awaited()
     await queued
+    delegate.assert_awaited_once_with()
     assert FakeWorker.instances[0].calls[-1][0] == "fresh"
 
 
