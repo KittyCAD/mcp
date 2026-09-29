@@ -31,6 +31,8 @@ def read_message(reader: BinaryIO) -> dict | None:
     header = reader.read(4)
     if not header:
         return None
+    if len(header) != 4:
+        raise EOFError("Incomplete worker message header")
     size = message_size(header)
     body = reader.read(size)
     if len(body) != size:
