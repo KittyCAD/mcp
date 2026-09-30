@@ -69,39 +69,10 @@ ZOO_API_TOKEN="your_api_key_here" ./zoo-mcp-linux-x86_64
 
 ## Capturing backend API call IDs in Python
 
-Python callers can collect backend IDs without changing tool return values or MCP
-response schemas. For example, inside an existing Opik span:
-
-```python
-from opik import opik_context
-from zoo_mcp.zoo_tools import capture_api_call_events, zoo_execute_kcl
-
-with capture_api_call_events() as events:
-    try:
-        result = await zoo_execute_kcl(kcl_path="/path/to/project/main.kcl")
-    finally:
-        opik_context.update_current_span(
-            metadata={
-                "api_call_ids": list(
-                    dict.fromkeys(
-                        event.api_call_id for event in events if event.api_call_id
-                    )
-                ),
-                "websocket_upgrade_request_ids": list(
-                    dict.fromkeys(
-                        event.websocket_upgrade_request_id
-                        for event in events
-                        if event.websocket_upgrade_request_id
-                    )
-                ),
-            }
-        )
-```
-
-Opik is optional and belongs to the caller's tracing integration. Zookeeper can
-wrap its existing `zoo_execute_kcl(...)` call this way, including when requesting
-snapshots or physical properties. Backend IDs are captured from the KCL session
-before it closes, and remain in the list if follow-up work fails or is canceled.
+Python callers can use `capture_api_call_events()` to collect backend IDs without
+changing tool return values or MCP response schemas. Backend IDs are captured from
+KCL sessions before they close, including when requesting snapshots or physical
+properties, and remain available if follow-up work fails or is canceled.
 
 `ApiCallEvent` contains `operation`, `source`, `api_call_id`,
 `websocket_upgrade_request_id`, and optional local modeling `session_id`.
@@ -121,7 +92,7 @@ capture contexts, so await them before consuming the completed list. The same
 observations are logged at INFO with a structured `api_call_event` attribute,
 without including credentials, source code, request bodies, or query text.
 
-This integration requires `zoo-kcl>=0.3.188`, which includes the session
+ID capture requires `zoo-kcl>=0.3.188`, which includes the session
 properties from [modeling-app PR #14156](https://github.com/KittyCAD/modeling-app/pull/14156).
 Missing session properties are errors; a property whose value is `None` is valid.
 
