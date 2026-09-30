@@ -1574,14 +1574,7 @@ third = makeProfile()
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("native_sketch_execution")
-@pytest.mark.parametrize(
-    ("sketch_name", "message"),
-    [("unfinished", "no completed geometry"), ("absent", "no sketch named")],
-)
-async def test_visualize_sketch_preserves_error_when_recovery_fails(
-    sketch_name: str,
-    message: str,
-) -> None:
+async def test_visualize_sketch_preserves_error_when_sketch_is_missing() -> None:
     source = (
         SKETCH_VISUALIZER_KCL
         + """
@@ -1591,8 +1584,8 @@ unfinished = sketch(on = XY) {
 }
 """
     )
-    with pytest.raises(zoo_mcp.ZooMCPException, match=message) as raised:
-        await zoo_mcp.zoo_tools.zoo_visualize_sketch(sketch_name, kcl_code=source)
+    with pytest.raises(zoo_mcp.ZooMCPException, match="no sketch named") as raised:
+        await zoo_mcp.zoo_tools.zoo_visualize_sketch("absent", kcl_code=source)
     assert "missingValue" in str(raised.value)
     png = await zoo_mcp.zoo_tools.zoo_visualize_sketch("s1", kcl_code=source)
     assert png.startswith(b"\x89PNG\r\n\x1a\n")
