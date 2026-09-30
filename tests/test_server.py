@@ -555,12 +555,13 @@ async def test_calculate_cad_physical_properties_error(cube_stl: str):
 
 
 @pytest.mark.asyncio
-async def test_calculate_kcl_physical_properties(cube_kcl: str):
+@pytest.mark.parametrize("inline_code", [False, True], ids=["path", "code"])
+async def test_calculate_kcl_physical_properties(cube_kcl: str, inline_code: bool):
     response = await mcp.call_tool(
         "calculate_kcl_physical_properties",
         arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
+            "kcl_code": Path(cube_kcl).read_text() if inline_code else None,
+            "kcl_path": None if inline_code else cube_kcl,
             "unit_length": "mm",
             "unit_mass": "g",
             "unit_density": "kg:m3",
@@ -626,12 +627,13 @@ async def test_calculate_kcl_physical_properties_invalid_unit(cube_kcl: str):
 
 
 @pytest.mark.asyncio
-async def test_calculate_bounding_box_kcl(cube_kcl: str):
+@pytest.mark.parametrize("inline_code", [False, True], ids=["path", "code"])
+async def test_calculate_bounding_box_kcl(cube_kcl: str, inline_code: bool):
     response = await mcp.call_tool(
         "calculate_bounding_box_kcl",
         arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
+            "kcl_code": Path(cube_kcl).read_text() if inline_code else None,
+            "kcl_path": None if inline_code else cube_kcl,
             "unit_length": "mm",
         },
     )
@@ -1247,19 +1249,21 @@ async def test_execute_with_retries_preserves_inner_timeout_error():
 
 
 @pytest.mark.asyncio
-async def test_export_kcl(cube_kcl: str):
+@pytest.mark.parametrize("inline_code", [False, True], ids=["path", "code"])
+async def test_export_kcl(cube_kcl: str, inline_code: bool, tmp_path: Path):
     response = await mcp.call_tool(
         "export_kcl",
         arguments={
-            "kcl_code": None,
-            "kcl_path": cube_kcl,
-            "export_path": None,
+            "kcl_code": Path(cube_kcl).read_text() if inline_code else None,
+            "kcl_path": None if inline_code else cube_kcl,
+            "export_path": str(tmp_path / "cube.step"),
             "export_format": "step",
         },
     )
     result = _meta_result(response)
     assert Path(result).exists()
     assert Path(result).stat().st_size != 0
+    assert Path(result).read_bytes().startswith(b"ISO-10303-21;")
 
 
 @pytest.mark.asyncio
