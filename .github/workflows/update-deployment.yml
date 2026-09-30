@@ -1,0 +1,66 @@
+name: Update deployment
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: read
+
+jobs:
+  update-deployment:
+    name: Open MCP deployment PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ secrets.GH_ORG_APP_ID }}
+          private-key: ${{ secrets.GH_ORG_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            mcp
+            mcp-deployment
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: KittyCAD/mcp-deployment
+          ref: main
+          path: mcp-deployment
+          submodules: recursive
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+      - name: Update public MCP source pin
+        working-directory: mcp-deployment/mcp
+        env:
+          MCP_SHA: ${{ github.sha }}
+        run: |
+          git fetch origin "$MCP_SHA"
+          git checkout --detach "$MCP_SHA"
+      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Refresh deployment dependencies
+        working-directory: mcp-deployment
+        run: uv lock
+      - name: Open draft pull request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          path: mcp-deployment
+          branch: automation/mcp-${{ github.ref_name }}
+          base: main
+          delete-branch: false
+          draft: true
+          add-paths: |
+            mcp
+            uv.lock
+          commit-message: Update MCP to ${{ github.ref_name }}
+          title: Update MCP to ${{ github.ref_name }}
+          body: |
+            Updates the MCP source pin to `${{ github.sha }}` from tag `${{ github.ref_name }}` and refreshes the deployment lockfile.
+
+            [Source workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).

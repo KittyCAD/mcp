@@ -59,6 +59,8 @@ Connect an MCP client to `http://127.0.0.1:8000/mcp`. The SDK manages HTTP
 sessions and streaming responses. `--host` and `--port` configure the HTTP
 listener; their defaults are `127.0.0.1` and `8000`.
 
+For authenticated hosting and process ownership, see [hosting.md](docs/hosting.md).
+
 ### Prebuilt binaries
 
 Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:
