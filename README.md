@@ -67,35 +67,6 @@ ZOO_API_TOKEN="your_api_key_here" ./zoo-mcp-linux-x86_64
 ```
 > The binaries are not code-signed, so macOS Gatekeeper and Windows SmartScreen may warn on first run.
 
-## Capturing backend API call IDs in Python
-
-Python callers can use `capture_api_call_events()` to collect backend IDs without
-changing tool return values or MCP response schemas. Backend IDs are captured from
-KCL sessions before they close, including when requesting snapshots or physical
-properties, and remain available if follow-up work fails or is canceled.
-
-`ApiCallEvent` contains `operation`, `source`, `api_call_id`,
-`websocket_upgrade_request_id`, and optional local modeling `session_id`.
-The backend API call ID and HTTP WebSocket upgrade request ID are distinct;
-local session and command IDs never substitute for either. Events are emitted
-only when at least one backend identifier is available. A failure before the KCL
-binding returns a session may have no accessible IDs.
-
-Capture covers KCL sessions, REST responses (including pagination and async
-polling), file operation IDs, and persistent modeling-session metadata. Reusing
-an engine connection can produce repeated observations of the same ID; these
-are observations rather than a count of requests. Existing execution retry
-events continue to report retries separately.
-
-Nested capture contexts each receive an observation once. Child tasks inherit
-capture contexts, so await them before consuming the completed list. The same
-observations are logged at INFO with a structured `api_call_event` attribute,
-without including credentials, source code, request bodies, or query text.
-
-ID capture requires `zoo-kcl>=0.3.188`, which includes the session
-properties from [modeling-app PR #14156](https://github.com/KittyCAD/modeling-app/pull/14156).
-Missing session properties are errors; a property whose value is `None` is valid.
-
 ## Integrations
 
 The server can be used as is by [running the server](#running-the-server) or importing directly into your python code.
