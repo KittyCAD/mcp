@@ -75,7 +75,7 @@ Python callers can collect tracing events without changing a tool's return value
 from zoo_mcp.zoo_tools import capture_api_call_events, zoo_execute_kcl
 
 with capture_api_call_events() as events:
-    result = await zoo_execute_kcl(kcl_code="x = 1")
+    result = await zoo_execute_kcl(kcl_path="/path/to/project/main.kcl")
 
 api_call_ids = list(
     dict.fromkeys(
@@ -88,6 +88,13 @@ The list remains available if a call raises or is canceled. Nested capture conte
 each receive an event once. Concurrent tool invocations have separate invocation IDs;
 child tasks inherit their parent's capture contexts, so await them before consuming
 the completed event list.
+
+For Zookeeper's `execute_project` integration, wrap the existing
+`zoo_execute_kcl(...)` call in this context and attach the collected backend IDs
+to the execution trace. Capture also works when the call requests snapshots or
+physical properties. The IDs remain available after the execution session closes;
+they identify the engine session for log correlation, not a reusable zoo-mcp
+`session_id`. Execution result objects do not include these tracing fields.
 
 `ApiCallEvent` contains `operation`, `invocation_id`, `api_call_id`, `source`,
 `attempt`, and `outcome`, with optional `websocket_upgrade_request_id`,
@@ -123,16 +130,10 @@ include searchable identifiers and a structured `api_call_event` attribute;
 tracing does not include credentials, source code, request bodies, or query text.
 MCP tool response schemas are unchanged.
 
-**Draft dependency blocker:** This integration requires the session properties
-from [modeling-app PR #14156](https://github.com/KittyCAD/modeling-app/pull/14156).
-The published `zoo-kcl` `0.3.186` does not contain them. The branch retains main's
-dependency and lockfile until the first release containing those properties is
-published; it is not ready to merge or release with that dependency. Set that
-published version as the exact minimum and regenerate `uv.lock` before removing
-the blocker. A local build of the upstream merge commit
-`380e6858d4d9f1808111657fc98c56f5844a959a` provides the required API for development;
-its wheel also reports `0.3.186`, but it is not the published wheel. Missing session
-properties are errors; a property whose value is `None` remains valid.
+This integration requires `zoo-kcl>=0.3.188`, which includes the session
+properties from [modeling-app PR #14156](https://github.com/KittyCAD/modeling-app/pull/14156).
+Missing session properties are errors; a property whose value is `None` remains
+valid.
 
 ## Integrations
 

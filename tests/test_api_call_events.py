@@ -129,6 +129,48 @@ class _Session:
         self.measure = AsyncMock()
 
 
+def test_installed_kcl_provides_session_correlation_properties():
+    assert hasattr(kcl.KclSession, "api_call_id")
+    assert hasattr(kcl.KclSession, "websocket_upgrade_request_id")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_file", [False, True])
+async def test_execute_kcl_captures_engine_ids_before_session_closes(
+    monkeypatch, tmp_path, from_file
+):
+    session = _Session()
+
+    async def close():
+        session.api_call_id = None
+        session.websocket_upgrade_request_id = None
+
+    session.close.side_effect = close
+    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=_Outcome()))
+    monkeypatch.setattr(kcl, "mock_execute", AsyncMock(return_value=_Outcome()))
+    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(return_value=session))
+    monkeypatch.setattr(kcl, "new_kcl_session", AsyncMock(return_value=session))
+    path = tmp_path / "main.kcl"
+    path.write_text("x = 1")
+    with capture_api_call_events() as events:
+        result = await zoo_tools.zoo_execute_kcl(
+            kcl_path=path if from_file else None,
+            kcl_code=None if from_file else "x = 1",
+        )
+
+    assert result.ok
+    session.close.assert_awaited_once()
+    assert session.api_call_id is None
+    assert [
+        (event.source, event.api_call_id, event.websocket_upgrade_request_id)
+        for event in events
+    ] == [
+        ("kcl", "backend", "upgrade"),
+        ("invocation", "backend", "upgrade"),
+    ]
+    assert all(event.operation == "zoo_execute_kcl" for event in events)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("from_file", [False, True])
 @pytest.mark.parametrize(
@@ -645,24 +687,29 @@ async def test_execute_failure_value_has_failed_invocation(monkeypatch):
 @pytest.mark.live
 @pytest.mark.xdist_group(name="engine")
 @pytest.mark.asyncio
-async def test_live_kcl_measurement_and_export_capture_backend_ids(cube_kcl, tmp_path):
+async def test_live_kcl_execution_measurement_and_export_capture_backend_ids(
+    cube_kcl, tmp_path
+):
     with capture_api_call_events() as events:
+        execution = await zoo_tools.zoo_execute_kcl(kcl_path=cube_kcl)
         properties = await zoo_tools.zoo_calculate_kcl_physical_properties(
             None, cube_kcl, "mm", "g", "kg:m3", 1000, "mm2", "mm3"
         )
         output = await zoo_tools.zoo_export_kcl(
             kcl_path=cube_kcl, export_path=tmp_path / "cube.step"
         )
+    assert execution.ok
     assert isinstance(properties["volume"], float)
     assert output == tmp_path / "cube.step"
     assert output.read_bytes()
     succeeded = [e for e in events if e.source == "kcl" and e.outcome == "observed"]
     assert {e.operation for e in succeeded} == {
+        "zoo_execute_kcl",
         "zoo_calculate_kcl_physical_properties",
         "zoo_export_kcl",
     }
     assert all(e.api_call_id and e.websocket_upgrade_request_id for e in succeeded)
-    assert len({e.invocation_id for e in succeeded}) == 2
+    assert len({e.invocation_id for e in succeeded}) == 3
 
 
 @pytest.mark.asyncio
