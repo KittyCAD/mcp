@@ -141,15 +141,8 @@ from zoo_mcp.api_call_events import (
     ApiCallEvent as ApiCallEvent,  # noqa: PLC0414 -- public re-export
 )
 from zoo_mcp.api_call_events import (
-    ApiCallOutcome,
-    api_call_attempt,
-    api_invocation,
-    async_operation_scope,
-    attempt_api_call_ids,
-    finish_rest_request,
-    mark_api_call_failed,
+    api_operation,
     record_api_call_event,
-    start_rest_request,
 )
 from zoo_mcp.api_call_events import (
     capture_api_call_events as capture_api_call_events,  # noqa: PLC0414 -- public re-export
@@ -178,29 +171,13 @@ def _api_call_id_from_headers(headers: object, *, upgrade: bool = False) -> str 
     return None
 
 
-async def _capture_rest_request(request: httpx.Request) -> None:
-    key = object()
-    request.extensions["zoo_mcp_trace_key"] = key
-    start_rest_request(key)
-
-
 async def _capture_rest_response(response: httpx.Response) -> None:
-    key = response.request.extensions.get("zoo_mcp_trace_key")
-    if key is not None:
-        finish_rest_request(key)
-    record_api_call_event(
-        "rest",
-        "failed" if response.is_error else "observed",
-        _api_call_id_from_headers(response.headers),
-        status_code=response.status_code,
-    )
+    record_api_call_event("rest", _api_call_id_from_headers(response.headers))
 
 
 def _new_zoo_client() -> AsyncKittyCAD:
     client = AsyncKittyCAD(verify_ssl=ctx)
     hooks = client.get_http_client().event_hooks
-    if _capture_rest_request not in hooks["request"]:
-        hooks["request"].append(_capture_rest_request)
     if _capture_rest_response not in hooks["response"]:
         hooks["response"].append(_capture_rest_response)
     return client
@@ -262,9 +239,7 @@ async def _resolve_file_api_call(
 
     result_id = getattr(result, "id", None)
     operation_id = str(result_id) if result_id is not None else None
-    record_api_call_event(
-        "file_operation", "observed", operation_id, async_operation_id=operation_id
-    )
+    record_api_call_event("file_operation", operation_id)
     current = result
     if deadline is None:
         deadline = monotonic() + FILE_API_CALL_TIMEOUT
@@ -284,11 +259,8 @@ async def _resolve_file_api_call(
             status.value,
         )
         try:
-            with async_operation_scope(str(current.id)):
-                async with asyncio.timeout(remaining):
-                    polled = await client.api_calls.get_async_operation(
-                        id=str(current.id)
-                    )
+            async with asyncio.timeout(remaining):
+                polled = await client.api_calls.get_async_operation(id=str(current.id))
         except TimeoutError as error:
             raise ZooMCPTimeoutError(
                 f"Timed out waiting for {operation_name} operation {current.id}"
@@ -479,7 +451,6 @@ class ExecutionRetryEvent:
     elapsed_seconds: float
     error_family: str | None
     fresh_invocation: bool
-    api_call_ids: tuple[str, ...] | None = None
 
 
 _execution_retry_event_buffer: ContextVar[list[ExecutionRetryEvent] | None] = (
@@ -529,7 +500,6 @@ async def _report_execution_retry_event(
             elapsed_seconds=monotonic() - started_at,
             error_family=error_family,
             fresh_invocation=True,
-            api_call_ids=attempt_api_call_ids(),
         )
     )
 
@@ -589,61 +559,59 @@ async def _execute_with_retries(
     operation = _operation or getattr(async_fn, "__name__", type(async_fn).__name__)
 
     for attempt in range(1, MAX_EXECUTION_ATTEMPTS + 1):
-        with api_call_attempt(attempt):
-            try:
-                result = await async_fn(*args, **kwargs)
-            except Exception as error:
-                is_retryable = getattr(error, "is_retryable", None)
-                retryable = callable(is_retryable) and is_retryable()
-                if retryable and attempt < MAX_EXECUTION_ATTEMPTS:
-                    delay = _execution_retry_delay(attempt)
-                    await _report_execution_retry_event(
-                        operation,
-                        "retry_scheduled",
-                        attempt,
-                        started_at,
-                        delay=delay,
-                        error=error,
-                    )
-                    logger.warning(
-                        "Retryable KCL execution error; scheduling attempt %d/%d "
-                        "in %.3fs (error_family=%s)",
-                        attempt + 1,
-                        MAX_EXECUTION_ATTEMPTS,
-                        delay,
-                        _execution_error_family(error),
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-
-                outcome: ExecutionRetryOutcome = (
-                    "exhausted" if retryable else "terminal_non_retryable"
-                )
+        try:
+            result = await async_fn(*args, **kwargs)
+        except Exception as error:
+            is_retryable = getattr(error, "is_retryable", None)
+            retryable = callable(is_retryable) and is_retryable()
+            if retryable and attempt < MAX_EXECUTION_ATTEMPTS:
+                delay = _execution_retry_delay(attempt)
                 await _report_execution_retry_event(
-                    operation, outcome, attempt, started_at, error=error
+                    operation,
+                    "retry_scheduled",
+                    attempt,
+                    started_at,
+                    delay=delay,
+                    error=error,
                 )
-                raise
+                logger.warning(
+                    "Retryable KCL execution error; scheduling attempt %d/%d "
+                    "in %.3fs (error_family=%s)",
+                    attempt + 1,
+                    MAX_EXECUTION_ATTEMPTS,
+                    delay,
+                    _execution_error_family(error),
+                )
+                await asyncio.sleep(delay)
+                continue
 
-            result_error_family = (
-                _result_error_family(result) if _result_error_family else None
+            outcome: ExecutionRetryOutcome = (
+                "exhausted" if retryable else "terminal_non_retryable"
             )
-            if result_error_family is not None:
-                mark_api_call_failed()
-                await _report_execution_retry_event(
-                    operation,
-                    "terminal_non_retryable",
-                    attempt,
-                    started_at,
-                    error_family=result_error_family,
-                )
-            else:
-                await _report_execution_retry_event(
-                    operation,
-                    "succeeded" if attempt == 1 else "recovered",
-                    attempt,
-                    started_at,
-                )
-            return result
+            await _report_execution_retry_event(
+                operation, outcome, attempt, started_at, error=error
+            )
+            raise
+
+        result_error_family = (
+            _result_error_family(result) if _result_error_family else None
+        )
+        if result_error_family is not None:
+            await _report_execution_retry_event(
+                operation,
+                "terminal_non_retryable",
+                attempt,
+                started_at,
+                error_family=result_error_family,
+            )
+        else:
+            await _report_execution_retry_event(
+                operation,
+                "succeeded" if attempt == 1 else "recovered",
+                attempt,
+                started_at,
+            )
+        return result
 
     raise AssertionError("unreachable")
 
@@ -681,22 +649,16 @@ async def _open_kcl_session(
             )
         record_api_call_event(
             "kcl",
-            "observed",
             session.api_call_id,
             websocket_upgrade_request_id=session.websocket_upgrade_request_id,
         )
         return session
-    except BaseException as error:
-        record_api_call_event(
-            "kcl",
-            "cancelled" if isinstance(error, asyncio.CancelledError) else "failed",
-        )
+    except BaseException:
         if session is not None:
             await session.close()
         raise
 
 
-@api_invocation
 async def _execute_kcl_with_retries(
     use_session: Callable[[kcl.KclSession], Awaitable[_T]],
     kcl_code: str | None,
@@ -887,7 +849,7 @@ class CameraView(Enum):
         )
 
 
-@api_invocation
+@api_operation
 async def zoo_calculate_center_of_mass(
     file_path: Path | str,
     unit_length: str,
@@ -933,7 +895,7 @@ async def zoo_calculate_center_of_mass(
     return com
 
 
-@api_invocation
+@api_operation
 async def zoo_calculate_mass(
     file_path: Path | str,
     unit_mass: str,
@@ -984,7 +946,7 @@ async def zoo_calculate_mass(
     return mass
 
 
-@api_invocation
+@api_operation
 async def zoo_calculate_surface_area(file_path: Path | str, unit_area: str) -> float:
     """Calculate the surface area of the file in the requested unit
 
@@ -1028,7 +990,7 @@ async def zoo_calculate_surface_area(file_path: Path | str, unit_area: str) -> f
     return surface_area
 
 
-@api_invocation
+@api_operation
 async def zoo_calculate_volume(file_path: Path | str, unit_vol: str) -> float:
     """Calculate the volume of the file in the requested unit
 
@@ -1124,7 +1086,7 @@ def _get_input_format(ext: str) -> InputFormat3d | None:
     return None
 
 
-@api_invocation
+@api_operation
 async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
     """Import a CAD file into the scene and return the imported object's id.
 
@@ -1183,7 +1145,6 @@ async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
                 bson.encode(request.model_dump(exclude_none=True)),
                 deadline,
                 "CAD file import",
-                command_id=str(command_id),
             )
             log_stage("sent", "awaiting-engine-response")
             response = await _await_modeling_response(
@@ -1204,7 +1165,7 @@ async def zoo_import_cad_file(session_id: str, input_file: Path | str) -> str:
         return response.data.object_id
 
 
-@api_invocation
+@api_operation
 async def zoo_calculate_cad_physical_properties(
     file_path: Path | str,
     unit_length: str,
@@ -1338,7 +1299,7 @@ async def zoo_calculate_cad_physical_properties(
     return physical_properties
 
 
-@api_invocation
+@api_operation
 async def zoo_calculate_kcl_physical_properties(
     kcl_code: str | None,
     kcl_path: Path | str | None,
@@ -1444,7 +1405,7 @@ def _compute_stl_bounding_box(stl_data: bytes) -> dict:
     }
 
 
-@api_invocation
+@api_operation
 async def zoo_calculate_bounding_box_kcl(
     unit_length: str,
     kcl_code: str | None = None,
@@ -1487,7 +1448,7 @@ async def zoo_calculate_bounding_box_kcl(
     }
 
 
-@api_invocation
+@api_operation
 async def zoo_calculate_bounding_box_cad(
     file_path: Path | str,
 ) -> dict:
@@ -1540,7 +1501,7 @@ async def zoo_calculate_bounding_box_cad(
     return await asyncio.to_thread(_compute_stl_bounding_box, stl_data)
 
 
-@api_invocation
+@api_operation
 async def zoo_convert_cad_file(
     input_file: Path | str,
     export_path: Path | str | None = None,
@@ -2153,7 +2114,6 @@ async def _execute_kcl_with_preflight(
                 "CompilationIssue" if mock.status == "failed" else None,
             )
             if mock.status == "failed":
-                mark_api_call_failed()
                 _report_execution_stage_event(
                     operation,
                     "real_execution",
@@ -2256,8 +2216,6 @@ async def _execute_kcl_with_preflight(
                     artifact_graph,
                     inspection=inspection,
                 )
-            if real.status == "failed":
-                mark_api_call_failed()
             return ResultZooExecuteKclLocal(
                 real.status == "succeeded",
                 _execution_result_message(real),
@@ -2275,7 +2233,6 @@ async def _execute_kcl_with_preflight(
         )
         raise
     except Exception as error:
-        mark_api_call_failed()
         detail = resolved.source_report(str(error)) if resolved else str(error)
         error_family = _execution_error_family(error)
         _report_execution_stage_event(
@@ -2324,7 +2281,7 @@ async def _execute_kcl_with_preflight(
         )
 
 
-@api_invocation
+@api_operation
 async def zoo_execute_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
@@ -2362,7 +2319,7 @@ async def zoo_execute_kcl(
     )
 
 
-@api_invocation
+@api_operation
 async def zoo_export_kcl(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
@@ -2617,7 +2574,7 @@ def _constraint_report_error_family(report: dict) -> str | None:
     return "KclConstraintError"
 
 
-@api_invocation
+@api_operation
 async def zoo_get_sketch_constraint_status(
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
@@ -2674,7 +2631,7 @@ async def zoo_get_sketch_constraint_status(
         raise ZooMCPException(f"Failed to get sketch constraint status: {e}")
 
 
-@api_invocation
+@api_operation
 async def zoo_visualize_sketch(
     sketch_name: str,
     kcl_code: str | None = None,
@@ -2773,7 +2730,6 @@ async def _exec_kcl_project(
         json.dumps(request),
         deadline,
         "KCL project execution",
-        command_id=str(request_id),
     )
 
     # This response is not represented in the generated SDK yet.
@@ -2817,7 +2773,6 @@ async def _exec_kcl_project(
             mode="w", delete=False, suffix=".json", encoding="utf-8"
         ) as artifact_graph_file:
             json.dump(artifact_graph, artifact_graph_file)
-            _complete_modeling_command(str(request_id))
             return Path(artifact_graph_file.name)
 
 
@@ -2832,64 +2787,34 @@ class _ModelingSession:
     websocket_upgrade_request_id: str | None = None
 
 
-@dataclass
-class _SessionOperation:
-    session: _ModelingSession
-    pending_commands: set[str] = field(default_factory=set)
-
-
-_session_operation: ContextVar[_SessionOperation | None] = ContextVar(
-    "modeling_session_operation", default=None
+_active_modeling_session: ContextVar[_ModelingSession | None] = ContextVar(
+    "active_modeling_session", default=None
 )
 
 
-def _record_session_event(
-    session: _ModelingSession, outcome: ApiCallOutcome, command_id: str | None = None
-) -> None:
+def _record_session_event(session: _ModelingSession) -> None:
     record_api_call_event(
-        "command" if command_id else "session",
-        outcome,
+        "session",
         session.api_call_id,
         websocket_upgrade_request_id=session.websocket_upgrade_request_id,
         session_id=session.session_id,
-        command_id=command_id,
     )
 
 
-def _complete_modeling_command(command_id: str) -> None:
-    operation = _session_operation.get()
-    if operation is not None and command_id in operation.pending_commands:
-        _record_session_event(operation.session, "succeeded", command_id)
-        operation.pending_commands.remove(command_id)
-
-
 @contextmanager
-def _trace_session_operation(session: _ModelingSession) -> Iterator[None]:
-    operation = _SessionOperation(session)
-    token = _session_operation.set(operation)
-    _record_session_event(session, "observed")
-    outcome: ApiCallOutcome = "succeeded"
+def _capture_session_ids(session: _ModelingSession) -> Iterator[None]:
+    token = _active_modeling_session.set(session)
+    _record_session_event(session)
     try:
         yield
-    except asyncio.CancelledError:
-        outcome = "cancelled"
-        raise
-    except BaseException:
-        outcome = "failed"
-        raise
     finally:
-        try:
-            for command_id in operation.pending_commands:
-                _record_session_event(session, outcome, command_id)
-            _record_session_event(session, outcome)
-        finally:
-            _session_operation.reset(token)
+        _active_modeling_session.reset(token)
 
 
 def _observe_modeling_frame(response: object) -> None:
-    """Observe metadata without consuming an extra frame or changing matching."""
-    operation = _session_operation.get()
-    if operation is None or not isinstance(response, dict):
+    """Read session metadata without consuming an extra frame or changing matching."""
+    session = _active_modeling_session.get()
+    if session is None or not isinstance(response, dict):
         return
     payload = response.get("resp")
     if isinstance(payload, dict) and payload.get("type") == "modeling_session_data":
@@ -2898,22 +2823,9 @@ def _observe_modeling_frame(response: object) -> None:
             session_data = data.get("session")
             if isinstance(session_data, dict):
                 api_id = session_data.get("api_call_id")
-                if (
-                    isinstance(api_id, str)
-                    and api_id
-                    and api_id != operation.session.api_call_id
-                ):
-                    operation.session.api_call_id = api_id
-                    _record_session_event(operation.session, "observed")
-    command_id = response.get("request_id")
-    if isinstance(command_id, str) and command_id in operation.pending_commands:
-        _record_session_event(
-            operation.session,
-            "observed" if response.get("success") else "failed",
-            command_id,
-        )
-        # Successful transport responses may still contain a KCL execution
-        # error, so the command's terminal outcome is emitted by its scope.
+                if isinstance(api_id, str) and api_id and api_id != session.api_call_id:
+                    session.api_call_id = api_id
+                    _record_session_event(session)
 
 
 @dataclass
@@ -2971,15 +2883,15 @@ async def _open_modeling_websocket(client: AsyncKittyCAD) -> ClientConnection:
 
 async def _close_modeling_session(session: _ModelingSession) -> None:
     """Close one session's websocket, waiting for any in-flight command."""
-    with _trace_session_operation(session):
+    try:
+        async with session.lock:
+            _record_session_event(session)
+            await session.websocket.close()
+    finally:
         try:
-            async with session.lock:
-                await session.websocket.close()
+            await session.client.aclose()
         finally:
-            try:
-                await session.client.aclose()
-            finally:
-                _unlink_modeling_session_artifact_graphs(session)
+            _unlink_modeling_session_artifact_graphs(session)
 
 
 def _abort_modeling_websocket(session: _ModelingSession) -> None:
@@ -3033,7 +2945,7 @@ def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
     session.artifact_graph_paths.clear()
 
 
-@api_invocation
+@api_operation
 async def zoo_start_modeling_session() -> str:
     global _modeling_session
 
@@ -3057,7 +2969,6 @@ async def zoo_start_modeling_session() -> str:
         response = getattr(error, "response", None)
         record_api_call_event(
             "websocket",
-            "cancelled" if isinstance(error, asyncio.CancelledError) else "failed",
             websocket_upgrade_request_id=_api_call_id_from_headers(
                 getattr(response, "headers", None), upgrade=True
             ),
@@ -3083,7 +2994,6 @@ async def zoo_start_modeling_session() -> str:
     )
     record_api_call_event(
         "websocket",
-        "observed",
         websocket_upgrade_request_id=session.websocket_upgrade_request_id,
         session_id=session_id,
     )
@@ -3103,7 +3013,7 @@ def zoo_get_modeling_sessions() -> list[str]:
     return [_modeling_session.session_id]
 
 
-@api_invocation
+@api_operation
 async def zoo_stop_modeling_session(session_id: str) -> None:
     global _modeling_session
 
@@ -3119,7 +3029,7 @@ async def zoo_stop_modeling_session(session_id: str) -> None:
     await _close_modeling_session(session)
 
 
-@api_invocation
+@api_operation
 async def zoo_stop_all_modeling_sessions() -> None:
     """Close the persistent modeling session, normally during server shutdown."""
     global _modeling_session
@@ -3192,10 +3102,9 @@ async def _modeling_websocket(session_id: str) -> AsyncIterator[ClientConnection
 
     # Session state has no awaits around its reads and writes, while this lock
     # serializes commands that yield during websocket I/O.
-    _record_session_event(session, "observed")
     async with session.lock:
         try:
-            with _trace_session_operation(session):
+            with _capture_session_ids(session):
                 yield session.websocket
         except ZooMCPTimeoutError:
             # The engine still owes a response to the command that gave up. Its
@@ -3222,7 +3131,7 @@ async def _modeling_websocket(session_id: str) -> AsyncIterator[ClientConnection
             ) from error
 
 
-@api_invocation
+@api_operation
 async def zoo_exec_kcl_project(
     session_id: str,
     kcl_code: str | None = None,
@@ -3255,7 +3164,7 @@ async def _execute_resolved_kcl_project(
         return path
 
 
-@api_invocation
+@api_operation
 async def zoo_face_info(
     face_id: Uuid,
     session_id: str,
@@ -3279,7 +3188,6 @@ async def zoo_face_info(
             ).model_dump_json(exclude_none=True),
             deadline,
             "face info",
-            command_id=str(cmd_id_face_get_position),
         )
 
         cmd_id_face_get_gradient = ModelingCmdId(uuid4())
@@ -3298,7 +3206,6 @@ async def zoo_face_info(
             ).model_dump_json(exclude_none=True),
             deadline,
             "face info",
-            command_id=str(cmd_id_face_get_gradient),
         )
 
         cmd_id_face_get_center = ModelingCmdId(uuid4())
@@ -3312,7 +3219,6 @@ async def zoo_face_info(
             ).model_dump_json(exclude_none=True),
             deadline,
             "face info",
-            command_id=str(cmd_id_face_get_center),
         )
 
         face_get_position: FaceGetPosition | Literal[False] = False
@@ -3353,19 +3259,16 @@ async def zoo_face_info(
                         "Received an unexpected face position response"
                     )
                 face_get_position = modeling_response.data
-                _complete_modeling_command(str(cmd_id_face_get_position))
             elif message.request_id == cmd_id_face_get_gradient:
                 if not isinstance(modeling_response, ResponseFaceGetGradient):
                     raise ZooMCPException(
                         "Received an unexpected face gradient response"
                     )
                 face_get_gradient = modeling_response.data
-                _complete_modeling_command(str(cmd_id_face_get_gradient))
             elif message.request_id == cmd_id_face_get_center:
                 if not isinstance(modeling_response, ResponseFaceGetCenter):
                     raise ZooMCPException("Received an unexpected face center response")
                 face_get_center = modeling_response.data
-                _complete_modeling_command(str(cmd_id_face_get_center))
 
         return FaceInfo(
             face_get_position=face_get_position,
@@ -3445,14 +3348,8 @@ async def _send_modeling_frame(
     payload: str | bytes,
     deadline: _Deadline,
     description: str,
-    *,
-    command_id: str | None = None,
 ) -> None:
     """Send one frame within the same wall-clock budget as its response."""
-    operation = _session_operation.get()
-    if operation is not None and command_id is not None:
-        operation.pending_commands.add(command_id)
-        _record_session_event(operation.session, "observed", command_id)
     remaining = deadline.remaining
     if remaining <= 0:
         raise _modeling_timeout(deadline, description)
@@ -3461,9 +3358,6 @@ async def _send_modeling_frame(
         await asyncio.wait_for(ws.send(payload), timeout=remaining)
     except TimeoutError as error:
         raise _modeling_timeout(deadline, description) from error
-
-    if operation is not None and command_id is not None:
-        _record_session_event(operation.session, "sent", command_id)
 
 
 def _format_websocket_failure(message: object) -> str:
@@ -3515,7 +3409,6 @@ async def _await_modeling_response(
             raise ZooMCPException(
                 f"Received an unexpected {response_description} response"
             )
-        _complete_modeling_command(str(command_id))
         return modeling_response
 
 
@@ -3544,7 +3437,6 @@ async def _send_modeling_command(
         ).model_dump_json(exclude_none=True),
         deadline,
         response_description,
-        command_id=str(command_id),
     )
 
     return await _await_modeling_response(
@@ -3556,7 +3448,7 @@ async def _send_modeling_command(
     )
 
 
-@api_invocation
+@api_operation
 async def zoo_execute_modeling_command(
     command: ModelingCmd,
     expected_response: type[_ModelingResponseT],
@@ -3574,7 +3466,7 @@ async def zoo_execute_modeling_command(
         )
 
 
-@api_invocation
+@api_operation
 async def zoo_snapshot(
     session_id: str,
     views: list[OptionDefaultCameraLookAt] | None = None,
@@ -3749,7 +3641,7 @@ def _org_datasets_empty_or_raise(
     raise ZooMCPException(f"Failed to list org datasets: {exc}") from exc
 
 
-@api_invocation
+@api_operation
 async def zoo_list_org_datasets(
     lookup_enabled: bool | None = True,
 ) -> list[dict[str, str | None]]:
@@ -3798,7 +3690,7 @@ async def zoo_list_org_datasets(
     ]
 
 
-@api_invocation
+@api_operation
 async def zoo_list_org_skills() -> list[dict[str, str]]:
     """List all skills visible to the org tied to the current ZOO_API_TOKEN.
 
@@ -3826,7 +3718,7 @@ async def zoo_list_org_skills() -> list[dict[str, str]]:
     ]
 
 
-@api_invocation
+@api_operation
 async def zoo_search_org_dataset_semantic(
     dataset_id: str,
     query: str,

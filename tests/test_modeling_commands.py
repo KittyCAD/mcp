@@ -1303,16 +1303,13 @@ async def test_session_metadata_is_captured_in_both_receive_paths(monkeypatch, p
                 session_id,
             )
         await zoo_tools.zoo_stop_modeling_session(session_id)
-    commands = [e for e in events if e.source == "command" and e.outcome == "succeeded"]
-    assert len(commands) == 1
-    assert commands[0].api_call_id == "api-call-id"
-    assert commands[0].websocket_upgrade_request_id == "upgrade-request"
-    assert commands[0].session_id == session_id
-    assert commands[0].command_id not in {session_id, "api-call-id"}
-    stopped = [e for e in events if e.operation == "zoo_stop_modeling_session"]
-    assert {e.api_call_id for e in stopped} == {"api-call-id"}
-    assert {e.websocket_upgrade_request_id for e in stopped} == {"upgrade-request"}
-    assert commands[0].invocation_id not in {e.invocation_id for e in stopped}
+    captured = [e for e in events if e.source == "session" and e.api_call_id]
+    assert len(captured) == 2
+    assert {e.api_call_id for e in captured} == {"api-call-id"}
+    assert {e.websocket_upgrade_request_id for e in captured} == {"upgrade-request"}
+    assert {e.session_id for e in captured} == {session_id}
+    assert captured[-1].operation == "zoo_stop_modeling_session"
+    assert all(e.api_call_id != session_id for e in events)
 
 
 @pytest.mark.asyncio
@@ -1357,16 +1354,13 @@ async def test_session_failure_retains_handshake_id_before_eviction(
         ):
             await task
     assert zoo_tools._modeling_session is None
-    failed_commands = [
-        e
-        for e in events
-        if e.source == "command" and e.outcome == ("cancelled" if cancel else "failed")
+    command_events = [
+        e for e in events if e.operation == "zoo_execute_modeling_command"
     ]
-    assert len(failed_commands) == 1
-    assert failed_commands[0].api_call_id is None
-    assert failed_commands[0].websocket_upgrade_request_id == "handshake-id"
-    assert failed_commands[0].session_id == session_id
-    assert failed_commands[0].command_id
+    assert len(command_events) == 1
+    assert command_events[0].api_call_id is None
+    assert command_events[0].websocket_upgrade_request_id == "handshake-id"
+    assert command_events[0].session_id == session_id
 
 
 @pytest.mark.asyncio
@@ -1388,7 +1382,6 @@ async def test_rejected_handshake_captures_fallback_header(monkeypatch):
     assert handshake[0].api_call_id is None
     assert handshake[0].websocket_upgrade_request_id == "rejected-id"
     assert handshake[0].session_id
-    assert handshake[0].outcome == "failed"
     assert zoo_tools._modeling_session is None
 
 

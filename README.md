@@ -69,71 +69,61 @@ ZOO_API_TOKEN="your_api_key_here" ./zoo-mcp-linux-x86_64
 
 ## Capturing backend API call IDs in Python
 
-Python callers can collect tracing events without changing a tool's return value:
+Python callers can collect backend IDs without changing tool return values or MCP
+response schemas. For example, inside an existing Opik span:
 
 ```python
+from opik import opik_context
 from zoo_mcp.zoo_tools import capture_api_call_events, zoo_execute_kcl
 
 with capture_api_call_events() as events:
-    result = await zoo_execute_kcl(kcl_path="/path/to/project/main.kcl")
-
-api_call_ids = list(
-    dict.fromkeys(
-        event.api_call_id for event in events if event.api_call_id is not None
-    )
-)
+    try:
+        result = await zoo_execute_kcl(kcl_path="/path/to/project/main.kcl")
+    finally:
+        opik_context.update_current_span(
+            metadata={
+                "api_call_ids": list(
+                    dict.fromkeys(
+                        event.api_call_id for event in events if event.api_call_id
+                    )
+                ),
+                "websocket_upgrade_request_ids": list(
+                    dict.fromkeys(
+                        event.websocket_upgrade_request_id
+                        for event in events
+                        if event.websocket_upgrade_request_id
+                    )
+                ),
+            }
+        )
 ```
 
-The list remains available if a call raises or is canceled. Nested capture contexts
-each receive an event once. Concurrent tool invocations have separate invocation IDs;
-child tasks inherit their parent's capture contexts, so await them before consuming
-the completed event list.
+Opik is optional and belongs to the caller's tracing integration. Zookeeper can
+wrap its existing `zoo_execute_kcl(...)` call this way, including when requesting
+snapshots or physical properties. Backend IDs are captured from the KCL session
+before it closes, and remain in the list if follow-up work fails or is canceled.
 
-For Zookeeper's `execute_project` integration, wrap the existing
-`zoo_execute_kcl(...)` call in this context and attach the collected backend IDs
-to the execution trace. Capture also works when the call requests snapshots or
-physical properties. The IDs remain available after the execution session closes;
-they identify the engine session for log correlation, not a reusable zoo-mcp
-`session_id`. Execution result objects do not include these tracing fields.
+`ApiCallEvent` contains `operation`, `source`, `api_call_id`,
+`websocket_upgrade_request_id`, and optional local modeling `session_id`.
+The backend API call ID and HTTP WebSocket upgrade request ID are distinct;
+local session and command IDs never substitute for either. Events are emitted
+only when at least one backend identifier is available. A failure before the KCL
+binding returns a session may have no accessible IDs.
 
-`ApiCallEvent` contains `operation`, `invocation_id`, `api_call_id`, `source`,
-`attempt`, and `outcome`, with optional `websocket_upgrade_request_id`,
-`session_id`, `command_id`, `async_operation_id`, and HTTP `status_code`.
-Missing identifiers are `None`. The backend `api_call_id` and HTTP WebSocket
-upgrade request ID are distinct; neither is replaced by a local session or
-command ID. Invocation summaries preserve both connection identifiers and their
-retry attempt.
+Capture covers KCL sessions, REST responses (including pagination and async
+polling), file operation IDs, and persistent modeling-session metadata. Reusing
+an engine connection can produce repeated observations of the same ID; these
+are observations rather than a count of requests. Existing execution retry
+events continue to report retries separately.
 
-Every real local KCL execution opens a `KclSession`. Capture reads its
-`api_call_id` and `websocket_upgrade_request_id` properties immediately after
-creation, inside the owning retry attempt. Measurements, exports, snapshots,
-constraints, and sketch rendering reuse that execution, and the session closes
-after its requested work, including on errors or cancellation. Mock preflight
-produces no backend IDs and runs once before real-execution retries.
-
-An `observed` event records information already received; a later operation can
-still fail. Invocation completion describes the whole Python call. Existing
-execution retry events expose `api_call_ids` for that attempt, containing only
-backend API call IDs. A failure before the KCL binding returns a session can have
-no IDs, even if the backend received the request. Capturing IDs on these failures
-is intentionally deferred; IDs are never parsed from error messages.
-
-Events are observations, not a count of backend requests. A persistent modeling
-session reuses its backend and upgrade request IDs across many command IDs. Its
-backend ID becomes available from session metadata; the handshake ID remains in
-`websocket_upgrade_request_id`. A file operation's `id` is also retained as
-`async_operation_id`; each polling HTTP request has its own `api_call_id`.
-Repeated observations of an ID are expected.
-
-The same events are logged at INFO even without a capture context. Log records
-include searchable identifiers and a structured `api_call_event` attribute;
-tracing does not include credentials, source code, request bodies, or query text.
-MCP tool response schemas are unchanged.
+Nested capture contexts each receive an observation once. Child tasks inherit
+capture contexts, so await them before consuming the completed list. The same
+observations are logged at INFO with a structured `api_call_event` attribute,
+without including credentials, source code, request bodies, or query text.
 
 This integration requires `zoo-kcl>=0.3.188`, which includes the session
 properties from [modeling-app PR #14156](https://github.com/KittyCAD/modeling-app/pull/14156).
-Missing session properties are errors; a property whose value is `None` remains
-valid.
+Missing session properties are errors; a property whose value is `None` is valid.
 
 ## Integrations
 

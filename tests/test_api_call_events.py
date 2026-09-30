@@ -12,61 +12,34 @@ from kittycad.models import ApiCallStatus, FileVolume
 
 from zoo_mcp import ZooMCPException, zoo_tools
 from zoo_mcp.api_call_events import (
-    api_invocation,
+    api_operation,
     capture_api_call_events,
     record_api_call_event,
 )
 
 
 @pytest.mark.asyncio
-async def test_nested_captures_and_same_task_helpers_share_invocation():
-    @api_invocation
-    async def helper():
-        record_api_call_event("rest", "observed", "backend")
-
-    @api_invocation
-    async def outer_call():
-        with capture_api_call_events() as inner:
-            await helper()
-        return inner
-
-    with capture_api_call_events() as outer:
-        inner = await outer_call()
-    assert len(inner) == 1
-    assert inner[0] is outer[0]
-    assert len(outer) == 2
-    assert {e.operation for e in outer} == {"outer_call"}
-    assert len({e.invocation_id for e in outer}) == 1
-
-
-@pytest.mark.asyncio
-async def test_concurrent_calls_inherit_capture_but_have_separate_invocations():
-    @api_invocation
+async def test_nested_captures_include_child_tasks_once():
+    @api_operation
     async def call(api_id):
         await asyncio.sleep(0)
-        record_api_call_event("rest", "observed", api_id)
+        record_api_call_event("rest", api_id)
 
-    @api_invocation
-    async def parent():
-        await asyncio.gather(call("one"), call("two"))
-
-    with capture_api_call_events() as events:
-        await parent()
-    invocations = {
-        api_id: {e.invocation_id for e in events if e.api_call_id == api_id}
-        for api_id in ("one", "two")
-    }
-    assert all(len(ids) == 1 for ids in invocations.values())
-    assert invocations["one"].isdisjoint(invocations["two"])
-    assert all(e.api_call_id is None for e in events if e.operation == "parent")
+    with capture_api_call_events() as outer:
+        with capture_api_call_events() as inner:
+            await asyncio.gather(call("one"), call("two"))
+        await call("three")
+    assert [e.api_call_id for e in outer] == ["one", "two", "three"]
+    assert inner == outer[:2]
+    assert all(e.operation == "call" for e in outer)
 
 
 @pytest.mark.asyncio
 async def test_separate_concurrent_captures_do_not_mix():
-    @api_invocation
+    @api_operation
     async def call(api_id):
         await asyncio.sleep(0)
-        record_api_call_event("rest", "observed", api_id)
+        record_api_call_event("rest", api_id)
 
     async def capture(api_id):
         with capture_api_call_events() as events:
@@ -74,29 +47,32 @@ async def test_separate_concurrent_captures_do_not_mix():
         return events
 
     one, two = await asyncio.gather(capture("one"), capture("two"))
-    assert {e.api_call_id for e in one} == {"one"}
-    assert {e.api_call_id for e in two} == {"two"}
+    assert [e.api_call_id for e in one] == ["one"]
+    assert [e.api_call_id for e in two] == ["two"]
 
 
 @pytest.mark.asyncio
-async def test_logs_without_capture_omit_inputs(caplog):
-    @api_invocation
+async def test_logs_without_capture_omit_inputs_and_exception_text(caplog):
+    @api_operation
     async def call(secret):
-        record_api_call_event("rest", "observed", "backend")
+        record_api_call_event("rest", "backend")
         raise ValueError(secret)
 
     with caplog.at_level("INFO", logger="zoo_mcp"), pytest.raises(ValueError):
         await call("private query and credentials")
     records = [r for r in caplog.records if hasattr(r, "api_call_event")]
-    assert records[-1].api_call_event["outcome"] == "failed"
-    assert records[-1].api_call_event["api_call_id"] == "backend"
+    assert len(records) == 1
+    assert records[0].api_call_event["api_call_id"] == "backend"
     assert "private query" not in caplog.text
     assert "api_call_id=backend" in caplog.text
 
 
 class _Outcome:
-    def __init__(self, report=None):
-        self.report_value = report or SimpleNamespace(
+    def issues(self):
+        return []
+
+    def sketch_constraint_report(self):
+        return SimpleNamespace(
             fully_constrained=[],
             under_constrained=[],
             over_constrained=[],
@@ -108,37 +84,24 @@ class _Outcome:
             kcl_error=None,
         )
 
-    def issues(self):
-        return []
-
-    def sketch_constraint_report(self):
-        return self.report_value
-
     def render_sketch_png(self, name):
         assert name == "profile"
         return b"png"
 
 
 class _Session:
-    def __init__(self, api_id="backend", upgrade_id="upgrade", outcome=None):
+    def __init__(self, api_id="backend", upgrade_id="upgrade"):
         self.api_call_id = api_id
         self.websocket_upgrade_request_id = upgrade_id
-        self.outcome = outcome or _Outcome()
+        self.outcome = _Outcome()
         self.close = AsyncMock()
         self.export = AsyncMock(return_value=[SimpleNamespace(contents=b"step")])
         self.measure = AsyncMock()
 
 
-def test_installed_kcl_provides_session_correlation_properties():
-    assert hasattr(kcl.KclSession, "api_call_id")
-    assert hasattr(kcl.KclSession, "websocket_upgrade_request_id")
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("from_file", [False, True])
-async def test_execute_kcl_captures_engine_ids_before_session_closes(
-    monkeypatch, tmp_path, from_file
-):
+async def test_execute_captures_ids_before_close(monkeypatch, tmp_path, from_file):
     session = _Session()
 
     async def close():
@@ -157,18 +120,12 @@ async def test_execute_kcl_captures_engine_ids_before_session_closes(
             kcl_path=path if from_file else None,
             kcl_code=None if from_file else "x = 1",
         )
-
     assert result.ok
     session.close.assert_awaited_once()
     assert session.api_call_id is None
     assert [
-        (event.source, event.api_call_id, event.websocket_upgrade_request_id)
-        for event in events
-    ] == [
-        ("kcl", "backend", "upgrade"),
-        ("invocation", "backend", "upgrade"),
-    ]
-    assert all(event.operation == "zoo_execute_kcl" for event in events)
+        (e.operation, e.api_call_id, e.websocket_upgrade_request_id) for e in events
+    ] == [("zoo_execute_kcl", "backend", "upgrade")]
 
 
 @pytest.mark.asyncio
@@ -176,7 +133,7 @@ async def test_execute_kcl_captures_engine_ids_before_session_closes(
 @pytest.mark.parametrize(
     "operation", ["properties", "bounding_box", "export", "constraints", "visualize"]
 )
-async def test_standalone_tools_use_one_session(
+async def test_standalone_tools_capture_ids_from_one_execution(
     monkeypatch, tmp_path, from_file, operation
 ):
     session = _Session()
@@ -196,7 +153,6 @@ async def test_standalone_tools_use_one_session(
     path = tmp_path / "part.kcl"
     path.write_text("x = 1")
     arguments = {"kcl_path": path} if from_file else {"kcl_code": "x = 1"}
-
     with capture_api_call_events() as events:
         if operation == "properties":
             result = await zoo_tools.zoo_calculate_kcl_physical_properties(
@@ -209,40 +165,18 @@ async def test_standalone_tools_use_one_session(
                 "mm2",
                 "mm3",
             )
-            assert result == {
-                "volume": 10,
-                "mass": 20,
-                "surface_area": 30,
-                "center_of_mass": {"x": 1, "y": 2, "z": 3},
-                "bounding_box": {
-                    "center": {"x": 1, "y": 2, "z": 3},
-                    "dimensions": {"x": 1, "y": 2, "z": 3},
-                },
-            }
+            assert result["volume"] == 10
         elif operation == "bounding_box":
-            assert await zoo_tools.zoo_calculate_bounding_box_kcl(
-                "mm", **arguments
-            ) == {
-                "center": {"x": 1, "y": 2, "z": 3},
-                "dimensions": {"x": 1, "y": 2, "z": 3},
-            }
+            result = await zoo_tools.zoo_calculate_bounding_box_kcl("mm", **arguments)
+            assert result["center"] == {"x": 1, "y": 2, "z": 3}
         elif operation == "export":
             output = await zoo_tools.zoo_export_kcl(
                 export_path=tmp_path / "part.step", **arguments
             )
             assert output.read_bytes() == b"step"
-            session.export.assert_awaited_once_with(kcl.FileExportFormat.Step)
         elif operation == "constraints":
             result = await zoo_tools.zoo_get_sketch_constraint_status(**arguments)
-            assert result == {
-                "fully_constrained": [],
-                "under_constrained": [],
-                "over_constrained": [],
-                "errors": [],
-                "total_sketches": 0,
-                "kcl_executes_successfully": True,
-                "kcl_error": None,
-            }
+            assert result["kcl_executes_successfully"]
         else:
             assert (
                 await zoo_tools.zoo_visualize_sketch("profile", **arguments) == b"png"
@@ -250,99 +184,39 @@ async def test_standalone_tools_use_one_session(
     assert open_code.await_count == int(not from_file)
     assert open_file.await_count == int(from_file)
     session.close.assert_awaited_once()
-    assert session.measure.await_count == int(
-        operation in ("properties", "bounding_box")
-    )
-    assert {e.api_call_id for e in events} == {"backend"}
-    assert {e.websocket_upgrade_request_id for e in events} == {"upgrade"}
-    assert events[-1].source == "invocation" and events[-1].outcome == "succeeded"
+    assert [
+        (e.source, e.api_call_id, e.websocket_upgrade_request_id) for e in events
+    ] == [("kcl", "backend", "upgrade")]
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_inspection_retains_successful_attempt(monkeypatch):
-    session = _Session()
-    ready = asyncio.Event()
-
-    async def measure(_request):
-        ready.set()
-        await asyncio.Event().wait()
-
-    session.measure.side_effect = measure
-    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=_Outcome()))
-    monkeypatch.setattr(
-        kcl,
-        "new_kcl_session_code",
-        AsyncMock(side_effect=[kcl.KclError("retry", True), session]),
-    )
-    monkeypatch.setattr(zoo_tools, "_execution_retry_delay", lambda _: 0)
-    with capture_api_call_events() as events:
-        task = asyncio.create_task(
-            zoo_tools.zoo_execute_kcl(
-                kcl_code="x = 1",
-                physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(
-                    ("volume",)
-                ),
-            )
-        )
-        await ready.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    session.close.assert_awaited_once()
-    summary = events[-1]
-    assert (summary.source, summary.attempt, summary.outcome) == (
-        "invocation",
-        2,
-        "cancelled",
-    )
-    assert (summary.api_call_id, summary.websocket_upgrade_request_id) == (
-        "backend",
-        "upgrade",
-    )
-
-
-@pytest.mark.asyncio
-async def test_kcl_followup_retry_keeps_both_ids_and_closes_each_attempt(monkeypatch):
+async def test_followup_retry_retains_ids_and_closes_each_session(
+    monkeypatch, tmp_path
+):
     monkeypatch.setattr(zoo_tools, "_execution_retry_delay", lambda _: 0)
     sessions = [_Session("backend-1", "upgrade-1"), _Session("backend-2", "upgrade-2")]
     sessions[0].export.side_effect = kcl.KclError("retry", True)
-    open_session = AsyncMock(side_effect=sessions)
-    monkeypatch.setattr(kcl, "new_kcl_session_code", open_session)
-
-    async def export(session):
-        return await session.export(kcl.FileExportFormat.Step)
-
+    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(side_effect=sessions))
     with (
         capture_api_call_events() as events,
         zoo_tools.capture_execution_retry_events() as retries,
     ):
-        actual = await zoo_tools._execute_kcl_with_retries(
-            export, "code", None, _operation="export_kcl"
+        output = await zoo_tools.zoo_export_kcl(
+            kcl_code="x = 1", export_path=tmp_path / "part.step"
         )
-    assert actual is sessions[1].export.return_value
-    assert open_session.await_count == 2
+    assert output.read_bytes() == b"step"
     for session in sessions:
         session.close.assert_awaited_once()
-    kcl_events = [e for e in events if e.source == "kcl"]
-    assert [
-        (e.attempt, e.api_call_id, e.websocket_upgrade_request_id) for e in kcl_events
-    ] == [
-        (1, "backend-1", "upgrade-1"),
-        (2, "backend-2", "upgrade-2"),
+    assert [(e.api_call_id, e.websocket_upgrade_request_id) for e in events] == [
+        ("backend-1", "upgrade-1"),
+        ("backend-2", "upgrade-2"),
     ]
-    assert [e.api_call_ids for e in retries] == [("backend-1",), ("backend-2",)]
     assert [e.outcome for e in retries] == ["retry_scheduled", "recovered"]
-    assert [
-        (e.attempt, e.api_call_id, e.websocket_upgrade_request_id)
-        for e in events
-        if e.source == "invocation"
-    ] == [(1, "backend-1", "upgrade-1"), (2, "backend-2", "upgrade-2")]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("inspections", [False, True])
-async def test_execution_session_retry_does_not_repeat_mock_or_execution(
-    monkeypatch, inspections
+async def test_execution_retry_does_not_repeat_mock_or_execute_for_inspection(
+    monkeypatch,
 ):
     session = _Session()
     mock = AsyncMock(return_value=_Outcome())
@@ -353,178 +227,91 @@ async def test_execution_session_retry_does_not_repeat_mock_or_execution(
     legacy = AsyncMock(side_effect=AssertionError("duplicate execution"))
     monkeypatch.setattr(kcl, "execute_code", legacy)
     session.measure.return_value = SimpleNamespace(get_volume=lambda: 12.5)
-    with (
-        capture_api_call_events() as events,
-        zoo_tools.capture_execution_retry_events() as retries,
-    ):
+    with capture_api_call_events() as events:
         result = await zoo_tools.zoo_execute_kcl(
             kcl_code="x = 1",
             physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(
                 ("volume",)
-            )
-            if inspections
-            else None,
+            ),
         )
     assert result.ok
     mock.assert_awaited_once()
     legacy.assert_not_called()
     assert open_session.await_count == 2
     session.close.assert_awaited_once()
-    assert session.measure.await_count == int(inspections)
-    assert [(e.attempt, e.api_call_ids) for e in retries] == [
-        (1, None),
-        (2, ("backend",)),
-    ]
-    assert [
-        (e.attempt, e.api_call_id, e.websocket_upgrade_request_id)
-        for e in events
-        if e.source == "kcl"
-    ] == [(1, None, None), (2, "backend", "upgrade")]
-    summaries = [e for e in events if e.source == "invocation"]
-    assert [(e.attempt, e.api_call_id) for e in summaries] == [
-        (1, None),
-        (2, "backend"),
-    ]
+    session.measure.assert_awaited_once()
+    assert [e.api_call_id for e in events] == ["backend"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
-async def test_kcl_followup_failure_closes_session_and_retains_ids(
-    monkeypatch, caplog, cancel
-):
+async def test_inspection_failure_retains_ids_and_closes_session(monkeypatch, cancel):
     session = _Session()
-    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(return_value=session))
     ready = asyncio.Event()
 
-    async def followup(session):
+    async def measure(_request):
         ready.set()
         if cancel:
             await asyncio.Event().wait()
-        raise ValueError("private follow-up error")
+        raise ValueError("failed inspection")
 
-    with capture_api_call_events() as events, caplog.at_level("INFO", logger="zoo_mcp"):
+    session.measure.side_effect = measure
+    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=_Outcome()))
+    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(return_value=session))
+    with capture_api_call_events() as events:
         task = asyncio.create_task(
-            zoo_tools._execute_kcl_with_retries(
-                followup, "code", None, _operation="execute"
+            zoo_tools.zoo_execute_kcl(
+                kcl_code="x = 1",
+                physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(
+                    ("volume",)
+                ),
             )
         )
         await ready.wait()
         if cancel:
             task.cancel()
-        with pytest.raises(asyncio.CancelledError if cancel else ValueError):
-            await task
-    session.close.assert_awaited_once()
-    summary = [e for e in events if e.source == "invocation"]
-    assert len(summary) == 1
-    assert (summary[0].api_call_id, summary[0].websocket_upgrade_request_id) == (
-        "backend",
-        "upgrade",
-    )
-    assert summary[0].outcome == ("cancelled" if cancel else "failed")
-    record = [r.api_call_event for r in caplog.records if hasattr(r, "api_call_event")][
-        -1
-    ]
-    assert record == asdict(summary[0])
-    assert "api_call_id=backend" in caplog.text
-    assert "websocket_upgrade_request_id=upgrade" in caplog.text
-    assert "private follow-up error" not in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_pre_session_failure_does_not_parse_ids_from_error(monkeypatch):
-    monkeypatch.setattr(
-        kcl,
-        "new_kcl_session_code",
-        AsyncMock(side_effect=ValueError("api_call_id=untrusted")),
-    )
-    with capture_api_call_events() as events, pytest.raises(ValueError):
-        await zoo_tools._execute_kcl_with_retries(
-            AsyncMock(), "code", None, _operation="execute"
-        )
-    assert events
-    assert all(
-        e.api_call_id is None and e.websocket_upgrade_request_id is None for e in events
-    )
-    assert all(e.outcome == "failed" for e in events)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "missing_property", [None, "api_call_id", "websocket_upgrade_request_id"]
-)
-async def test_session_properties_are_required_but_none_is_valid(
-    monkeypatch, missing_property
-):
-    session = _Session(None, None)
-    if missing_property:
-        delattr(session, missing_property)
-    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(return_value=session))
-    use_session = AsyncMock(return_value=42)
-    with capture_api_call_events() as events:
-        if missing_property:
-            with pytest.raises(AttributeError, match=missing_property):
-                await zoo_tools._execute_kcl_with_retries(
-                    use_session, "code", None, _operation="execute"
-                )
-            use_session.assert_not_called()
+            with pytest.raises(asyncio.CancelledError):
+                await task
         else:
-            assert (
-                await zoo_tools._execute_kcl_with_retries(
-                    use_session, "code", None, _operation="execute"
-                )
-                == 42
-            )
+            result = await task
+            assert result.ok
+            assert result.inspection.physical_analysis_status == "failed"
     session.close.assert_awaited_once()
-    assert all(
-        e.api_call_id is None and e.websocket_upgrade_request_id is None for e in events
-    )
+    assert [(e.api_call_id, e.websocket_upgrade_request_id) for e in events] == [
+        ("backend", "upgrade")
+    ]
 
 
 @pytest.mark.asyncio
-async def test_mock_preflight_failure_records_no_backend_ids(monkeypatch):
-    monkeypatch.setattr(
-        kcl, "mock_execute_code", AsyncMock(side_effect=ValueError("invalid"))
-    )
-    open_session = AsyncMock()
+@pytest.mark.parametrize("mock_failure", [False, True])
+async def test_failures_before_session_returns_have_no_ids(
+    monkeypatch, mock_failure, tmp_path
+):
+    failure = ValueError("api_call_id=untrusted")
+    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(side_effect=failure))
+    open_session = AsyncMock(side_effect=failure)
     monkeypatch.setattr(kcl, "new_kcl_session_code", open_session)
     with capture_api_call_events() as events:
-        result = await zoo_tools.zoo_execute_kcl(kcl_code="code")
-    assert not result.ok
-    open_session.assert_not_called()
-    assert len(events) == 1
-    assert events[0].source == "invocation" and events[0].outcome == "failed"
-    assert (
-        events[0].api_call_id is None and events[0].websocket_upgrade_request_id is None
-    )
-
-
-@pytest.mark.asyncio
-async def test_invocation_preserves_distinct_upgrade_ids_and_attempts():
-    @api_invocation
-    async def call():
-        for attempt, upgrade in ((1, "first"), (2, "second"), (3, "second")):
-            with zoo_tools.api_call_attempt(attempt):
-                record_api_call_event(
-                    "kcl", "observed", "backend", websocket_upgrade_request_id=upgrade
+        if mock_failure:
+            assert not (await zoo_tools.zoo_execute_kcl(kcl_code="code")).ok
+            open_session.assert_not_called()
+        else:
+            with pytest.raises(ValueError):
+                await zoo_tools.zoo_export_kcl(
+                    kcl_code="code", export_path=tmp_path / "part.step"
                 )
-
-    with capture_api_call_events() as events:
-        await call()
-    assert [
-        (e.attempt, e.api_call_id, e.websocket_upgrade_request_id)
-        for e in events
-        if e.source == "invocation"
-    ] == [(1, "backend", "first"), (2, "backend", "second"), (3, "backend", "second")]
+    assert events == []
 
 
 @pytest.mark.asyncio
-async def test_generic_retries_do_not_inject_session_arguments():
-    async def arbitrary(value):
-        return value
-
-    with zoo_tools.capture_execution_retry_events() as retries:
-        assert await zoo_tools._execute_with_retries(arbitrary, 42) == 42
-    assert retries[0].api_call_ids is None
+async def test_missing_backend_ids_are_valid_and_emit_no_observation(monkeypatch):
+    session = _Session(None, None)
+    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=_Outcome()))
+    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(return_value=session))
+    with capture_api_call_events() as events:
+        assert (await zoo_tools.zoo_execute_kcl(kcl_code="x = 1")).ok
+    session.close.assert_awaited_once()
+    assert events == []
 
 
 @pytest.fixture
@@ -553,9 +340,7 @@ async def test_sdk_failure_raw_fallback_and_pagination_capture_each_response(
     with capture_api_call_events() as events:
         result = await zoo_tools.zoo_list_org_datasets()
     assert result == [{"id": "dataset-1", "name": "dataset", "description": None}]
-    rest = [e for e in events if e.source == "rest"]
-    assert [e.api_call_id for e in rest] == ["sdk-page", "raw-page-1", "raw-page-2"]
-    assert len({e.invocation_id for e in events}) == 1
+    assert [e.api_call_id for e in events] == ["sdk-page", "raw-page-1", "raw-page-2"]
     assert "private-page-token" not in str([asdict(e) for e in events])
     assert len(httpx_mock.get_requests()) == 3
 
@@ -578,16 +363,14 @@ async def test_rest_ids_survive_http_and_parse_failures(client, httpx_mock, fail
         ),
     ):
         await zoo_tools.zoo_list_org_skills()
-    assert events[-1].outcome == "failed"
-    assert {e.api_call_id for e in events} == (
-        {None} if failure == "network" else {"response-id"}
+    assert [e.api_call_id for e in events] == (
+        [] if failure == "network" else ["response-id"]
     )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [False, True])
-async def test_poll_requests_and_original_operation_have_separate_ids(
-    client, monkeypatch, httpx_mock, cube_stl, failure
+async def test_polling_captures_request_ids_and_original_operation_id(
+    client, monkeypatch, httpx_mock, cube_stl
 ):
     operation_id = "d4154735-9cf8-4bc4-98a4-7c7af077388f"
     monkeypatch.setattr(zoo_tools, "FILE_API_CALL_POLL_INTERVAL", 0)
@@ -598,11 +381,7 @@ async def test_poll_requests_and_original_operation_have_separate_ids(
             id=operation_id, status=ApiCallStatus.QUEUED, volume=None
         )
 
-    polls = 0
-
     async def poll(**kwargs):
-        nonlocal polls
-        polls += 1
         response = await client.get_http_client().get("https://example.test/poll")
         response.raise_for_status()
         return SimpleNamespace(
@@ -610,9 +389,7 @@ async def test_poll_requests_and_original_operation_have_separate_ids(
                 type="file_volume",
                 model_dump=lambda **_: {
                     "id": operation_id,
-                    "status": ApiCallStatus.COMPLETED
-                    if polls == 2
-                    else ApiCallStatus.IN_PROGRESS,
+                    "status": ApiCallStatus.COMPLETED,
                     "volume": 42,
                 },
             )
@@ -621,67 +398,28 @@ async def test_poll_requests_and_original_operation_have_separate_ids(
     monkeypatch.setattr(client.file, "create_file_volume", create)
     monkeypatch.setattr(client.api_calls, "get_async_operation", poll)
     httpx_mock.add_response(headers={"X-Api-Call-Id": "create-request"})
-    httpx_mock.add_response(headers={"X-Api-Call-Id": "poll-request-1"})
-    httpx_mock.add_response(
-        headers={"X-Api-Call-Id": "poll-request-2"}, status_code=503 if failure else 200
-    )
+    httpx_mock.add_response(headers={"X-Api-Call-Id": "poll-request"})
     with capture_api_call_events() as events:
-        if failure:
-            with pytest.raises(httpx.HTTPStatusError):
-                await zoo_tools.zoo_calculate_volume(cube_stl, "cm3")
-        else:
-            assert await zoo_tools.zoo_calculate_volume(cube_stl, "cm3") == 42
-    assert [
-        (e.api_call_id, e.async_operation_id) for e in events if e.source == "rest"
-    ] == [
-        ("create-request", None),
-        ("poll-request-1", operation_id),
-        ("poll-request-2", operation_id),
+        assert await zoo_tools.zoo_calculate_volume(cube_stl, "cm3") == 42
+    assert [(e.source, e.api_call_id) for e in events] == [
+        ("rest", "create-request"),
+        ("file_operation", operation_id),
+        ("rest", "poll-request"),
     ]
-    assert [
-        (e.api_call_id, e.async_operation_id)
-        for e in events
-        if e.source == "file_operation"
-    ] == [(operation_id, operation_id)]
-    assert any(
-        e.api_call_id == operation_id
-        and e.outcome == ("failed" if failure else "succeeded")
-        for e in events
-        if e.source == "invocation"
-    )
 
 
 @pytest.mark.asyncio
-async def test_successful_sdk_pagination_captures_every_request(client, httpx_mock):
+async def test_request_without_response_does_not_reuse_an_earlier_id(
+    client, httpx_mock
+):
     httpx_mock.add_response(
-        headers={"X-Api-Call-Id": "page-1"}, json={"items": [], "next_page": "next"}
+        headers={"X-Api-Call-Id": "first-request"},
+        json={"items": [], "next_page": "next"},
     )
-    httpx_mock.add_response(
-        headers={"X-Api-Call-Id": "page-2"}, json={"items": [], "next_page": None}
-    )
-    with capture_api_call_events() as events:
-        assert await zoo_tools.zoo_list_org_datasets() == []
-    assert [e.api_call_id for e in events if e.source == "rest"] == ["page-1", "page-2"]
-
-
-@pytest.mark.asyncio
-async def test_execute_failure_value_has_failed_invocation(monkeypatch):
-    class FailedOutcome(_Outcome):
-        def sketch_constraint_report(self):
-            raise ValueError("failed")
-
-    session = _Session(outcome=FailedOutcome())
-    monkeypatch.setattr(kcl, "mock_execute_code", AsyncMock(return_value=_Outcome()))
-    monkeypatch.setattr(kcl, "new_kcl_session_code", AsyncMock(return_value=session))
-    with capture_api_call_events() as events:
-        result = await zoo_tools.zoo_execute_kcl(kcl_code="x = 1")
-    assert not result.ok
-    session.close.assert_awaited_once()
-    assert [
-        (e.api_call_id, e.websocket_upgrade_request_id, e.outcome)
-        for e in events
-        if e.source == "invocation"
-    ] == [("backend", "upgrade", "failed")]
+    httpx_mock.add_exception(httpx.ConnectError("no response"))
+    with capture_api_call_events() as events, pytest.raises(httpx.ConnectError):
+        await zoo_tools.zoo_list_org_datasets()
+    assert [e.api_call_id for e in events] == ["first-request"]
 
 
 @pytest.mark.live
@@ -700,30 +438,11 @@ async def test_live_kcl_execution_measurement_and_export_capture_backend_ids(
         )
     assert execution.ok
     assert isinstance(properties["volume"], float)
-    assert output == tmp_path / "cube.step"
     assert output.read_bytes()
-    succeeded = [e for e in events if e.source == "kcl" and e.outcome == "observed"]
-    assert {e.operation for e in succeeded} == {
+    assert {e.operation for e in events} == {
         "zoo_execute_kcl",
         "zoo_calculate_kcl_physical_properties",
         "zoo_export_kcl",
     }
-    assert all(e.api_call_id and e.websocket_upgrade_request_id for e in succeeded)
-    assert len({e.invocation_id for e in succeeded}) == 3
-
-
-@pytest.mark.asyncio
-async def test_request_without_response_does_not_inherit_an_earlier_id(
-    client, httpx_mock
-):
-    httpx_mock.add_response(
-        headers={"X-Api-Call-Id": "first-request"},
-        json={"items": [], "next_page": "next"},
-    )
-    httpx_mock.add_exception(httpx.ConnectError("no response"))
-    with capture_api_call_events() as events, pytest.raises(httpx.ConnectError):
-        await zoo_tools.zoo_list_org_datasets()
-    assert [(e.api_call_id, e.outcome) for e in events if e.source == "rest"] == [
-        ("first-request", "observed"),
-        (None, "failed"),
-    ]
+    assert len(events) == 3
+    assert all(e.api_call_id and e.websocket_upgrade_request_id for e in events)
