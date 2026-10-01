@@ -743,12 +743,11 @@ async def visualize_sketch(
 ) -> ImageContent | str:
     """Render a named 2D KCL sketch as a solver-debug PNG.
 
-    The image shows sketch geometry and solver freedom without opening a
-    modeling session. ``sketch_name`` is the variable assigned to the sketch,
+    The image shows sketch geometry and solver freedom without requiring an
+    existing modeling session. ``sketch_name`` is the sketch's variable name,
     such as ``profile`` in ``profile = sketch(on = XY) { ... }``. Use
     ``get_sketch_constraint_status`` to discover sketch names when needed.
-    A later execution failure can still leave the completed sketch renderable.
-    Parse errors or failures before it completes cannot be recovered.
+    A completed sketch may still be rendered after a later execution failure.
     A returned PNG does not mean the whole project executes successfully.
     If names repeat (for example, a function called twice), select an
     ``instance_index`` from a fresh constraint report for the same entrypoint.

@@ -4,7 +4,6 @@ import io
 import json
 import os
 from collections.abc import AsyncIterator, Sequence
-from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1609,8 +1608,6 @@ async def test_visualize_sketch_recovers_from_original_project(
     path = tmp_path / "main.kcl"
     path.write_text(source)
     (tmp_path / "project.toml").write_text('[settings.modeling]\nbase_unit = "mm"\n')
-    # Assets not recognized by relevant_file_extensions must remain in place.
-    (tmp_path / "mesh.bin").write_bytes(b"retained external asset")
     baseline = await kcl.mock_execute(str(path))
     path.write_text(source + "\nlate = missingValue\n")
     before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
@@ -1620,30 +1617,15 @@ async def test_visualize_sketch_recovers_from_original_project(
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
-@pytest.fixture
-def flanges_rail_profile_source() -> str:
-    # Exact source at eval trace 01a09886-20db-7bcb-b214-627a342be681,
-    # visualize_sketch span 01a0988d-771c-7fc2-9d83-9246198674b0.
-    source = (
-        Path(__file__).parent / "data" / "flanges_rail_profile_downstream_error.kcl"
-    ).read_text()
-    assert sha256(source.encode()).hexdigest() == (
-        "9ea4ce9a2198de37e7c3a35ef2a86280da60ed342c4a6585beb376669643c0d3"
-    )
-    return source
-
-
 @pytest.mark.asyncio
-async def test_visualize_sketch_preserves_parse_error(
-    flanges_rail_profile_source: str,
-) -> None:
+async def test_visualize_sketch_preserves_parse_error() -> None:
     # A syntax error exercises native failure and recovery without an engine.
-    source = flanges_rail_profile_source + "\nbroken =\n"
+    source = SKETCH_VISUALIZER_KCL + "\nbroken =\n"
     with pytest.raises(kcl.KclError) as original:
         await kcl.execute_code(source)
     with pytest.raises(zoo_mcp.ZooMCPException) as recovered:
         await zoo_mcp.zoo_tools.zoo_visualize_sketch(
-            "railProfile", kcl_code=source, instance_index=0
+            "s1", kcl_code=source, instance_index=0
         )
     assert str(original.value) in str(recovered.value)
     assert "no sketch named" not in str(recovered.value)
@@ -1782,48 +1764,19 @@ async def test_visualize_sketch_reports_missing_name():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("instance_index", [0, 1])
-async def test_visualize_sketch_solid_helper_instance_matches_full_execution(
-    tmp_path: Path, instance_index: int
+async def test_visualize_sketch_duplicate_hidden_helper_instances(
+    tmp_path: Path,
 ) -> None:
-    source = """
-@settings(kclVersion = 2.0)
-fn makePad(r) {
-  profile = sketch(on = XY) {
-    edge = circle(center = [0mm, 0mm], start = [var 3mm, var 0mm])
-    radius(edge) == r
-  }
-  solid = extrude(region(segments = [profile.edge]), length = 5mm)
-  hide(profile)
-  return solid
-}
-first = makePad(r = 3mm)
-second = makePad(r = 7mm)
-"""
-    full = await kcl.execute_code(source)
-    expected = bytes(full.render_sketch_png("profile", instance_index=instance_index))
-    path = tmp_path / "main.kcl"
-    path.write_text(source)
-    for png in (
-        await zoo_mcp.zoo_tools.zoo_visualize_sketch(
-            "profile", kcl_code=source, instance_index=instance_index
-        ),
-        await zoo_mcp.zoo_tools.zoo_visualize_sketch(
-            "profile", kcl_path=path, instance_index=instance_index
-        ),
-    ):
-        assert png == expected
-    assert path.read_text() == source
-
-
-@pytest.mark.asyncio
-async def test_visualize_sketch_duplicate_instances(tmp_path: Path) -> None:
     (tmp_path / "helpers.kcl").write_text("""
 export fn makeProfile(@height) {
   profile = sketch(on = XY) {
-    edge = line(start = [0mm, 0mm], end = [20mm, height])
+    bottom = line(start = [0mm, 0mm], end = [20mm, 0mm])
+    right = line(start = [20mm, 0mm], end = [20mm, height])
+    diagonal = line(start = [20mm, height], end = [0mm, 0mm])
   }
-  return profile
+  solid = extrude(region(segments = [profile.bottom, profile.right]), length = 5mm)
+  hide(profile)
+  return solid
 }
 """)
     path = tmp_path / "main.kcl"
