@@ -69,12 +69,17 @@ class VolumeResponse:
 class Session:
     def __init__(self, outcome, calls=None):
         self.outcome = outcome
+        self.api_call_id = "backend-session"
+        self.websocket_upgrade_request_id = "upgrade-request"
         self.calls = calls if calls is not None else []
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *_args):
+        await self.close()
+
+    async def close(self):
         self.calls.append("close")
 
     async def snapshots(self, *_args, zoom):
@@ -114,11 +119,18 @@ async def execute(route: str, arguments: dict[str, Any]):
     )
 
 
+def mock_session_binding(monkeypatch, name, execute):
+    async def open_session(value, **kwargs):
+        return Session(await execute(value))
+
+    monkeypatch.setattr(kcl, name, open_session)
+
+
 def mock_bindings(monkeypatch, mock, real):
     monkeypatch.setattr(kcl, "mock_execute_code", mock)
     monkeypatch.setattr(kcl, "mock_execute", mock)
-    monkeypatch.setattr(kcl, "execute_code", real)
-    monkeypatch.setattr(kcl, "execute", real)
+    mock_session_binding(monkeypatch, "new_kcl_session_code", real)
+    mock_session_binding(monkeypatch, "new_kcl_session", real)
 
 
 @pytest.mark.asyncio
@@ -583,7 +595,7 @@ async def test_actual_mock_parse_and_semantic_failures_block_real_execution(
     code,
 ):
     real = AsyncMock(side_effect=AssertionError("must not execute"))
-    monkeypatch.setattr(kcl, "execute_code", real)
+    mock_session_binding(monkeypatch, "new_kcl_session_code", real)
     monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
     result = await asyncio.wait_for(
         execute(execution_route, {"kcl_code": code}), timeout=2
@@ -703,7 +715,7 @@ async def test_inline_standard_library_imports_pass_native_preflight(
     real = AsyncMock(
         return_value=Outcome() if execution_route == "local" else Path("graph.json")
     )
-    monkeypatch.setattr(kcl, "execute_code", real)
+    mock_session_binding(monkeypatch, "new_kcl_session_code", real)
     monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
 
     result = await execute(execution_route, {"kcl_code": code})
@@ -745,9 +757,9 @@ async def test_diagnostics_use_original_source_paths_after_capture_cleanup(
         "mock_execute",
         run if stage == "mock" else AsyncMock(return_value=Outcome()),
     )
-    monkeypatch.setattr(
-        kcl,
-        "execute",
+    mock_session_binding(
+        monkeypatch,
+        "new_kcl_session",
         run
         if stage == "real"
         else AsyncMock(side_effect=AssertionError("must not execute")),
@@ -793,7 +805,7 @@ async def test_actual_mock_resolves_imports_from_captured_project(
     real = AsyncMock(
         return_value=Outcome() if execution_route == "local" else Path("graph.json")
     )
-    monkeypatch.setattr(kcl, "execute", real)
+    mock_session_binding(monkeypatch, "new_kcl_session", real)
     monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
     result = await execute(execution_route, {"kcl_path": str(tmp_path)})
     assert result.ok, result
@@ -812,7 +824,7 @@ async def test_plane_of_mock_limitation_allows_real_execution(
     real = AsyncMock(
         return_value=Outcome() if execution_route == "local" else Path("graph.json")
     )
-    monkeypatch.setattr(kcl, "execute_code", real)
+    mock_session_binding(monkeypatch, "new_kcl_session_code", real)
     monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
 
     result = await execute(execution_route, {"kcl_code": code})
@@ -840,7 +852,7 @@ async def test_mock_limitation_text_in_source_cannot_hide_an_error(
         'so returning an arbitrary incorrect plane")'
     )
     real = AsyncMock(side_effect=AssertionError("must not execute"))
-    monkeypatch.setattr(kcl, "execute_code", real)
+    mock_session_binding(monkeypatch, "new_kcl_session_code", real)
     monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
     result = await execute(execution_route, {"kcl_code": code})
     assert not result.ok
@@ -870,7 +882,7 @@ async def test_capture_ignores_unrelated_files(
     real = AsyncMock(
         return_value=Outcome() if execution_route == "local" else Path("graph.json")
     )
-    monkeypatch.setattr(kcl, "execute", real)
+    mock_session_binding(monkeypatch, "new_kcl_session", real)
     monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", real)
     result = await execute(
         execution_route,
@@ -957,7 +969,7 @@ async def test_capture_materializes_linked_modules(
         return Outcome()
 
     monkeypatch.setattr(kcl, "mock_execute", preflight)
-    monkeypatch.setattr(kcl, "execute", run)
+    mock_session_binding(monkeypatch, "new_kcl_session", run)
     monkeypatch.setattr(zoo_tools, "_execute_resolved_kcl_project", run)
     result = await execute(execution_route, {"kcl_path": str(project)})
     assert result.ok, result

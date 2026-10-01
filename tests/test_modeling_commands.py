@@ -1248,3 +1248,148 @@ async def test_import_waits_within_one_budget(
         await zoo_tools.zoo_import_cad_file("session-id", step)
 
     assert websocket.recv.await_count == 12
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project", [False, True])
+async def test_session_metadata_is_captured_in_both_receive_paths(monkeypatch, project):
+    websocket = AsyncMock()
+    websocket.response = SimpleNamespace(
+        headers={
+            "x-request-id": "upgrade-request",
+            "x-api-call-id": "other-http-header",
+        }
+    )
+    saw_metadata = False
+
+    async def recv():
+        nonlocal saw_metadata
+        if not saw_metadata:
+            saw_metadata = True
+            return _session_frame()
+        request = json.loads(websocket.send.call_args.args[0])
+        if project:
+            return json.dumps(
+                {
+                    "success": True,
+                    "request_id": request["request_id"],
+                    "resp": {
+                        "type": "exec_kcl_project",
+                        "data": {"result": {"Ok": {"artifact_graph": {}}}},
+                    },
+                }
+            )
+        return _ok_frame(
+            request["cmd_id"],
+            ResponseEntityGetIndex(data=EntityGetIndex(entity_index=4)),
+        )
+
+    websocket.recv.side_effect = recv
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
+    with zoo_tools.capture_api_call_events() as events:
+        session_id = await zoo_tools.zoo_start_modeling_session()
+        if project:
+            result = await zoo_tools.zoo_exec_kcl_project(session_id, kcl_code="x = 1")
+            assert result.ok
+            assert isinstance(result, zoo_tools.ResultZooExecuteKclRemote)
+            assert result.path_artifact_graph.exists()
+        else:
+            await zoo_tools.zoo_execute_modeling_command(
+                ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
+                ResponseEntityGetIndex,
+                "index",
+                session_id,
+            )
+        await zoo_tools.zoo_stop_modeling_session(session_id)
+    captured = [e for e in events if e.source == "session" and e.api_call_id]
+    assert len(captured) == 2
+    assert {e.api_call_id for e in captured} == {"api-call-id"}
+    assert {e.websocket_upgrade_request_id for e in captured} == {"upgrade-request"}
+    assert {e.session_id for e in captured} == {session_id}
+    assert captured[-1].operation == "zoo_stop_modeling_session"
+    assert all(e.api_call_id != session_id for e in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_session_failure_retains_handshake_id_before_eviction(
+    monkeypatch, cancel
+):
+    from websockets.datastructures import Headers
+
+    websocket = AsyncMock()
+    websocket.response = SimpleNamespace(
+        headers=Headers({"X-Api-Call-Id": "handshake-id"})
+    )
+    websocket.transport = MagicMock()
+    ready = asyncio.Event()
+
+    async def recv():
+        ready.set()
+        if cancel:
+            await asyncio.Event().wait()
+        raise TimeoutError
+
+    websocket.recv.side_effect = recv
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
+    with zoo_tools.capture_api_call_events() as events:
+        session_id = await zoo_tools.zoo_start_modeling_session()
+        task = asyncio.create_task(
+            zoo_tools.zoo_execute_modeling_command(
+                ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
+                ResponseEntityGetIndex,
+                "index",
+                session_id,
+            )
+        )
+        await ready.wait()
+        if cancel:
+            task.cancel()
+        with pytest.raises(
+            asyncio.CancelledError if cancel else zoo_tools.ZooMCPTimeoutError
+        ):
+            await task
+    assert zoo_tools._modeling_session is None
+    command_events = [
+        e for e in events if e.operation == "zoo_execute_modeling_command"
+    ]
+    assert len(command_events) == 1
+    assert command_events[0].api_call_id is None
+    assert command_events[0].websocket_upgrade_request_id == "handshake-id"
+    assert command_events[0].session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_rejected_handshake_captures_fallback_header(monkeypatch):
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    rejection = InvalidStatus(
+        Response(403, "Forbidden", Headers({"x-request-id": "rejected-id"}))
+    )
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(side_effect=rejection)
+    )
+    with zoo_tools.capture_api_call_events() as events, pytest.raises(InvalidStatus):
+        await zoo_tools.zoo_start_modeling_session()
+    handshake = [e for e in events if e.source == "websocket"]
+    assert len(handshake) == 1
+    assert handshake[0].api_call_id is None
+    assert handshake[0].websocket_upgrade_request_id == "rejected-id"
+    assert handshake[0].session_id
+    assert zoo_tools._modeling_session is None
+
+
+@pytest.mark.asyncio
+async def test_trace_observation_preserves_sdk_validation_error():
+    from pydantic import ValidationError
+
+    websocket = AsyncMock()
+    websocket.recv.return_value = "invalid JSON"
+    with pytest.raises(ValidationError):
+        await zoo_tools._recv_modeling_frame(websocket, zoo_tools._Deadline(), "test")

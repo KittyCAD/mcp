@@ -988,10 +988,13 @@ async def test_execute_kcl_surfaces_all_issue_severities(monkeypatch):
         ]
     )
 
-    async def fake_execute_code(code: str):
-        return outcome
-
-    monkeypatch.setattr(zoo_mcp.zoo_tools.kcl, "execute_code", fake_execute_code)
+    session = AsyncMock()
+    session.outcome = outcome
+    session.api_call_id = "backend-session"
+    session.websocket_upgrade_request_id = "upgrade-request"
+    monkeypatch.setattr(
+        zoo_mcp.zoo_tools.kcl, "new_kcl_session_code", AsyncMock(return_value=session)
+    )
     monkeypatch.setattr(
         zoo_mcp.zoo_tools.kcl,
         "mock_execute_code",
