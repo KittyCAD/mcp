@@ -1,14 +1,28 @@
 // A 25x25x50 box
+// Snake-case identifiers intentionally exercise the naming lints.
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
 
-box_width = 25
-box_depth = 25
-box_height = 50
+box_width = 25mm
+box_depth = 25mm
+box_height = 50mm
 
-box_sketch = startSketchOn(XY)
-  |> startProfile(at = [0, 0])
-  |> xLine(length = box_width, tag = $line1)
-  |> yLine(length = box_depth, tag = $line2)
-  |> xLine(endAbsolute = profileStartX(%), tag = $line3)
-  |> close(tag = $line4)
+box_sketch = sketch(on = XY) {
+  bottom = line(start = [var 0mm, var 0mm], end = [var 25mm, var 0mm])
+  right = line(start = [var 25mm, var 0mm], end = [var 25mm, var 25mm])
+  top = line(start = [var 25mm, var 25mm], end = [var 0mm, var 25mm])
+  left = line(start = [var 0mm, var 25mm], end = [var 0mm, var 0mm])
 
-box3D = extrude(box_sketch, length = box_height)
+  coincident([bottom.start, ORIGIN])
+  coincident([bottom.end, right.start])
+  coincident([right.end, top.start])
+  coincident([top.end, left.start])
+  coincident([left.end, bottom.start])
+  horizontal(bottom)
+  horizontal(top)
+  vertical(right)
+  vertical(left)
+  horizontalDistance([bottom.start, bottom.end]) == box_width
+  verticalDistance([right.start, right.end]) == box_depth
+}
+
+box3D = extrude(region(segments = [box_sketch.bottom, box_sketch.right]), length = box_height)

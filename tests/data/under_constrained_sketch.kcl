@@ -1,3 +1,5 @@
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
 sketch(on = YZ) {
   line1 = line(start = [var 1.32mm, var -1.93mm], end = [var 6.08mm, var 2.51mm])
 }
