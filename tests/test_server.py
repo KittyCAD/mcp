@@ -1507,16 +1507,17 @@ def native_sketch_execution(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Exercise real native outcomes using the offline interpreter backend."""
     calls: list[str] = []
 
-    async def execute_code(source: str) -> "kcl.ExecOutcome":
-        calls.append(source)
-        return await kcl.mock_execute_code(source)
+    async def open_session(
+        kcl_code: str | None, kcl_path: Path | str | None
+    ) -> kcl.KclSession:
+        if kcl_code is not None:
+            calls.append(kcl_code)
+            return await kcl.new_kcl_session_code(kcl_code, mock=True)
+        assert kcl_path is not None
+        calls.append(str(kcl_path))
+        return await kcl.new_kcl_session(str(kcl_path), mock=True)
 
-    async def execute(path: str) -> "kcl.ExecOutcome":
-        calls.append(path)
-        return await kcl.mock_execute(path)
-
-    monkeypatch.setattr(kcl, "execute_code", execute_code)
-    monkeypatch.setattr(kcl, "execute", execute)
+    monkeypatch.setattr(zoo_mcp.zoo_tools, "_open_kcl_session", open_session)
     return calls
 
 
@@ -1714,12 +1715,12 @@ async def test_visualize_sketch_path_ignores_downstream_execution_error(
     tmp_path: Path,
 ):
     project_code = SKETCH_VISUALIZER_WITH_DOWNSTREAM_ERROR_KCL.replace(
-        "@settings(experimentalFeatures = allow)",
-        '@settings(experimentalFeatures = allow)\n\nimport startX from "helper.kcl"',
+        "@settings(defaultLengthUnit = mm, kclVersion = 2.0)",
+        '@settings(defaultLengthUnit = mm, kclVersion = 2.0)\n\nimport startX from "helper.kcl"',
         1,
     ).replace(
-        "line1.start.at[0] == 2",
-        "line1.start.at[0] == startX",
+        "coincident([line1.start, [2mm, 8mm]])",
+        "coincident([line1.start, [startX, 8mm]])",
         1,
     )
     kcl_path = tmp_path / "main.kcl"

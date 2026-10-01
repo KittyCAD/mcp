@@ -2664,21 +2664,18 @@ async def zoo_visualize_sketch(
     if instance_index is not None and instance_index < 0:
         raise ZooMCPException("instance_index must be non-negative")
 
+    async def render(session: kcl.KclSession) -> bytes:
+        return bytes(
+            session.outcome.render_sketch_png(
+                sketch_name, instance_index=instance_index
+            )
+        )
+
     try:
         try:
-            if kcl_code:
-                outcome = await _execute_with_retries(
-                    kcl.execute_code,
-                    kcl_code,
-                    _operation="visualize_sketch",
-                )
-            else:
-                assert kcl_path is not None
-                outcome = await _execute_with_retries(
-                    kcl.execute,
-                    str(kcl_path),
-                    _operation="visualize_sketch",
-                )
+            return await _execute_kcl_with_retries(
+                render, kcl_code, kcl_path, _operation="visualize_sketch"
+            )
         except kcl.KclError as execution_error:
             try:
                 png = bytes(
@@ -2696,9 +2693,6 @@ async def zoo_visualize_sketch(
                 _execution_error_family(execution_error),
             )
             return png
-        return bytes(
-            outcome.render_sketch_png(sketch_name, instance_index=instance_index)
-        )
     except Exception as e:
         logger.error(
             "Failed to visualize sketch (error_family=%s)",
