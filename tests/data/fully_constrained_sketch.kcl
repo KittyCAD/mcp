@@ -1,7 +1,7 @@
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
 sketch(on = YZ) {
   line1 = line(start = [var 2mm, var 8mm], end = [var 5mm, var 7mm])
-  line1.start.at[0] == 2
-  line1.start.at[1] == 8
-  line1.end.at[0] == 5
-  line1.end.at[1] == 7
+  coincident([line1.start, [2mm, 8mm]])
+  coincident([line1.end, [5mm, 7mm]])
 }

@@ -6,7 +6,7 @@
 //
 // One-screw wall hanger
 // Single printed hanger with thick arm, screw bore, and deep triangular web.
-@settings(defaultLengthUnit = mm, kclVersion = 2.0, experimentalFeatures = allow)
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
 
 plateThickness = 10mm
 plateHeight = 116mm
@@ -87,7 +87,10 @@ hangerSideSketch = sketch(on = XZ) {
   distance([plateBottom.start, plateBottom.end]) == plateThickness
 }
 
-hangerRegion = region(point = [20mm, 50mm], sketch = hangerSideSketch)
+hangerRegion = region(segments = [
+  hangerSideSketch.wallBack,
+  hangerSideSketch.plateBottom
+])
 hangerBlank = extrude(sketches = hangerRegion, length = hangerWidth, symmetric = true)
 hide(hangerSideSketch)
 
@@ -109,7 +112,7 @@ screwSeatPadSketch = sketch(on = YZ) {
 ]) == screwSeatPadDia / 2
 }
 
-screwSeatPadRegion = region(point = screwSeatPadSketch.padCircle.center, sketch = screwSeatPadSketch)
+screwSeatPadRegion = region(segments = [screwSeatPadSketch.padCircle])
 screwSeatPadRaw = extrude(sketches = screwSeatPadRegion, length = screwSeatPadThickness, symmetric = true)
 screwSeatPad = translate(screwSeatPadRaw, x = plateThickness + screwSeatPadThickness / 2 - screwSeatPadOverlap, global = true)
 hide(screwSeatPadSketch)
@@ -143,7 +146,7 @@ screwClearanceSketch = sketch(on = YZ) {
 ]) == screwClearanceDia / 2
 }
 
-screwClearanceRegion = region(point = screwClearanceSketch.screwClearance.center, sketch = screwClearanceSketch)
+screwClearanceRegion = region(segments = [screwClearanceSketch.screwClearance])
 screwClearanceCutter = extrude(sketches = screwClearanceRegion, length = plateThickness + screwSeatPadThickness + 8mm, symmetric = true)
 hide(screwClearanceSketch)
 
@@ -168,7 +171,7 @@ screwSeatSketch = sketch(on = YZ) {
 ]) == screwSeatDia / 2
 }
 
-screwSeatRegion = region(point = screwSeatSketch.screwSeat.center, sketch = screwSeatSketch)
+screwSeatRegion = region(segments = [screwSeatSketch.screwSeat])
 screwSeatCutterRaw = extrude(sketches = screwSeatRegion, length = screwSeatPadThickness + screwSeatDepth + 2mm, symmetric = true)
 screwSeatCutter = translate(screwSeatCutterRaw, x = plateThickness + screwSeatPadThickness / 2, global = true)
 hide(screwSeatSketch)

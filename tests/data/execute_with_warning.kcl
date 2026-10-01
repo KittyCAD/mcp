@@ -1,14 +1,23 @@
 // Produces a warning-level compilation issue from the production engine:
 // unioning two solids that do not overlap is non-fatal but reported as a
 // warning ("The bodies in this union had no overlap").
-@settings(defaultLengthUnit = mm)
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
 
-partA = startSketchOn(XY)
-  |> circle(center = [0, 0], radius = 5)
-  |> extrude(length = 10)
+sketchA = sketch(on = XY) {
+  perimeter = circle(center = [var 0mm, var 0mm], start = [var 5mm, var 0mm])
+  coincident([perimeter.center, ORIGIN])
+  radius(perimeter) == 5mm
+  horizontal([perimeter.center, perimeter.start])
+}
 
-partB = startSketchOn(XY)
-  |> circle(center = [100, 100], radius = 5)
-  |> extrude(length = 10)
+sketchB = sketch(on = XY) {
+  perimeter = circle(center = [var 100mm, var 100mm], start = [var 105mm, var 100mm])
+  coincident([perimeter.center, [100mm, 100mm]])
+  radius(perimeter) == 5mm
+  horizontal([perimeter.center, perimeter.start])
+}
+
+partA = extrude(region(segments = [sketchA.perimeter]), length = 10mm)
+partB = extrude(region(segments = [sketchB.perimeter]), length = 10mm)
 
 joined = union([partA, partB])
