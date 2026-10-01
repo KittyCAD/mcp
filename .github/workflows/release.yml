@@ -1,6 +1,9 @@
 name: release
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
   push:
     tags:
       - '*'
@@ -80,7 +83,17 @@ jobs:
           python-version: "3.12"
 
       - name: Install the project
-        run: uv sync --no-dev
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os_label }}-${{ matrix.arch_label }}" == "macos-x86_64" ]]; then
+            # Intel macOS has no cryptography wheel. Static OpenSSL avoids
+            # conflicting with other libssl copies bundled by PyInstaller.
+            uv cache clean cryptography
+            OPENSSL_STATIC=1 OPENSSL_DIR="$(brew --prefix openssl@3)" \
+              uv sync --no-dev --no-binary-package cryptography
+          else
+            uv sync --no-dev
+          fi
 
       - name: Build binary
         shell: bash
@@ -132,6 +145,7 @@ jobs:
 
   publish-pypi:
     name: Publish to pypi
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on:
       - runs-on=${{ github.run_id }}
       - runner=8cpu-linux-x64
@@ -156,7 +170,6 @@ jobs:
           enable-cache: true
 
       - name: "Publish to pypi"
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           # Publish all built wheels to the configured index
           uv publish --trusted-publishing=never dist/*
