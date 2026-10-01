@@ -1651,21 +1651,20 @@ async def test_visualize_sketch_preserves_parse_error(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("instance_index", [None, 0])
 @pytest.mark.usefixtures("native_sketch_execution")
-async def test_visualize_sketch_execution_deadline_and_subsequent_success(
-    monkeypatch: pytest.MonkeyPatch, instance_index: int | None
+async def test_visualize_sketch_caller_cancellation_and_subsequent_success(
+    instance_index: int | None,
 ) -> None:
     # Exercise the real native await with unique and explicit instance selection.
-    # An expired budget must not be converted to a generic failure or retry.
-    with monkeypatch.context() as patch:
-        patch.setattr(zoo_mcp.zoo_tools, "SKETCH_VISUALIZATION_TIMEOUT", 0.0)
-        with (
-            zoo_mcp.zoo_tools.capture_execution_retry_events() as events,
-            pytest.raises(zoo_mcp.ZooMCPTimeoutError, match="0-second budget"),
-        ):
+    # Caller cancellation must not be converted to a generic failure or retry.
+    with (
+        zoo_mcp.zoo_tools.capture_execution_retry_events() as events,
+        pytest.raises(TimeoutError),
+    ):
+        async with asyncio.timeout(0):
             await zoo_mcp.zoo_tools.zoo_visualize_sketch(
                 "s1", kcl_code=SKETCH_VISUALIZER_KCL, instance_index=instance_index
             )
-        assert not events
+    assert not events
 
     png = await zoo_mcp.zoo_tools.zoo_visualize_sketch(
         "s1", kcl_code=SKETCH_VISUALIZER_KCL, instance_index=instance_index
