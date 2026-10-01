@@ -1,6 +1,9 @@
 name: release
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
   push:
     tags:
       - '*'
@@ -142,6 +145,7 @@ jobs:
 
   publish-pypi:
     name: Publish to pypi
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on:
       - runs-on=${{ github.run_id }}
       - runner=8cpu-linux-x64
@@ -166,7 +170,6 @@ jobs:
           enable-cache: true
 
       - name: "Publish to pypi"
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           # Publish all built wheels to the configured index
           uv publish --trusted-publishing=never dist/*
