@@ -52,12 +52,6 @@ def cube_stl():
 
 
 @pytest.fixture
-def empty_kcl():
-    test_file = Path(__file__).parent / "data" / "empty.kcl"
-    yield f"{test_file.resolve()}"
-
-
-@pytest.fixture
 def empty_step():
     test_file = Path(__file__).parent / "data" / "empty.step"
     yield f"{test_file.resolve()}"

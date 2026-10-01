@@ -1,18 +1,29 @@
-@settings(defaultLengthUnit = mm)
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
 
 // Define the dimensions of the cube
-cubeSize = 10
+cubeSize = 10mm
 
-// Create a sketch for the cube
-cubeSketch = startSketchOn(XY)
+// Constrain the square to span 0..10 mm in X and Y
+cubeSketch = sketch(on = XY) {
+  bottom = line(start = [var 0mm, var 0mm], end = [var 10mm, var 0mm])
+  right = line(start = [var 10mm, var 0mm], end = [var 10mm, var 10mm])
+  top = line(start = [var 10mm, var 10mm], end = [var 0mm, var 10mm])
+  left = line(start = [var 0mm, var 10mm], end = [var 0mm, var 0mm])
 
-// Create the cube profile
-cubeProfile = startProfile(cubeSketch, at = [0, 0])
-  |> xLine(length = cubeSize)
-  |> yLine(length = cubeSize)
-  |> xLine(length = -cubeSize)
-  |> yLine(length = -cubeSize)
-  |> close()
+  coincident([bottom.start, ORIGIN])
+  coincident([bottom.end, right.start])
+  coincident([right.end, top.start])
+  coincident([top.end, left.start])
+  coincident([left.end, bottom.start])
+  horizontal(bottom)
+  horizontal(top)
+  vertical(right)
+  vertical(left)
+  horizontalDistance([bottom.start, bottom.end]) == cubeSize
+  verticalDistance([right.start, right.end]) == cubeSize
+}
+
+cubeProfile = region(segments = [cubeSketch.bottom, cubeSketch.right])
 
 // Extrude the cube profile to create the 3D cube
 cube = extrude(cubeProfile, length = cubeSize)

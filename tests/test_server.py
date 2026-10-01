@@ -754,12 +754,15 @@ async def test_convert_cad_file_error(empty_step: str):
 
 
 @pytest.mark.asyncio
-async def test_execute_kcl(cube_kcl: str):
+@pytest.mark.parametrize(
+    "fixture_name", ["cube_kcl", "box_with_linter_errors", "kcl_project"]
+)
+async def test_execute_kcl(request: pytest.FixtureRequest, fixture_name: str):
     response = await mcp.call_tool(
         "execute_kcl",
         arguments={
             "kcl_code": None,
-            "kcl_path": cube_kcl,
+            "kcl_path": request.getfixturevalue(fixture_name),
         },
     )
     result = _meta_result(response)
@@ -1314,7 +1317,8 @@ async def test_format_kcl_str_success(cube_kcl: str):
         },
     )
     result = _meta_result(response)
-    assert "|>" in result
+    assert "sketch(on = XY)" in result
+    assert "region(segments = [cubeSketch.bottom, cubeSketch.right])" in result
 
 
 @pytest.mark.asyncio
@@ -1331,7 +1335,8 @@ async def test_format_kcl_error(cube_stl: str):
 
 
 @pytest.mark.asyncio
-async def test_lint_and_fix_kcl_str_success():
+async def test_lint_and_fix_kcl_legacy_sketch_str_success():
+    """Keep the linter's legacy sketch compatibility coverage explicit."""
     code = """c = startSketchOn(XY)
   |> circle(center = [0, 0], radius = 1)
   |> circle(center = [5, 0], radius = 1)
@@ -1376,16 +1381,10 @@ async def test_lint_and_fix_kcl_error(cube_stl: str):
 
 
 @pytest.mark.asyncio
-async def test_get_sketch_constraint_status_fully_constrained_code():
-    kcl_code = """
-sketch(on = YZ) {
-  line1 = line(start = [var 2mm, var 8mm], end = [var 5mm, var 7mm])
-  line1.start.at[0] == 2
-  line1.start.at[1] == 8
-  line1.end.at[0] == 5
-  line1.end.at[1] == 7
-}
-"""
+async def test_get_sketch_constraint_status_fully_constrained_code(
+    fully_constrained_kcl: str,
+):
+    kcl_code = Path(fully_constrained_kcl).read_text()
     response = await mcp.call_tool(
         "get_sketch_constraint_status",
         arguments={"kcl_code": kcl_code, "kcl_path": None},
@@ -1403,12 +1402,10 @@ sketch(on = YZ) {
 
 
 @pytest.mark.asyncio
-async def test_get_sketch_constraint_status_under_constrained_code():
-    kcl_code = """
-sketch(on = YZ) {
-  line1 = line(start = [var 1.32mm, var -1.93mm], end = [var 6.08mm, var 2.51mm])
-}
-"""
+async def test_get_sketch_constraint_status_under_constrained_code(
+    under_constrained_kcl: str,
+):
+    kcl_code = Path(under_constrained_kcl).read_text()
     response = await mcp.call_tool(
         "get_sketch_constraint_status",
         arguments={"kcl_code": kcl_code, "kcl_path": None},
@@ -1426,12 +1423,12 @@ sketch(on = YZ) {
 @pytest.mark.asyncio
 async def test_get_sketch_constraint_status_over_constrained_code():
     kcl_code = """
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
+
 sketch(on = YZ) {
   line1 = line(start = [var 2mm, var 8mm], end = [var 5mm, var 7mm])
-  line1.start.at[0] == 2
-  line1.start.at[1] == 8
-  line1.end.at[0] == 5
-  line1.end.at[1] == 7
+  coincident([line1.start, [2mm, 8mm]])
+  coincident([line1.end, [5mm, 7mm]])
   distance([line1.start, line1.end]) == 100mm
 }
 """
@@ -1481,14 +1478,12 @@ async def test_get_sketch_constraint_status_error():
 
 
 SKETCH_VISUALIZER_KCL = """
-@settings(experimentalFeatures = allow)
+@settings(defaultLengthUnit = mm, kclVersion = 2.0)
 
 s1 = sketch(on = YZ) {
   line1 = line(start = [var 2mm, var 8mm], end = [var 5mm, var 7mm])
-  line1.start.at[0] == 2
-  line1.start.at[1] == 8
-  line1.end.at[0] == 5
-  line1.end.at[1] == 7
+  coincident([line1.start, [2mm, 8mm]])
+  coincident([line1.end, [5mm, 7mm]])
 }
 
 s2 = sketch(on = XZ) {
@@ -1594,12 +1589,15 @@ async def test_get_face_info(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_mock_execute_kcl(cube_kcl: str):
+@pytest.mark.parametrize(
+    "fixture_name", ["cube_kcl", "box_with_linter_errors", "kcl_project"]
+)
+async def test_mock_execute_kcl(request: pytest.FixtureRequest, fixture_name: str):
     response = await mcp.call_tool(
         "mock_execute_kcl",
         arguments={
             "kcl_code": None,
-            "kcl_path": cube_kcl,
+            "kcl_path": request.getfixturevalue(fixture_name),
         },
     )
     result = _meta_result(response)
