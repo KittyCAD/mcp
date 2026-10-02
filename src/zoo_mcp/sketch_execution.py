@@ -28,6 +28,9 @@ class SketchExecutionUse:
         outcome: kcl.ExecOutcome | kcl.KclError,
     ) -> None:
         if isinstance(outcome, kcl.KclError):
+            if outcome.is_retryable() and outcome.sketch_constraint_report is None:
+                self.execution = None
+                return
             # Keep native geometry, not Python frames holding the caller's context.
             outcome.__traceback__ = None
             outcome.__context__ = None

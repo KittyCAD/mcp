@@ -31,6 +31,7 @@ second = makeProfile()
 class NativeCalls:
     preflight: int = 0
     execution: int = 0
+    transient_failures: int = 0
     outcomes: list[kcl.ExecOutcome] = field(default_factory=list)
 
 
@@ -53,6 +54,8 @@ def native_calls(monkeypatch: pytest.MonkeyPatch) -> NativeCalls:
         video_res_height: int | None = None,
     ) -> kcl.KclSession:
         calls.execution += 1
+        if calls.execution <= calls.transient_failures:
+            raise kcl.KclError("KCL EngineHangup error", True)
         if kcl_code is not None:
             session = await kcl.new_kcl_session_code(kcl_code, mock=True)
         else:
@@ -114,6 +117,40 @@ async def test_later_views_reuse_closed_execution_and_keep_selection_errors(
             )
         assert later.reused
     assert (native_calls.preflight, native_calls.execution) == (1, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("standalone", [False, True])
+async def test_exhausted_transient_failure_does_not_block_later_visualization(
+    native_calls: NativeCalls, monkeypatch: pytest.MonkeyPatch, standalone: bool
+) -> None:
+    native_calls.transient_failures = zoo_tools.MAX_EXECUTION_ATTEMPTS
+    monkeypatch.setattr(zoo_tools, "_execution_retry_delay", lambda attempt: 0)
+    with reuse_sketch_execution() as first:
+        if standalone:
+            with pytest.raises(ZooMCPException, match="EngineHangup"):
+                await zoo_tools.zoo_visualize_sketch(
+                    "profile", kcl_code=SKETCHES, instance_index=0
+                )
+        else:
+            result = await zoo_tools.zoo_execute_kcl(kcl_code=SKETCHES)
+            assert not result.ok
+            assert "EngineHangup" in result.message
+    assert native_calls.execution == zoo_tools.MAX_EXECUTION_ATTEMPTS
+    assert first.execution is None
+
+    with reuse_sketch_execution(first.execution) as recovered:
+        png = await zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_code=SKETCHES, instance_index=0
+        )
+    assert not recovered.reused
+    assert recovered.execution is not None
+    with reuse_sketch_execution(recovered.execution) as later:
+        assert png == await zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_code=SKETCHES, instance_index=0
+        )
+    assert later.reused
+    assert native_calls.execution == zoo_tools.MAX_EXECUTION_ATTEMPTS + 1
 
 
 @pytest.mark.asyncio
