@@ -645,7 +645,6 @@ async def test_kcl_execution_tools_forward_session_id(
         "inspection": {
             "sketch_constraints_status": "not_run",
             "sketch_constraints": None,
-            "sketch_views": [],
             "rendered_snapshots_status": "not_requested",
             "rendered_snapshot": None,
             "completed_snapshot_views": [],

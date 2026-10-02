@@ -1633,19 +1633,6 @@ class KclSnapshotRequest:
 
 
 @dataclass(frozen=True)
-class KclSketchViewRequest:
-    sketch_name: str
-    instance_index: int | None = None
-
-
-@dataclass
-class KclSketchView:
-    request: KclSketchViewRequest
-    png: bytes | None = field(default=None, repr=False)
-    error: str | None = None
-
-
-@dataclass(frozen=True)
 class KclPhysicalPropertiesRequest:
     properties: tuple[KclPhysicalProperty, ...]
     unit_length: str = "mm"
@@ -1660,7 +1647,6 @@ class KclPhysicalPropertiesRequest:
 class KclExecutionInspection:
     sketch_constraints_status: KclInspectionStatus = "not_run"
     sketch_constraints: dict[str, object] | None = None
-    sketch_views: list[KclSketchView] = field(default_factory=list)
     rendered_snapshots_status: KclInspectionStatus = "not_requested"
     rendered_snapshot: bytes | None = field(default=None, repr=False)
     completed_snapshot_views: list[str] = field(default_factory=list)
@@ -1868,22 +1854,6 @@ def _render_sketch_png(
     instance_index: int | None,
 ) -> bytes:
     return bytes(outcome.render_sketch_png(sketch_name, instance_index=instance_index))
-
-
-def _collect_sketch_views(
-    outcome: kcl.ExecOutcome | kcl.KclError,
-    requests: tuple[KclSketchViewRequest, ...],
-    inspection: KclExecutionInspection,
-) -> None:
-    for request in requests:
-        view = KclSketchView(request)
-        try:
-            view.png = _render_sketch_png(
-                outcome, request.sketch_name, request.instance_index
-            )
-        except Exception as error:
-            view.error = str(error)
-        inspection.sketch_views.append(view)
 
 
 def _execution_result_message(stage: KclExecutionStage) -> str:
@@ -2141,21 +2111,13 @@ async def _execute_kcl_with_preflight(
     operation: str,
     snapshot_request: KclSnapshotRequest | None = None,
     physical_properties_request: KclPhysicalPropertiesRequest | None = None,
-    sketch_views: tuple[KclSketchViewRequest, ...] = (),
 ) -> ResultZooExecuteKcl:
     if session_id is not None and (
-        snapshot_request is not None
-        or physical_properties_request is not None
-        or sketch_views
+        snapshot_request is not None or physical_properties_request is not None
     ):
         raise ValueError(
-            "snapshot, sketch and physical-property outputs are only available for local execution"
+            "snapshot and physical-property outputs are only available for local execution"
         )
-    for view in sketch_views:
-        if not view.sketch_name.strip():
-            raise ValueError("sketch_name must not be empty")
-        if view.instance_index is not None and view.instance_index < 0:
-            raise ValueError("instance_index must be non-negative")
     _validate_execution_inspection_requests(
         snapshot_request, physical_properties_request
     )
@@ -2191,7 +2153,6 @@ async def _execute_kcl_with_preflight(
             if mock.status == "failed":
                 if reuse is not None and session_id is None:
                     reuse.retain(resolved.fingerprint(), stage, mock_outcome)
-                _collect_sketch_views(mock_outcome, sketch_views, inspection)
                 _report_execution_stage_event(
                     operation,
                     "real_execution",
@@ -2258,7 +2219,6 @@ async def _execute_kcl_with_preflight(
                         "succeeded" if constraint_report.is_complete else "partial"
                     )
                     issues = _format_execution_issues(outcome)
-                    _collect_sketch_views(outcome, sketch_views, inspection)
                     if "fatal" not in issues and "error" not in issues:
                         if snapshot_request is not None:
                             await _collect_session_snapshots(
@@ -2318,10 +2278,13 @@ async def _execute_kcl_with_preflight(
         raise
     except Exception as error:
         detail = resolved.source_report(str(error)) if resolved else str(error)
-        if isinstance(error, kcl.KclError):
-            if reuse is not None and resolved is not None and session_id is None:
-                reuse.retain(resolved.fingerprint(), stage, error)
-            _collect_sketch_views(error, sketch_views, inspection)
+        if (
+            isinstance(error, kcl.KclError)
+            and reuse is not None
+            and resolved is not None
+            and session_id is None
+        ):
+            reuse.retain(resolved.fingerprint(), stage, error)
         error_family = _execution_error_family(error)
         _report_execution_stage_event(
             operation,
@@ -2377,7 +2340,6 @@ async def zoo_execute_kcl(
     *,
     snapshot_request: KclSnapshotRequest | None = None,
     physical_properties_request: KclPhysicalPropertiesRequest | None = None,
-    sketch_views: tuple[KclSketchViewRequest, ...] = (),
 ) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
@@ -2387,9 +2349,6 @@ async def zoo_execute_kcl(
         session_id (str | None): An open modeling session in which to execute the KCL.
         snapshot_request: Optional views to render from the local real-execution session.
         physical_properties_request: Optional properties to measure from that same session.
-        sketch_views: Optional sketch names and instance indices to render from
-            the same execution. Completed sketches may also be returned after
-            an execution failure; their PNGs do not establish project validity.
 
     Returns:
         ResultZooExecuteKcl: Separate mock-preflight and real-execution outcomes.
@@ -2408,7 +2367,6 @@ async def zoo_execute_kcl(
         operation="execute_kcl",
         snapshot_request=snapshot_request,
         physical_properties_request=physical_properties_request,
-        sketch_views=sketch_views,
     )
 
 
