@@ -5,6 +5,7 @@ import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 from zoo_mcp import ZooMCPException
@@ -63,6 +64,22 @@ class CapturedKclProject:
     entrypoint: str
     source_root: Path
     files: dict[str, bytes]
+
+    def fingerprint(self) -> str:
+        """Identify the entrypoint and captured inputs, including project settings."""
+        digest = sha256()
+        for data in (
+            str(self.source_root).encode(),
+            self.entrypoint.encode(),
+            *(
+                part
+                for name, content in sorted(self.files.items())
+                for part in (name.encode(), content)
+            ),
+        ):
+            digest.update(len(data).to_bytes(8, "big"))
+            digest.update(data)
+        return digest.hexdigest()
 
 
 def load_kcl_project(path: Path | str) -> CapturedKclProject:

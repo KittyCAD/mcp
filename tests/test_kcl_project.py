@@ -9,6 +9,20 @@ from zoo_mcp import ZooMCPException, zoo_tools
 from zoo_mcp.utils.kcl_project import load_kcl_project
 
 
+def test_fingerprint_tracks_transitive_binary_dependencies_and_not_notes(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.kcl").write_text('import "model.gltf" as model\n')
+    (tmp_path / "model.gltf").write_text(json.dumps({"buffers": [{"uri": "mesh.bin"}]}))
+    buffer = tmp_path / "mesh.bin"
+    buffer.write_bytes(b"original")
+    first = load_kcl_project(tmp_path).fingerprint()
+    (tmp_path / "notes.md").write_text("Unrelated notes")
+    assert load_kcl_project(tmp_path).fingerprint() == first
+    buffer.write_bytes(b"changed")
+    assert load_kcl_project(tmp_path).fingerprint() != first
+
+
 def _reject_external_access(monkeypatch, external: Path) -> None:
     """Fail if capture even looks up or reads a file beyond the boundary."""
     external = external.resolve()

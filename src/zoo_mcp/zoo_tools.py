@@ -150,8 +150,13 @@ from zoo_mcp.api_call_events import (
 from zoo_mcp.api_call_events import (
     capture_api_call_events as capture_api_call_events,  # noqa: PLC0414 -- public re-export
 )
+from zoo_mcp.sketch_execution import current_sketch_execution
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
-from zoo_mcp.utils.kcl_project import check_inline_imports, load_kcl_project
+from zoo_mcp.utils.kcl_project import (
+    CapturedKclProject,
+    check_inline_imports,
+    load_kcl_project,
+)
 
 
 def _api_call_id_from_headers(headers: object, *, upgrade: bool = False) -> str | None:
@@ -1732,6 +1737,12 @@ class _ResolvedKclExecution:
     entrypoint: str
     files: dict[str, bytes]
     source_paths: dict[str, str] = field(default_factory=dict)
+    source_root: Path = Path()
+
+    def fingerprint(self) -> str:
+        return CapturedKclProject(
+            self.entrypoint, self.source_root, self.files
+        ).fingerprint()
 
     def source_report(self, report: str) -> str:
         for captured, original in self.source_paths.items():
@@ -1746,9 +1757,9 @@ class _ResolvedKclExecution:
 
 
 def _capture_execution_project(
-    path: Path | str, destination: Path
+    path: Path | str | CapturedKclProject, destination: Path
 ) -> _ResolvedKclExecution:
-    project = load_kcl_project(path)
+    project = path if isinstance(path, CapturedKclProject) else load_kcl_project(path)
     for name, contents in project.files.items():
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1768,6 +1779,7 @@ def _capture_execution_project(
         project.entrypoint,
         project.files,
         source_paths,
+        project.source_root,
     )
 
 
@@ -1775,6 +1787,8 @@ def _capture_execution_project(
 async def _resolve_kcl_execution(
     kcl_code: str | None,
     kcl_path: Path | str | None,
+    *,
+    captured_project: CapturedKclProject | None = None,
 ) -> AsyncIterator[_ResolvedKclExecution]:
     """Capture input once and retain it through mock, real execution, and retries."""
     _check_kcl_code_or_path(kcl_code, kcl_path)
@@ -1791,7 +1805,11 @@ async def _resolve_kcl_execution(
     assert kcl_path is not None
     with TemporaryDirectory(prefix="zoo-mcp-preflight-") as directory:
         pending = asyncio.create_task(
-            asyncio.to_thread(_capture_execution_project, kcl_path, Path(directory))
+            asyncio.to_thread(
+                _capture_execution_project,
+                captured_project if captured_project is not None else kcl_path,
+                Path(directory),
+            )
         )
         try:
             resolved = await asyncio.shield(pending)
@@ -1808,14 +1826,14 @@ async def _resolve_kcl_execution(
 async def _mock_execution_stage(
     kcl_code: str | None,
     kcl_path: Path | str | None,
-) -> KclExecutionStage:
+) -> tuple[KclExecutionStage, kcl.ExecOutcome]:
     if kcl_code:
         outcome = await kcl.mock_execute_code(kcl_code)
     else:
         outcome = await kcl.mock_execute(str(kcl_path))
     issues = _format_execution_issues(outcome, mock=True)
     failed = "fatal" in issues or "error" in issues
-    return KclExecutionStage(
+    stage = KclExecutionStage(
         status="failed" if failed else "succeeded",
         message=(
             "Mock preflight failed"
@@ -1827,6 +1845,26 @@ async def _mock_execution_stage(
         diagnostics=issues,
         error_family="CompilationIssue" if failed else None,
     )
+    return stage, outcome
+
+
+def _render_sketch_png(
+    outcome: kcl.ExecOutcome | kcl.KclError,
+    sketch_name: str,
+    instance_index: int | None,
+    *,
+    error_text: str | None = None,
+) -> bytes:
+    try:
+        return bytes(
+            outcome.render_sketch_png(sketch_name, instance_index=instance_index)
+        )
+    except Exception as render_error:
+        if isinstance(outcome, kcl.KclError):
+            raise ZooMCPException(
+                f"{error_text or str(outcome)}\nSketch recovery failed: {render_error}"
+            ) from outcome
+        raise
 
 
 def _execution_result_message(stage: KclExecutionStage) -> str:
@@ -2100,13 +2138,20 @@ async def _execute_kcl_with_preflight(
     mock = KclExecutionStage("not_run", "Mock preflight has not run")
     real = KclExecutionStage("not_run", "Real execution was not started")
     stage: Literal["mock_preflight", "real_execution"] = "mock_preflight"
+    reuse = current_sketch_execution()
+    if reuse is not None:
+        # Explicit execution always validates afresh, including failed attempts.
+        reuse.execution = None
+        reuse.reused = False
     started_at = monotonic()
     attempts = 0
     resolved: _ResolvedKclExecution | None = None
     try:
         async with _resolve_kcl_execution(kcl_code, kcl_path) as resolved:
             attempts = 1
-            mock = await _mock_execution_stage(resolved.code, resolved.path)
+            mock, mock_outcome = await _mock_execution_stage(
+                resolved.code, resolved.path
+            )
             resolved.remap_diagnostics(mock)
             _report_execution_stage_event(
                 operation,
@@ -2117,6 +2162,8 @@ async def _execute_kcl_with_preflight(
                 "CompilationIssue" if mock.status == "failed" else None,
             )
             if mock.status == "failed":
+                if reuse is not None and session_id is None:
+                    reuse.retain(resolved.fingerprint(), stage, mock_outcome)
                 _report_execution_stage_event(
                     operation,
                     "real_execution",
@@ -2131,6 +2178,7 @@ async def _execute_kcl_with_preflight(
                     real,
                     inspection=inspection,
                 )
+            del mock_outcome
 
             stage = "real_execution"
             started_at = monotonic()
@@ -2172,6 +2220,8 @@ async def _execute_kcl_with_preflight(
                 )
                 try:
                     outcome = session.outcome
+                    if reuse is not None:
+                        reuse.retain(resolved.fingerprint(), stage, outcome)
                     constraint_report = outcome.sketch_constraint_report()
                     inspection.sketch_constraints = _format_session_constraint_report(
                         constraint_report, resolved
@@ -2227,6 +2277,8 @@ async def _execute_kcl_with_preflight(
                 inspection=inspection,
             )
     except asyncio.CancelledError:
+        if reuse is not None:
+            reuse.execution = None
         _report_execution_stage_event(
             operation,
             stage,
@@ -2237,6 +2289,13 @@ async def _execute_kcl_with_preflight(
         raise
     except Exception as error:
         detail = resolved.source_report(str(error)) if resolved else str(error)
+        if (
+            isinstance(error, kcl.KclError)
+            and reuse is not None
+            and resolved is not None
+            and session_id is None
+        ):
+            reuse.retain(resolved.fingerprint(), stage, error, error_text=detail)
         error_family = _execution_error_family(error)
         _report_execution_stage_event(
             operation,
@@ -2639,17 +2698,20 @@ async def zoo_visualize_sketch(
     sketch_name: str,
     kcl_code: str | None = None,
     kcl_path: Path | str | None = None,
+    instance_index: int | None = None,
 ) -> bytes:
-    """Execute KCL and render one named sketch as a PNG.
+    """Render one named sketch, reusing caller-retained execution when unchanged.
 
-    The renderer is provided by ``zoo-kcl`` on ``ExecOutcome``. Sketch names
-    are the variable names assigned to sketch expressions and are also exposed
-    by :func:`zoo_get_sketch_constraint_status`.
+    Native outcomes and execution errors can render completed sketches. Recovery
+    uses the failed execution's retained geometry without rerunning or changing
+    the source. A recovered PNG does not mean the whole project is valid.
 
     Args:
         sketch_name: Variable name of the sketch to render.
         kcl_code: KCL source code to execute.
         kcl_path: Path to a KCL file or project containing ``main.kcl``.
+        instance_index: For duplicate names, zero-based creation order from a
+            fresh constraint report for the same entrypoint and source.
 
     Returns:
         Raw PNG bytes for the requested sketch.
@@ -2658,20 +2720,91 @@ async def zoo_visualize_sketch(
 
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
-    try:
+    if instance_index is not None and instance_index < 0:
+        raise ZooMCPException("instance_index must be non-negative")
 
+    reuse = current_sketch_execution()
+    if reuse is not None:
+        reuse.reused = False
+    resolved: _ResolvedKclExecution | None = None
+
+    async def execute(
+        code: str | None, path: Path | str | None, fingerprint: str | None = None
+    ) -> bytes:
         async def render(session: kcl.KclSession) -> bytes:
-            return bytes(session.outcome.render_sketch_png(sketch_name))
+            outcome = session.outcome
+            if reuse is not None and fingerprint is not None:
+                reuse.retain(fingerprint, "real_execution", outcome)
+            return _render_sketch_png(outcome, sketch_name, instance_index)
 
-        return await _execute_kcl_with_retries(
-            render, kcl_code, kcl_path, _operation="visualize_sketch"
-        )
+        try:
+            return await _execute_kcl_with_retries(
+                render, code, path, _operation="visualize_sketch"
+            )
+        except kcl.KclError as execution_error:
+            detail = (
+                resolved.source_report(str(execution_error))
+                if resolved is not None
+                else str(execution_error)
+            )
+            if reuse is not None and fingerprint is not None:
+                reuse.retain(
+                    fingerprint, "real_execution", execution_error, error_text=detail
+                )
+            png = _render_sketch_png(
+                execution_error, sketch_name, instance_index, error_text=detail
+            )
+            logger.info(
+                "Rendered retained sketch after failed KCL execution "
+                "(error_family=%s); project execution remains unsuccessful",
+                _execution_error_family(execution_error),
+            )
+            return png
+
+    try:
+        if reuse is not None:
+            captured: CapturedKclProject | None = None
+            try:
+                if kcl_code:
+                    check_inline_imports(kcl_code)
+                    fingerprint = CapturedKclProject(
+                        "main.kcl", Path(), {"main.kcl": kcl_code.encode()}
+                    ).fingerprint()
+                else:
+                    assert kcl_path is not None
+                    captured = await asyncio.to_thread(load_kcl_project, kcl_path)
+                    fingerprint = captured.fingerprint()
+            except (OSError, UnicodeError, ZooMCPException):
+                # Preserve standalone execution for projects we cannot capture safely.
+                reuse.execution = None
+                reuse = None
+            else:
+                previous = reuse.execution
+                if previous is not None and previous.fingerprint == fingerprint:
+                    reuse.reused = True
+                    return _render_sketch_png(
+                        previous.outcome,
+                        sketch_name,
+                        instance_index,
+                        error_text=previous.error_text,
+                    )
+                reuse.execution = None
+                async with _resolve_kcl_execution(
+                    kcl_code, kcl_path, captured_project=captured
+                ) as resolved:
+                    return await execute(resolved.code, resolved.path, fingerprint)
+        return await execute(kcl_code, kcl_path)
+    except asyncio.CancelledError:
+        if reuse is not None:
+            reuse.execution = None
+        raise
     except Exception as e:
         logger.error(
             "Failed to visualize sketch (error_family=%s)",
             _execution_error_family(e),
         )
-        raise ZooMCPException(f"Failed to visualize sketch: {e}")
+        detail = resolved.source_report(str(e)) if resolved is not None else str(e)
+        raise ZooMCPException(f"Failed to visualize sketch: {detail}") from e
 
 
 async def zoo_mock_execute_kcl(
@@ -2693,7 +2826,7 @@ async def zoo_mock_execute_kcl(
     _check_kcl_code_or_path(kcl_code, kcl_path)
 
     try:
-        result = await _mock_execution_stage(kcl_code, kcl_path)
+        result, _ = await _mock_execution_stage(kcl_code, kcl_path)
         return result.status == "succeeded", _execution_result_message(result)
     except Exception as e:
         logger.info(
