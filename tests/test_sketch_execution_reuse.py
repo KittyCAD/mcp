@@ -266,15 +266,75 @@ async def test_independent_callers_do_not_share_saved_results(
 
 
 @pytest.mark.asyncio
-async def test_fresh_capture_keeps_original_diagnostic_paths(
-    native_calls: NativeCalls, tmp_path: Path
+@pytest.mark.parametrize("standalone", [False, True])
+@pytest.mark.parametrize(
+    "code, name, index, diagnostic, render_error",
+    [
+        ("profile = (", "profile", None, "syntax", "No partial execution"),
+        (
+            SKETCHES + "\nlate = missingValue\n",
+            "absent",
+            None,
+            "missingValue",
+            "no sketch named",
+        ),
+        (
+            SKETCHES + "\nlate = missingValue\n",
+            "profile",
+            2,
+            "missingValue",
+            "out of range",
+        ),
+        (
+            SKETCHES + "\nlate = missingValue\n",
+            "profile",
+            None,
+            "missingValue",
+            "found 2 sketches named",
+        ),
+    ],
+)
+async def test_retained_failure_keeps_diagnostic_and_original_paths(
+    native_calls: NativeCalls,
+    tmp_path: Path,
+    standalone: bool,
+    code: str,
+    name: str,
+    index: int | None,
+    diagnostic: str,
+    render_error: str,
 ) -> None:
     entry = tmp_path / "main.kcl"
-    entry.write_text("profile = missingValue\n")
-    with reuse_sketch_execution(), pytest.raises(ZooMCPException) as failure:
-        await zoo_tools.zoo_visualize_sketch("profile", kcl_path=entry)
-    assert str(entry) in str(failure.value)
-    assert "zoo-mcp-preflight-" not in str(failure.value)
+    entry.write_text(code)
+    with reuse_sketch_execution() as first:
+        if standalone:
+            with pytest.raises(ZooMCPException) as failure:
+                await zoo_tools.zoo_visualize_sketch(
+                    name, kcl_path=entry, instance_index=index
+                )
+            message = str(failure.value)
+        else:
+            result = await zoo_tools.zoo_execute_kcl(kcl_path=entry)
+            assert not result.ok
+            message = result.message
+    assert diagnostic.lower() in message.lower()
+    assert str(entry) in message
+    assert "zoo-mcp-preflight-" not in message
+    assert first.execution is not None
+    calls = (native_calls.preflight, native_calls.execution)
+
+    with (
+        reuse_sketch_execution(first.execution) as later,
+        pytest.raises(ZooMCPException) as failure,
+    ):
+        await zoo_tools.zoo_visualize_sketch(name, kcl_path=entry, instance_index=index)
+    message = str(failure.value)
+    assert diagnostic.lower() in message.lower()
+    assert render_error in message
+    assert str(entry) in message
+    assert "zoo-mcp-preflight-" not in message
+    assert later.reused
+    assert (native_calls.preflight, native_calls.execution) == calls
 
 
 @pytest.mark.live

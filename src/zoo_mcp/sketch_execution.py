@@ -14,6 +14,7 @@ class RetainedSketchExecution:
     fingerprint: str
     stage: Literal["mock_preflight", "real_execution"]
     outcome: kcl.ExecOutcome | kcl.KclError = field(repr=False)
+    error_text: str | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -26,6 +27,8 @@ class SketchExecutionUse:
         fingerprint: str,
         stage: Literal["mock_preflight", "real_execution"],
         outcome: kcl.ExecOutcome | kcl.KclError,
+        *,
+        error_text: str | None = None,
     ) -> None:
         if isinstance(outcome, kcl.KclError):
             if outcome.is_retryable() and outcome.sketch_constraint_report is None:
@@ -35,7 +38,9 @@ class SketchExecutionUse:
             outcome.__traceback__ = None
             outcome.__context__ = None
             outcome.__cause__ = None
-        self.execution = RetainedSketchExecution(fingerprint, stage, outcome)
+        self.execution = RetainedSketchExecution(
+            fingerprint, stage, outcome, error_text
+        )
 
 
 _current: ContextVar[SketchExecutionUse | None] = ContextVar(

@@ -1852,8 +1852,19 @@ def _render_sketch_png(
     outcome: kcl.ExecOutcome | kcl.KclError,
     sketch_name: str,
     instance_index: int | None,
+    *,
+    error_text: str | None = None,
 ) -> bytes:
-    return bytes(outcome.render_sketch_png(sketch_name, instance_index=instance_index))
+    try:
+        return bytes(
+            outcome.render_sketch_png(sketch_name, instance_index=instance_index)
+        )
+    except Exception as render_error:
+        if isinstance(outcome, kcl.KclError):
+            raise ZooMCPException(
+                f"{error_text or str(outcome)}\nSketch recovery failed: {render_error}"
+            ) from outcome
+        raise
 
 
 def _execution_result_message(stage: KclExecutionStage) -> str:
@@ -2284,7 +2295,7 @@ async def _execute_kcl_with_preflight(
             and resolved is not None
             and session_id is None
         ):
-            reuse.retain(resolved.fingerprint(), stage, error)
+            reuse.retain(resolved.fingerprint(), stage, error, error_text=detail)
         error_family = _execution_error_family(error)
         _report_execution_stage_event(
             operation,
@@ -2731,14 +2742,18 @@ async def zoo_visualize_sketch(
                 render, code, path, _operation="visualize_sketch"
             )
         except kcl.KclError as execution_error:
+            detail = (
+                resolved.source_report(str(execution_error))
+                if resolved is not None
+                else str(execution_error)
+            )
             if reuse is not None and fingerprint is not None:
-                reuse.retain(fingerprint, "real_execution", execution_error)
-            try:
-                png = _render_sketch_png(execution_error, sketch_name, instance_index)
-            except Exception as render_error:
-                raise ZooMCPException(
-                    f"{execution_error}\nSketch recovery failed: {render_error}"
-                ) from execution_error
+                reuse.retain(
+                    fingerprint, "real_execution", execution_error, error_text=detail
+                )
+            png = _render_sketch_png(
+                execution_error, sketch_name, instance_index, error_text=detail
+            )
             logger.info(
                 "Rendered retained sketch after failed KCL execution "
                 "(error_family=%s); project execution remains unsuccessful",
@@ -2768,7 +2783,10 @@ async def zoo_visualize_sketch(
                 if previous is not None and previous.fingerprint == fingerprint:
                     reuse.reused = True
                     return _render_sketch_png(
-                        previous.outcome, sketch_name, instance_index
+                        previous.outcome,
+                        sketch_name,
+                        instance_index,
+                        error_text=previous.error_text,
                     )
                 reuse.execution = None
                 async with _resolve_kcl_execution(
