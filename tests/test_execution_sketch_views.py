@@ -6,7 +6,8 @@ from pathlib import Path
 import kcl
 import pytest
 
-from zoo_mcp import zoo_tools
+from zoo_mcp import ZooMCPException, zoo_tools
+from zoo_mcp.sketch_execution import current_sketch_execution, reuse_sketch_execution
 from zoo_mcp.zoo_tools import KclSketchViewRequest
 
 SKETCHES = """
@@ -171,13 +172,175 @@ async def test_remote_sketch_request_rejected_before_execution(
     assert (native_calls.preflight, native_calls.execution) == (0, 0)
 
 
+@pytest.mark.asyncio
+async def test_later_views_reuse_closed_execution_and_keep_selection_errors(
+    native_calls: NativeCalls,
+) -> None:
+    requests = tuple(KclSketchViewRequest("profile", index) for index in (0, 1))
+    with reuse_sketch_execution() as first:
+        result = await zoo_tools.zoo_execute_kcl(
+            kcl_code=SKETCHES, sketch_views=requests
+        )
+    assert result.ok
+    assert first.execution is not None
+    assert current_sketch_execution() is None
+
+    for index, view in enumerate(result.inspection.sketch_views):
+        with reuse_sketch_execution(first.execution) as later:
+            png = await zoo_tools.zoo_visualize_sketch(
+                "profile", kcl_code=SKETCHES, instance_index=index
+            )
+        assert later.reused
+        assert later.execution is first.execution
+        assert png == view.png
+
+    for name, index in (("profile", None), ("profile", 2), ("absent", None)):
+        with (
+            reuse_sketch_execution(first.execution) as later,
+            pytest.raises(ZooMCPException),
+        ):
+            await zoo_tools.zoo_visualize_sketch(
+                name, kcl_code=SKETCHES, instance_index=index
+            )
+        assert later.reused
+    assert (native_calls.preflight, native_calls.execution) == (1, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("downstream_error", [False, True])
+async def test_standalone_keeps_native_result_for_later_views(
+    native_calls: NativeCalls, downstream_error: bool
+) -> None:
+    code = SKETCHES + ("\nlate = missingValue\n" if downstream_error else "")
+    with reuse_sketch_execution() as first:
+        png = await zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_code=code, instance_index=0
+        )
+    assert first.execution is not None
+    assert not first.reused
+    with reuse_sketch_execution(first.execution) as later:
+        assert png == await zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_code=code, instance_index=0
+        )
+    assert later.reused
+    assert native_calls.execution == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["source", "import", "settings", "entrypoint"])
+async def test_project_changes_require_fresh_execution(
+    native_calls: NativeCalls, tmp_path: Path, change: str
+) -> None:
+    code = SKETCHES.replace(
+        "profile = sketch(on = YZ)",
+        'import offset from "dimensions.kcl"\nprofile = sketch(on = YZ)',
+        1,
+    ).replace("2mm, 8mm", "2mm, offset")
+    entry = tmp_path / "main.kcl"
+    entry.write_text(code)
+    dependency = tmp_path / "dimensions.kcl"
+    dependency.write_text("export offset = 8mm\n")
+    with reuse_sketch_execution() as first:
+        result = await zoo_tools.zoo_execute_kcl(kcl_path=tmp_path)
+    assert result.ok, result.message
+    assert first.execution is not None
+
+    (tmp_path / "notes.md").write_text("This is not an execution input.\n")
+    with reuse_sketch_execution(first.execution) as unchanged:
+        await zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_path=entry, instance_index=0
+        )
+    assert unchanged.reused
+    assert native_calls.execution == 1
+
+    if change == "source":
+        entry.write_text(code.replace("10mm", "11mm"))
+    elif change == "import":
+        dependency.write_text("export offset = 9mm\n")
+    elif change == "settings":
+        (tmp_path / "project.toml").write_text("[settings]\n")
+    else:
+        entry = tmp_path / "other.kcl"
+        entry.write_text(code)
+    with reuse_sketch_execution(first.execution) as changed:
+        png = await zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_path=entry, instance_index=0
+        )
+    assert not changed.reused
+    assert changed.execution is not None
+    assert changed.execution.fingerprint != first.execution.fingerprint
+    assert png == bytes(
+        native_calls.outcomes[-1].render_sketch_png("profile", instance_index=0)
+    )
+    assert native_calls.execution == 2
+
+
+@pytest.mark.asyncio
+async def test_explicit_execution_never_uses_saved_validation(
+    native_calls: NativeCalls,
+) -> None:
+    with reuse_sketch_execution() as first:
+        await zoo_tools.zoo_execute_kcl(kcl_code=SKETCHES)
+    with reuse_sketch_execution(first.execution) as second:
+        result = await zoo_tools.zoo_execute_kcl(kcl_code=SKETCHES)
+    assert result.ok
+    assert not second.reused
+    assert (native_calls.preflight, native_calls.execution) == (2, 2)
+
+    code = SKETCHES + "\nlate = missingValue\n"
+    with reuse_sketch_execution(second.execution) as failed:
+        result = await zoo_tools.zoo_execute_kcl(kcl_code=code)
+    assert not result.ok
+    assert result.real_execution.status == "not_run"
+    assert failed.execution is not None
+    assert failed.execution.stage == "mock_preflight"
+    with reuse_sketch_execution(failed.execution) as later:
+        png = await zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_code=code, instance_index=0
+        )
+    assert png.startswith(b"\x89PNG")
+    assert later.reused
+    assert (native_calls.preflight, native_calls.execution) == (3, 2)
+
+
+@pytest.mark.asyncio
+async def test_independent_callers_do_not_share_saved_results(
+    native_calls: NativeCalls,
+) -> None:
+    with reuse_sketch_execution() as first:
+        await zoo_tools.zoo_execute_kcl(kcl_code=SKETCHES)
+    with reuse_sketch_execution() as unrelated:
+        await zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_code=SKETCHES, instance_index=0
+        )
+    assert not unrelated.reused
+    assert unrelated.execution is not first.execution
+    assert native_calls.execution == 2
+
+
+@pytest.mark.asyncio
+async def test_fresh_capture_keeps_original_diagnostic_paths(
+    native_calls: NativeCalls, tmp_path: Path
+) -> None:
+    entry = tmp_path / "main.kcl"
+    entry.write_text("profile = missingValue\n")
+    with reuse_sketch_execution(), pytest.raises(ZooMCPException) as failure:
+        await zoo_tools.zoo_visualize_sketch("profile", kcl_path=entry)
+    assert str(entry) in str(failure.value)
+    assert "zoo-mcp-preflight-" not in str(failure.value)
+
+
 @pytest.mark.live
 @pytest.mark.xdist_group(name="engine")
 @pytest.mark.asyncio
 async def test_engine_failure_returns_png_and_keeps_partial_report() -> None:
-    with zoo_tools.capture_execution_stage_events() as events:
+    code = SKETCHES + "\nbadRegion = region(segments = [profile.edge])\n"
+    with (
+        zoo_tools.capture_execution_stage_events() as events,
+        reuse_sketch_execution() as first,
+    ):
         result = await zoo_tools.zoo_execute_kcl(
-            kcl_code=SKETCHES + "\nbadRegion = region(segments = [profile.edge])\n",
+            kcl_code=code,
             sketch_views=(KclSketchViewRequest("profile", 0),),
         )
 
@@ -191,3 +354,15 @@ async def test_engine_failure_returns_png_and_keeps_partial_report() -> None:
         ("mock_preflight", 1),
         ("real_execution", 1),
     ]
+    assert first.execution is not None
+    assert first.execution.stage == "real_execution"
+    with (
+        reuse_sketch_execution(first.execution) as later,
+        zoo_tools.capture_execution_retry_events() as retries,
+    ):
+        png = await zoo_tools.zoo_visualize_sketch(
+            "profile", kcl_code=code, instance_index=0
+        )
+    assert later.reused
+    assert png == result.inspection.sketch_views[0].png
+    assert retries == []
