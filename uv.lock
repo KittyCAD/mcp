@@ -317,7 +317,7 @@ wheels = [
 
 [[package]]
 name = "kittycad"
-version = "1.5.0"
+version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -330,9 +330,9 @@ dependencies = [
     { name = "truststore" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4c/e7/f13acbf2a87781093ab919d725e86402272bdee1de7e80e97aca9592899a/kittycad-1.5.0.tar.gz", hash = "sha256:e186d55e50bb22e4554ef42ee71defda3b47dbb4da4412d9b45e5661337396cb", size = 220636, upload-time = "2026-08-18T20:13:48.299Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/79/b2/5ef7a1fa627b242342f8ad29e208b69af1ae7079c1bcf217bbe513b639fc/kittycad-1.6.0.tar.gz", hash = "sha256:b94a8f074d82aafcc69be2fac6cefb49245c1bbab9d8788b9c51747cf8c3231d", size = 223966, upload-time = "2026-10-02T20:39:20.286Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/a2/3807226c6dd2ef2424873fa2885f7b4f1cd9279f43bd5c3d6f90cf984206/kittycad-1.5.0-py3-none-any.whl", hash = "sha256:b051d09cba476ca6c331abcc3fb53c39dbffb4428e497063ad7fd44fbb1846eb", size = 388252, upload-time = "2026-08-18T20:13:47.163Z" },
+    { url = "https://files.pythonhosted.org/packages/33/fa/500133ecbbc37af5fb98d2cc9cfd5a33a31dde1fa437cce02906cf8fe63c/kittycad-1.6.0-py3-none-any.whl", hash = "sha256:bf5dec79f0ed2664b25b9b8f1e7e7d6c2584c48887c3077cc28d6d01e310db2c", size = 394148, upload-time = "2026-10-02T20:39:18.809Z" },
 ]
 
 [[package]]
@@ -1186,7 +1186,7 @@ wheels = [
 
 [[package]]
 name = "zoo-mcp"
-version = "0.28.6"
+version = "0.28.7"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -1217,7 +1217,7 @@ dev = [
 requires-dist = [
     { name = "aiofiles", specifier = "<26.0" },
     { name = "httpx", specifier = ">=0.28,<1" },
-    { name = "kittycad", specifier = ">=1.5.0,<2.0" },
+    { name = "kittycad", specifier = ">=1.6.0,<2.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.2.0,<3" },
     { name = "pillow", specifier = "<13.0" },
     { name = "pymongo", specifier = ">=4.6.0,<5.0" },
