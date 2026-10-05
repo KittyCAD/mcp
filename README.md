@@ -59,6 +59,31 @@ Connect an MCP client to `http://127.0.0.1:8000/mcp`. The SDK manages HTTP
 sessions and streaming responses. `--host` and `--port` configure the HTTP
 listener; their defaults are `127.0.0.1` and `8000`.
 
+### Supplying credentials from Python
+
+Local entry points capture credentials when Zoo MCP is imported at startup.
+They accept `ZOO_API_TOKEN`, `KITTYCAD_API_TOKEN`, or the registry's `ZOO_TOKEN`
+alias, and `ZOO_HOST` or `KITTYCAD_HOST` for the API origin.
+
+Applications can supply credentials explicitly without changing the process
+environment or adding authentication arguments to MCP tools:
+
+```python
+from zoo_mcp.credentials import ZooCredentials, use_credentials
+from zoo_mcp.server import mcp
+
+with use_credentials(ZooCredentials(token=api_token, base_url=api_origin)):
+    result = await mcp.call_tool("list_org_datasets", {})
+```
+
+The context supplies the same token and origin to the KittyCAD SDK and KCL
+session constructors and restores the previous configuration on exit. New
+calls can use refreshed credentials. Finish child tasks before leaving their
+credential context.
+
+Credential contexts configure downstream calls. Applications serving different
+owners must also isolate their process-wide modeling sessions and workspaces.
+
 ### Prebuilt binaries
 
 Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:

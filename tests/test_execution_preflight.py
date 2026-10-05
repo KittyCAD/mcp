@@ -11,6 +11,7 @@ import pytest
 from mcp.types import CallToolResult
 
 from zoo_mcp import ZooMCPTimeoutError, zoo_tools
+from zoo_mcp.credentials import ZooCredentials, use_credentials
 from zoo_mcp.server import mcp
 
 
@@ -157,13 +158,15 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
     snapshot_options = MagicMock(wraps=kcl.SnapshotOptions)
     monkeypatch.setattr(kcl, "SnapshotOptions", snapshot_options)
 
-    result = await zoo_tools.zoo_execute_kcl(
-        kcl_code="x = 1",
-        snapshot_request=zoo_tools.KclSnapshotRequest(("front", camera)),
-        physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(
-            ("volume", "surface_area")
-        ),
-    )
+    credentials = ZooCredentials("synthetic-session-token", "https://api.example")
+    with use_credentials(credentials):
+        result = await zoo_tools.zoo_execute_kcl(
+            kcl_code="x = 1",
+            snapshot_request=zoo_tools.KclSnapshotRequest(("front", camera)),
+            physical_properties_request=zoo_tools.KclPhysicalPropertiesRequest(
+                ("volume", "surface_area")
+            ),
+        )
 
     assert result.ok
     assert calls == [
@@ -180,6 +183,8 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
         highlight_edges=False,
         video_res_width=1024,
         video_res_height=1024,
+        token=credentials.token,
+        base_url=credentials.base_url,
     )
     old_execute.assert_not_awaited()
     assert result.inspection.sketch_constraints_status == "succeeded"
