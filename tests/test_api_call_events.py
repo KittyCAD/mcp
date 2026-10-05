@@ -84,8 +84,9 @@ class _Outcome:
             kcl_error=None,
         )
 
-    def render_sketch_png(self, name):
+    def render_sketch_png(self, name, *, instance_index=None):
         assert name == "profile"
+        assert instance_index is None
         return b"png"
 
 
@@ -179,7 +180,12 @@ async def test_standalone_tools_capture_ids_from_one_execution(
             assert result["kcl_executes_successfully"]
         else:
             assert (
-                await zoo_tools.zoo_visualize_sketch("profile", **arguments) == b"png"
+                await zoo_tools.zoo_visualize_sketch(
+                    "profile",
+                    kcl_code=None if from_file else "x = 1",
+                    kcl_path=path if from_file else None,
+                )
+                == b"png"
             )
     assert open_code.await_count == int(not from_file)
     assert open_file.await_count == int(from_file)
