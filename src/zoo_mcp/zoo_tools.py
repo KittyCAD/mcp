@@ -56,7 +56,6 @@ from kittycad.models import (
     InputFormat3d,
     ModelingCmd,
     ModelingCmdId,
-    OrgSkillResponse,
     Point2d,
     Point3d,
     PostEffectType,
@@ -129,8 +128,6 @@ from kittycad.models.ok_web_socket_response_data import OptionModeling
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
-from kittycad.response_helpers import raise_for_status
-from pydantic import BaseModel, ConfigDict, TypeAdapter
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
@@ -185,6 +182,8 @@ async def _capture_rest_response(response: httpx.Response) -> None:
 
 def _new_zoo_client() -> AsyncKittyCAD:
     client = AsyncKittyCAD(verify_ssl=ctx)
+    # SDK endpoint paths include their leading slash.
+    client.base_url = client.base_url.rstrip("/")
     hooks = client.get_http_client().event_hooks
     if _capture_rest_response not in hooks["response"]:
         hooks["response"].append(_capture_rest_response)
@@ -3826,53 +3825,6 @@ async def zoo_list_org_datasets(
     ]
 
 
-class _OrgSkillsPage(BaseModel):
-    model_config = ConfigDict(strict=True)
-
-    items: list[OrgSkillResponse]
-    next_page: str | None
-
-
-async def _list_org_skills(client: AsyncKittyCAD) -> list[OrgSkillResponse]:
-    """Read legacy arrays and complete Dropshot pages with the configured SDK client."""
-    skills: list[OrgSkillResponse] = []
-    page_token: str | None = None
-    seen_tokens: set[str] = set()
-
-    while True:
-        params = {"limit": "100"}
-        if page_token is not None:
-            params["page_token"] = page_token
-        response = await client.get_http_client().get(
-            f"{client.base_url.rstrip('/')}/org/skills",
-            headers=client.get_headers(),
-            params=params,
-            follow_redirects=False,
-        )
-        if response.status_code == 404 and page_token is None:
-            return []
-        raise_for_status(response)
-        if not response.content and page_token is None:
-            return []
-
-        payload: object = response.json()
-        if isinstance(payload, list):
-            if page_token is not None:
-                raise ValueError("Unexpected legacy array in org skills continuation")
-            return TypeAdapter(list[OrgSkillResponse]).validate_python(
-                payload, extra="ignore"
-            )
-
-        page = _OrgSkillsPage.model_validate(payload, extra="ignore")
-        skills.extend(page.items)
-        if page.next_page is None:
-            return skills
-        if not page.next_page.strip() or page.next_page in seen_tokens:
-            raise ValueError("Invalid or repeated org skills page token")
-        seen_tokens.add(page.next_page)
-        page_token = page.next_page
-
-
 @api_operation
 async def zoo_list_org_skills() -> list[dict[str, str]]:
     """List all skills visible to the org tied to the current ZOO_API_TOKEN.
@@ -3884,7 +3836,7 @@ async def zoo_list_org_skills() -> list[dict[str, str]]:
     logger.info("Listing org skills")
     async with _new_zoo_client() as client:
         try:
-            skills = await _list_org_skills(client)
+            skills = [skill async for skill in client.orgs.list_org_skills(limit=100)]
         except KittyCADClientError as exc:
             raise ZooMCPException(f"Failed to list org skills: {exc}") from exc
 
