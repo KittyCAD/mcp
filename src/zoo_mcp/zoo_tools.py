@@ -182,6 +182,8 @@ async def _capture_rest_response(response: httpx.Response) -> None:
 
 def _new_zoo_client() -> AsyncKittyCAD:
     client = AsyncKittyCAD(verify_ssl=ctx)
+    # SDK endpoint paths include their leading slash.
+    client.base_url = client.base_url.rstrip("/")
     hooks = client.get_http_client().event_hooks
     if _capture_rest_response not in hooks["response"]:
         hooks["response"].append(_capture_rest_response)

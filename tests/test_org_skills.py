@@ -28,9 +28,9 @@ def org_skills() -> list[dict[str, str]]:
 
 @pytest.fixture
 def skill_client(monkeypatch: pytest.MonkeyPatch) -> AsyncKittyCAD:
+    monkeypatch.setenv("ZOO_HOST", "https://api.example.test/custom/")
     client = AsyncKittyCAD(
         token="test-token",
-        base_url="https://api.example.test/custom",
         headers={"X-Client": "org-skills-test"},
         cookies={"session": "configured-session"},
         timeout=4.25,
