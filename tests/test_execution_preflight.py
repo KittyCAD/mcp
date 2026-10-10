@@ -180,6 +180,7 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
     assert snapshot_options.call_args_list[1].kwargs["camera"] is camera
     open_session.assert_awaited_once_with(
         "x = 1",
+        geometry_only=True,
         highlight_edges=False,
         video_res_width=1024,
         video_res_height=1024,
