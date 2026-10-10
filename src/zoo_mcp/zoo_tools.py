@@ -647,6 +647,7 @@ async def _open_kcl_session(
         if kcl_code is not None:
             session = await kcl.new_kcl_session_code(
                 kcl_code,
+                geometry_only=True,
                 highlight_edges=highlight_edges,
                 video_res_width=video_res_width,
                 video_res_height=video_res_height,
@@ -657,6 +658,7 @@ async def _open_kcl_session(
             assert kcl_path is not None
             session = await kcl.new_kcl_session(
                 str(kcl_path),
+                geometry_only=True,
                 highlight_edges=highlight_edges,
                 video_res_width=video_res_width,
                 video_res_height=video_res_height,
