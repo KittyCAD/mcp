@@ -47,6 +47,9 @@ classifiers = [
 [project.urls]
 Repository = "https://github.com/KittyCAD/mcp"
 
+[tool.uv.sources]
+zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", rev = "164e2628ccc2ded8dce4914d5250059ca39ae15f", subdirectory = "rust/kcl-python-bindings" }
+
 [project.scripts]
 zoo-mcp = "zoo_mcp.server:main"
 
