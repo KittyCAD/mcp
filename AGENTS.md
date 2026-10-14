@@ -54,7 +54,7 @@ The server connects to Zoo's KCL execution APIs using the KittyCAD client, and t
 ### Testing Strategy
 Tests live in `tests/` and are split across:
 - `tests/test_server.py` - Exercises every MCP tool end-to-end through `mcp.call_tool`, mixing real KCL/CAD calls with mocked KittyCAD responses for org-dataset tools, and synthetic in-memory indexes for KCL docs/samples tools.
-- `tests/test_docs.py`, `tests/test_samples.py` - Unit tests for docs categorization / title extraction and public sample pagination, ZIP parsing, download limits, and caching.
+- `tests/test_docs.py`, `tests/test_samples.py` - Unit tests for docs categorization / title extraction and public sample pagination, ZIP parsing, and caching.
 - `tests/test_data_retrieval_utils.py` - Unit tests for the shared `zoo.dev` fetch helpers (path safety, excerpt extraction, redirect-blocking fetch, markdown `Accept` header).
 - `tests/test_modeling_commands.py`, `tests/test_server_modeling_commands.py` - Mocked-transport tests for the modeling websocket layer, including the exact command sequence `zoo_snapshot` sends, how the `snapshot` tool resolves its `camera_view` argument, and the command deadline (success, engine failure, connection close, a stream of unmatched frames, and no-response timeout). The deadline tests drive a fake monotonic clock so a 300s budget is exercised without a 300s test.
 - `tests/test_live_zoo_dev.py` - Marked `live`; exercises the docs tools against `zoo.dev` and the samples tools against the public projects API. Deselect with `-m "not live"` when offline.

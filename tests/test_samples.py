@@ -185,14 +185,6 @@ def test_archive_rejects_duplicate_paths():
         )
 
 
-def test_archive_limits_total_uncompressed_kcl_bytes(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(kcl_samples, "_MAX_KCL_BYTES", 8)
-    archive = _archive([("main.kcl", "x = 1"), ("part.kcl", "y = 2")])
-
-    with pytest.raises(ValueError, match="KCL files exceed"):
-        kcl_samples._parse_project_archive(archive)
-
-
 @pytest.mark.parametrize("content", [b"not a zip", _archive([("main.kcl", b"\xff")])])
 def test_archive_rejects_invalid_zip_or_source(content: bytes):
     with pytest.raises((zipfile.BadZipFile, UnicodeDecodeError)):
@@ -262,20 +254,6 @@ async def test_download_rejects_redirect(
     )
 
     with pytest.raises(httpx.HTTPStatusError):
-        await kcl_samples.get_sample_content(_PROJECT_ID)
-    assert samples_index.file_index == {}
-
-
-@pytest.mark.asyncio
-async def test_download_limits_archive_size(
-    httpx_mock: HTTPXMock, samples_index: KCLSamples, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.setattr(kcl_samples, "_MAX_ARCHIVE_BYTES", 10)
-    httpx_mock.add_response(
-        url=_DOWNLOAD_URL, content=_archive([("main.kcl", "x = 1")])
-    )
-
-    with pytest.raises(ValueError, match="archive exceeds"):
         await kcl_samples.get_sample_content(_PROJECT_ID)
     assert samples_index.file_index == {}
 

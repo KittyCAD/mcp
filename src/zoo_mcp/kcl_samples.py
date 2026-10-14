@@ -26,8 +26,6 @@ from zoo_mcp import ctx, logger
 from zoo_mcp.utils.data_retrieval_utils import extract_excerpt, is_safe_path_component
 
 _PUBLIC_PROJECTS_URL = f"{DEFAULT_BASE_URL}/projects/public"
-_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
-_MAX_KCL_BYTES = 16 * 1024 * 1024
 
 # Project files may have nested paths, spaces, and Unicode names, but must
 # remain project-relative. Sample identifiers must be safe URL components.
@@ -94,7 +92,6 @@ class KCLSamples:
 def _parse_project_archive(content: bytes) -> dict[str, str]:
     """Read KCL sources from a ZIP in memory, without extracting any files."""
     files: dict[str, str] = {}
-    total_bytes = 0
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
         for member in archive.infolist():
             filename = member.orig_filename
@@ -109,9 +106,6 @@ def _parse_project_archive(content: bytes) -> dict[str, str]:
                 raise ValueError(
                     f"Unsafe or duplicate KCL path in sample: {filename!r}"
                 )
-            total_bytes += member.file_size
-            if total_bytes > _MAX_KCL_BYTES:
-                raise ValueError("Sample KCL files exceed the size limit")
             files[filename] = archive.read(member).decode("utf-8")
     return files
 
@@ -120,24 +114,18 @@ async def _fetch_sample_files(
     client: httpx.AsyncClient,
     sample_name: str,
 ) -> dict[str, str]:
-    """Download a public project's KCL files as a bounded ZIP response."""
+    """Download a public project's KCL files as a ZIP response."""
     # The SDK's download method currently JSON-decodes archive responses.
     # Read the binary endpoint directly until it supports binary downloads.
-    async with client.stream(
-        "GET",
+    response = await client.get(
         f"{_PUBLIC_PROJECTS_URL}/{sample_name}/download",
         params={"format": "zip"},
         follow_redirects=False,
-    ) as response:
-        if response.status_code == 404:
-            return {}
-        response.raise_for_status()
-        content = bytearray()
-        async for chunk in response.aiter_bytes():
-            content.extend(chunk)
-            if len(content) > _MAX_ARCHIVE_BYTES:
-                raise ValueError("Sample archive exceeds the size limit")
-    return _parse_project_archive(bytes(content))
+    )
+    if response.status_code == 404:
+        return {}
+    response.raise_for_status()
+    return _parse_project_archive(response.content)
 
 
 async def _fetch_index_from_api() -> KCLSamples:
