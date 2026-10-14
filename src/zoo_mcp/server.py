@@ -144,7 +144,7 @@ from zoo_mcp.zoo_tools import (
 
 
 async def _init_kcl_indexes() -> None:
-    """Populate the KCL docs and samples indexes from zoo.dev concurrently.
+    """Populate the KCL docs and public Aquarium samples indexes concurrently.
 
     Each index is initialized independently — a failure in one does not
     prevent the other from succeeding.
@@ -1646,17 +1646,16 @@ async def get_kcl_doc(doc_path: str) -> str:
 async def list_kcl_samples() -> list[dict] | str:
     """List all available KCL sample projects.
 
-    Returns a list of all available KCL code samples from the Zoo samples
-    repository. Each sample demonstrates a specific CAD modeling technique
-    or creates a particular 3D model.
+    Returns the public Aquarium projects from the Zoo API. Each sample
+    demonstrates a CAD modeling technique or creates a particular 3D model.
 
     Returns:
         list[dict] | str: List of sample information, each containing:
-            - name: The sample directory name (use with get_kcl_sample)
+            - name: The public project ID (use with get_kcl_sample)
             - title: Human-readable title
             - description: Brief description of what the sample creates
             - multipleFiles: Whether the sample contains multiple KCL files.
-              Best-effort hint only. The /aquarium index doesn't expose file
+              Best-effort hint only. The public listing doesn't expose file
               counts, so this is ``False`` for any sample that has not yet
               been fetched via get_kcl_sample. Call get_kcl_sample if you
               need a reliable answer.
@@ -1684,7 +1683,7 @@ async def search_kcl_samples(query: str, max_results: int = 5) -> list[dict] | s
 
     Returns:
         list[dict] | str: List of search results, each containing:
-            - name: The sample directory name (use with get_kcl_sample)
+            - name: The public project ID (use with get_kcl_sample)
             - title: Human-readable title
             - description: Brief description of the sample
             - multipleFiles: Whether the sample contains multiple KCL files.
@@ -1707,27 +1706,26 @@ async def search_kcl_samples(query: str, max_results: int = 5) -> list[dict] | s
 async def get_kcl_sample(sample_name: str) -> SampleData | str:
     """Get the full content of a specific KCL sample including all files.
 
-    Retrieves all KCL files that make up a sample project. Some samples
-    consist of a single main.kcl file, while others have multiple files
-    (e.g., parameters.kcl, components, etc.).
+    Downloads a public Aquarium project and retrieves its KCL files with
+    their project-relative paths, including files in subdirectories.
 
     Use list_kcl_samples() to see available sample names, or
     search_kcl_samples() to find samples by keyword.
 
     Args:
-        sample_name (str): The sample directory name
-            (e.g., "ball-bearing", "axial-fan", "gear")
+        sample_name (str): The public project ID returned by list_kcl_samples()
+            or search_kcl_samples().
 
     Returns:
         SampleData | str: A SampleData dictionary containing:
-            - name: The sample directory name
+            - name: The public project ID
             - title: Human-readable title
             - description: Brief description
             - multipleFiles: Whether the sample contains multiple files.
               Reliable here (unlike in list_kcl_samples / search_kcl_samples),
-              because this tool fetches the per-sample page and counts the
-              parsed files.
-            - files: List of SampleFile dictionaries, each with 'filename' and 'content'
+              because this tool downloads the project and counts its KCL files.
+            - files: List of SampleFile dictionaries, each with a project-relative
+              'filename' and its 'content'
         Returns an error message string if the sample is not found. If there was an error, returns an error message string.
     """
     logger.info("get_kcl_sample tool called for sample: %s", sample_name)

@@ -1,128 +1,295 @@
+import asyncio
+import io
+import stat
+import warnings
+import zipfile
+
+import httpx
+import pytest
+from kittycad.exceptions import KittyCADServerError
+from pytest_httpx import HTTPXMock
+
 from zoo_mcp import kcl_samples
-from zoo_mcp.utils.data_retrieval_utils import extract_excerpt
+from zoo_mcp.credentials import ZooCredentials, use_credentials
+from zoo_mcp.kcl_samples import KCLSamples, SampleMetadata
+
+_PROJECT_ID = "e9996d92-3ec1-447d-b91e-a68188b41b07"
+_OTHER_ID = "e11a54c2-7bb8-4bbe-bba9-e6b75d3a67ed"
+_LIST_URL = "https://api.zoo.dev/projects/public?limit=100"
+_DOWNLOAD_URL = f"https://api.zoo.dev/projects/public/{_PROJECT_ID}/download?format=zip"
 
 
-def test_parse_index_markdown_basic():
-    """Index lines are split into name/title/description, dropping categories."""
-    markdown = (
-        "# CAD Samples Gallery\n"
-        "\n"
-        "## Samples\n"
-        "\n"
-        "- [Angle Gauge](/aquarium/angle-gauge)"
-        " - Simple angle gauge function to generate a gauge given an angle"
-        " (Construction)\n"
-        "- [Ball Bearing](/aquarium/ball-bearing)"
-        " - A rolling-element bearing (Manufacturing, Automotive)\n"
+def _project(project_id: str = _PROJECT_ID, title: str = "Cycloidal Gear") -> dict:
+    return {
+        "id": project_id,
+        "title": title,
+        "description": "A gear (see https://example.com) with several parts.",
+        "categories": [],
+        "owner": {"username": "creator"},
+        "published_at": "2026-10-09T00:00:00Z",
+        "like_count": 0,
+        "new_backend_field": "ignored",
+    }
+
+
+def _archive(files: list[tuple[str | zipfile.ZipInfo, str | bytes]]) -> bytes:
+    content = io.BytesIO()
+    with (
+        zipfile.ZipFile(content, "w", compression=zipfile.ZIP_DEFLATED) as archive,
+        warnings.catch_warnings(),
+    ):
+        warnings.simplefilter("ignore", UserWarning)
+        for filename, source in files:
+            archive.writestr(filename, source)
+    return content.getvalue()
+
+
+@pytest.fixture(autouse=True)
+def reset_samples(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(KCLSamples, "_instance", None)
+    monkeypatch.setattr(KCLSamples, "_init_lock", None)
+
+
+@pytest.fixture
+def samples_index(monkeypatch: pytest.MonkeyPatch) -> KCLSamples:
+    samples = KCLSamples(
+        manifest={
+            _PROJECT_ID: SampleMetadata(
+                title="Cycloidal Gear",
+                description="A gear assembly",
+                multipleFiles=False,
+            )
+        }
+    )
+    monkeypatch.setattr(KCLSamples, "_instance", samples)
+    return samples
+
+
+@pytest.mark.asyncio
+async def test_index_follows_all_pages_without_credentials(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url=_LIST_URL,
+        json={"items": [_project()], "next_page": "second"},
+    )
+    # An empty page with a cursor must not stop discovery.
+    httpx_mock.add_response(
+        url=f"{_LIST_URL}&page_token=second",
+        json={"items": [], "next_page": "third"},
+    )
+    httpx_mock.add_response(
+        url=f"{_LIST_URL}&page_token=third",
+        json={"items": [_project(_OTHER_ID, "Axial Fan")], "next_page": None},
     )
 
-    parsed = kcl_samples._parse_index_markdown(markdown)
+    with use_credentials(
+        ZooCredentials(token="caller-token", base_url="https://private.example")
+    ):
+        await KCLSamples.initialize()
 
-    assert set(parsed.keys()) == {"angle-gauge", "ball-bearing"}
-    assert parsed["angle-gauge"]["title"] == "Angle Gauge"
-    assert parsed["angle-gauge"]["description"] == (
-        "Simple angle gauge function to generate a gauge given an angle"
+    samples = KCLSamples.get()
+    assert set(samples.manifest) == {_PROJECT_ID, _OTHER_ID}
+    assert samples.manifest[_PROJECT_ID]["description"] == _project()["description"]
+    assert samples.manifest[_OTHER_ID]["title"] == "Axial Fan"
+    assert samples.file_index == {}
+    assert all("authorization" not in r.headers for r in httpx_mock.get_requests())
+    assert {r.url.host for r in httpx_mock.get_requests()} == {"api.zoo.dev"}
+
+
+@pytest.mark.asyncio
+async def test_initialize_retries_an_empty_listing(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(url=_LIST_URL, json={"items": []})
+    httpx_mock.add_response(url=_LIST_URL, json={"items": [_project()]})
+
+    await KCLSamples.initialize()
+    assert KCLSamples._instance is None
+    await KCLSamples.initialize()
+    assert _PROJECT_ID in KCLSamples.get().manifest
+
+
+@pytest.mark.asyncio
+async def test_failed_later_page_does_not_cache_partial_index(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(
+        url=_LIST_URL, json={"items": [_project()], "next_page": "second"}
     )
-    assert parsed["angle-gauge"]["multipleFiles"] is False
-    assert parsed["ball-bearing"]["description"] == "A rolling-element bearing"
-
-
-def test_parse_index_markdown_handles_missing_description():
-    """Entries without a ``- description`` chunk are still captured."""
-    markdown = "- [Bare Slug](/aquarium/bare-slug)\n"
-
-    parsed = kcl_samples._parse_index_markdown(markdown)
-
-    assert parsed["bare-slug"]["title"] == "Bare Slug"
-    assert parsed["bare-slug"]["description"] == ""
-
-
-def test_parse_index_markdown_strips_acronym_categories():
-    """All-caps acronym categories like ``(API)`` / ``(CAD)`` are stripped."""
-    markdown = (
-        "- [Widget](/aquarium/widget) - A widget (API, CAD)\n"
-        "- [Gizmo](/aquarium/gizmo) - A gizmo (CNC)\n"
-    )
-
-    parsed = kcl_samples._parse_index_markdown(markdown)
-
-    assert parsed["widget"]["description"] == "A widget"
-    assert parsed["gizmo"]["description"] == "A gizmo"
-
-
-def test_parse_index_markdown_keeps_url_parens_in_description():
-    """Trailing ``(...)`` is only stripped when it looks like categories."""
-    markdown = (
-        "- [Bench](/aquarium/bench)"
-        " - This is a slight remix of original 3D Boaty (https://example.com)."
-        " Park bench shape. (Maker)\n"
+    httpx_mock.add_response(
+        url=f"{_LIST_URL}&page_token=second", status_code=503, json={"message": "Down"}
     )
 
-    parsed = kcl_samples._parse_index_markdown(markdown)
-
-    assert "bench" in parsed
-    desc = parsed["bench"]["description"]
-    assert "(https://example.com)" in desc
-    assert desc.endswith("Park bench shape.")
+    with pytest.raises(KittyCADServerError):
+        await KCLSamples.initialize()
+    assert KCLSamples._instance is None
+    assert kcl_samples.list_available_samples() == []
 
 
-def test_parse_aquarium_markdown_extracts_files():
-    """Per-sample markdown yields filename -> content for each ``### *.kcl`` block."""
-    markdown = (
-        "# Coilover\n\n"
-        "## Files\n\n"
-        "### main.kcl\n\n"
-        "```kcl\n"
-        'import "part.kcl" as part\n'
-        "```\n\n"
-        "### part.kcl\n\n"
-        "```kcl\n"
-        "x = 1\n"
-        "```\n"
+@pytest.mark.asyncio
+async def test_concurrent_initialization_fetches_once(httpx_mock: HTTPXMock):
+    httpx_mock.add_response(url=_LIST_URL, json={"items": [_project()]})
+
+    await asyncio.gather(KCLSamples.initialize(), KCLSamples.initialize())
+    await KCLSamples.initialize()
+
+    assert len(httpx_mock.get_requests()) == 1
+    assert _PROJECT_ID in KCLSamples.get().manifest
+
+
+def test_archive_preserves_nested_paths_and_ignores_other_files():
+    files = {
+        "main.kcl": 'import "parts/fan.kcl" as fan\n',
+        "parts/fan.kcl": "blades = 5\n",
+        "parts/부품 name.kcl": "radius = 10\n",
+    }
+    archive = _archive(
+        list(files.items())
+        + [
+            ("project.toml", "[settings]\n"),
+            ("thumbnail.png", b"\x89PNG"),
+            ("parts/", ""),
+        ]
     )
 
-    files = kcl_samples._parse_aquarium_markdown(markdown)
-
-    assert files == {"main.kcl": 'import "part.kcl" as part', "part.kcl": "x = 1"}
+    assert kcl_samples._parse_project_archive(archive) == files
 
 
-def test_extract_excerpt():
-    """Test excerpt extraction with context."""
-    content = "This is some text before. The keyword appears here in the middle. And this is text after."
-    excerpt = extract_excerpt(content, "keyword", context_chars=40)
-
-    assert "keyword" in excerpt
-    assert len(excerpt) < len(content) + 10  # Account for ellipsis
-
-
-def test_extract_excerpt_no_match():
-    """Test excerpt extraction when query is not found."""
-    content = "Some content without the search term."
-    excerpt = extract_excerpt(content, "nonexistent", context_chars=50)
-
-    # Should return beginning of content as fallback
-    assert excerpt.startswith("Some content")
-
-
-def test_list_available_samples_returns_list():
-    """Test that list_available_samples returns a list."""
-    # Without initialization, should return empty list
-    result = kcl_samples.list_available_samples()
-    assert isinstance(result, list)
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "../evil.kcl",
+        "/absolute.kcl",
+        "C:/evil.kcl",
+        "parts\\evil.kcl",
+        "parts/../../evil.kcl",
+        "./main.kcl",
+        "parts//fan.kcl",
+        "%2e%2e/evil.kcl",
+        "%2fabsolute.kcl",
+    ],
+)
+def test_archive_rejects_unsafe_paths(filename: str):
+    with pytest.raises(ValueError, match="Unsafe"):
+        kcl_samples._parse_project_archive(_archive([(filename, "x = 1")]))
 
 
-def test_search_samples_empty_query():
-    """Test search with empty query returns error."""
-    result = kcl_samples.search_samples("")
-    assert len(result) == 1
-    assert "error" in result[0]
+def test_archive_rejects_symlink():
+    member = zipfile.ZipInfo("link.kcl")
+    member.create_system = 3
+    member.external_attr = (stat.S_IFLNK | 0o777) << 16
 
-    result = kcl_samples.search_samples("   ")
-    assert len(result) == 1
-    assert "error" in result[0]
+    with pytest.raises(ValueError, match="Unsafe"):
+        kcl_samples._parse_project_archive(_archive([(member, "main.kcl")]))
 
 
-def test_search_samples_returns_list():
-    """Test that search_samples returns a list."""
-    result = kcl_samples.search_samples("gear")
-    assert isinstance(result, list)
+def test_archive_rejects_duplicate_paths():
+    with pytest.raises(ValueError, match="duplicate"):
+        kcl_samples._parse_project_archive(
+            _archive([("main.kcl", "x = 1"), ("main.kcl", "x = 2")])
+        )
+
+
+def test_archive_limits_total_uncompressed_kcl_bytes(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(kcl_samples, "_MAX_KCL_BYTES", 8)
+    archive = _archive([("main.kcl", "x = 1"), ("part.kcl", "y = 2")])
+
+    with pytest.raises(ValueError, match="KCL files exceed"):
+        kcl_samples._parse_project_archive(archive)
+
+
+@pytest.mark.parametrize("content", [b"not a zip", _archive([("main.kcl", b"\xff")])])
+def test_archive_rejects_invalid_zip_or_source(content: bytes):
+    with pytest.raises((zipfile.BadZipFile, UnicodeDecodeError)):
+        kcl_samples._parse_project_archive(content)
+
+
+@pytest.mark.asyncio
+async def test_get_sample_downloads_and_caches_kcl_files(
+    httpx_mock: HTTPXMock, samples_index: KCLSamples
+):
+    httpx_mock.add_response(
+        url=_DOWNLOAD_URL,
+        content=_archive(
+            [
+                ("main.kcl", 'import "parts/fan.kcl" as fan\n'),
+                ("parts/fan.kcl", "x = 1"),
+            ]
+        ),
+    )
+    assert kcl_samples.list_available_samples()[0]["multipleFiles"] is False
+
+    with use_credentials(
+        ZooCredentials(token="caller-token", base_url="https://private.example")
+    ):
+        result = await kcl_samples.get_sample_content(_PROJECT_ID)
+    assert result is not None
+    assert result["name"] == _PROJECT_ID
+    assert result["multipleFiles"] is True
+    assert [file["filename"] for file in result["files"]] == [
+        "main.kcl",
+        "parts/fan.kcl",
+    ]
+    assert await kcl_samples.get_sample_content(_PROJECT_ID) == result
+    assert kcl_samples.list_available_samples()[0]["multipleFiles"] is True
+    assert kcl_samples.search_samples("gear")[0]["multipleFiles"] is True
+    assert len(httpx_mock.get_requests()) == 1
+    assert "authorization" not in httpx_mock.get_requests()[0].headers
+
+
+@pytest.mark.asyncio
+async def test_deleted_sample_is_not_cached(
+    httpx_mock: HTTPXMock, samples_index: KCLSamples
+):
+    httpx_mock.add_response(url=_DOWNLOAD_URL, status_code=404)
+
+    assert await kcl_samples.get_sample_content(_PROJECT_ID) is None
+    assert samples_index.file_index == {}
+
+
+@pytest.mark.asyncio
+async def test_download_failure_does_not_cache_files(
+    httpx_mock: HTTPXMock, samples_index: KCLSamples
+):
+    httpx_mock.add_response(url=_DOWNLOAD_URL, status_code=503)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await kcl_samples.get_sample_content(_PROJECT_ID)
+    assert samples_index.file_index == {}
+
+
+@pytest.mark.asyncio
+async def test_download_rejects_redirect(
+    httpx_mock: HTTPXMock, samples_index: KCLSamples
+):
+    httpx_mock.add_response(
+        url=_DOWNLOAD_URL, status_code=302, headers={"location": "https://example.com"}
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await kcl_samples.get_sample_content(_PROJECT_ID)
+    assert samples_index.file_index == {}
+
+
+@pytest.mark.asyncio
+async def test_download_limits_archive_size(
+    httpx_mock: HTTPXMock, samples_index: KCLSamples, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(kcl_samples, "_MAX_ARCHIVE_BYTES", 10)
+    httpx_mock.add_response(
+        url=_DOWNLOAD_URL, content=_archive([("main.kcl", "x = 1")])
+    )
+
+    with pytest.raises(ValueError, match="archive exceeds"):
+        await kcl_samples.get_sample_content(_PROJECT_ID)
+    assert samples_index.file_index == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["unknown-project", "../main", "%2e%2e", ""])
+async def test_unknown_or_unsafe_name_makes_no_request(
+    name: str, samples_index: KCLSamples
+):
+    assert await kcl_samples.get_sample_content(name) is None
+
+
+def test_empty_queries_and_search_by_title(samples_index: KCLSamples):
+    assert "error" in kcl_samples.search_samples("")[0]
+    assert "error" in kcl_samples.search_samples("   ")[0]
+    assert kcl_samples.search_samples("missing") == []
+    assert kcl_samples.search_samples("gear")[0]["name"] == _PROJECT_ID

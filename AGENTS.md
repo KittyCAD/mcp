@@ -30,7 +30,7 @@ This is a Model Context Protocol (MCP) server that exposes Zoo CAD and KCL utili
 - `src/zoo_mcp/server.py` - `MCPServer` (mcp 2.x) server that defines the MCP interface and registers all `@mcp.tool()` entry points (KCL execution, snapshots, physical-property calculations, KCL docs/samples lookup, org datasets, etc.). Owns the lifespan hook that lazily populates the KCL docs/samples indexes.
 - `src/zoo_mcp/zoo_tools.py` - Implementations of the CAD-oriented tools that talk to Zoo's KittyCAD API (executing/exporting KCL, file conversion, snapshots, physical properties, sketch constraint status, lint-and-fix, org dataset listing/semantic search, etc.).
 - `src/zoo_mcp/kcl_docs.py` - Fetches and indexes KCL documentation from `zoo.dev` (via the sitemap, with `Accept: text/markdown`) and exposes list/search/get helpers backed by a lazily-initialized index.
-- `src/zoo_mcp/kcl_samples.py` - Fetches and indexes KCL samples from `zoo.dev/aquarium` and exposes list/search/get helpers; per-sample file contents are parsed from the per-sample markdown pages on demand.
+- `src/zoo_mcp/kcl_samples.py` - Indexes public Aquarium projects through the Zoo API and exposes list/search/get helpers. Sample names are public project IDs; KCL files are read from ZIP downloads on demand, preserving relative paths.
 - `src/zoo_mcp/utils/data_retrieval_utils.py` - Shared helpers for fetching `zoo.dev` pages safely (path validation, redirect-blocking fetches, markdown excerpting) used by `kcl_docs.py` and `kcl_samples.py`.
 - `src/zoo_mcp/utils/image_utils.py` - Image utilities used by the `snapshot` tool (encoding to MCP `ImageContent`, saving to disk, tiling up to four views into a collage, resizing).
 - `src/zoo_mcp/__init__.py` - Package initialization: configures logging and the shared TLS context, and defines `ZooMCPException` and `ZooMCPTimeoutError`.
@@ -40,24 +40,24 @@ This is a Model Context Protocol (MCP) server that exposes Zoo CAD and KCL utili
 - `kittycad` - Official Zoo API client for accessing KCL execution and org-dataset endpoints
 - `kcl` - Python bindings for the KCL language used by the execute/format/lint tools
 - `mcp[cli]` - Model Context Protocol framework for AI assistant integration
-- `httpx` - Async HTTP client used to fetch KCL docs/samples from `zoo.dev`
+- `httpx` - Async HTTP client used to fetch KCL docs from `zoo.dev` and public Aquarium project downloads from the Zoo API
 - `pytest-asyncio` - For testing async functions
 
 ### API Integration
-The server connects to Zoo's KCL execution APIs using the KittyCAD client, and to `zoo.dev` markdown pages via `httpx` for the docs/samples indexes. All KittyCAD requests require a valid `ZOO_API_TOKEN` environment variable. Notable flows:
+The server connects to Zoo's KCL execution APIs using the KittyCAD client, and to `zoo.dev` markdown pages via `httpx` for the docs index. Authenticated tools require a valid `ZOO_API_TOKEN` environment variable; public Aquarium projects are indexed and downloaded without credentials. Notable flows:
 - KCL execution / export tools (in `zoo_tools.py`) use the `kcl` bindings and the KittyCAD client's modeling/execution endpoints.
 - Modeling tools operate on persistent sessions, with at most one session open per server process. Callers use `get_modeling_sessions` to recover the active ID after reconnecting or `start_modeling_session` when none exists, then populate the session through `execute_kcl`, `exec_kcl_project`, or `import_cad_file`. They pass its `session_id` to `snapshot` and query tools and call `stop_modeling_session` when finished. `zoo_snapshot` then loops camera → zoom-to-fit → take-snapshot on that session and tiles the results.
 - Every modeling tool call is bounded by `zoo_tools.MODELING_COMMAND_TIMEOUT`, a monotonic wall-clock budget shared by every websocket send and read the call makes. It cannot be a per-read timeout: a live session interleaves unsolicited frames every ~10s, and each one would restart a per-read timeout, so a stalled import blocked its caller for as long as the connection lived. Expiry raises `ZooMCPTimeoutError` (a `ZooMCPException` subclass, so it is retryable but distinguishable from an engine rejection), aborts the socket, and evicts the session. Modeling sessions use an asynchronous websocket authenticated from the same loop-local `AsyncKittyCAD` client configuration as the REST tools, so pending engine responses yield to other MCP calls and cancellation.
 - Org datasets (`list_org_datasets`, `search_org_dataset_semantic`) call KittyCAD's org-datasets endpoints, with a raw-HTTP fallback when the SDK's pydantic models reject newly-added backend fields. Listing passes `lookup_enabled=true`, so datasets an org has excluded from lookup are never surfaced or searched.
-- KCL docs/samples (`list_kcl_docs`, `search_kcl_docs`, `get_kcl_doc`, `list_kcl_samples`, `search_kcl_samples`, `get_kcl_sample`) read from the in-memory indexes populated lazily from `zoo.dev` (sitemap-driven for docs, `/aquarium` index for samples).
+- KCL docs/samples (`list_kcl_docs`, `search_kcl_docs`, `get_kcl_doc`, `list_kcl_samples`, `search_kcl_samples`, `get_kcl_sample`) read from lazily populated in-memory indexes. Docs discovery uses the `zoo.dev` sitemap; samples use the SDK's paginated public-project listing on `api.zoo.dev` and binary ZIP downloads. Public samples always use production without caller credentials, so the shared cache cannot mix authenticated or alternate-host data.
 
 ### Testing Strategy
 Tests live in `tests/` and are split across:
 - `tests/test_server.py` - Exercises every MCP tool end-to-end through `mcp.call_tool`, mixing real KCL/CAD calls with mocked KittyCAD responses for org-dataset tools, and synthetic in-memory indexes for KCL docs/samples tools.
-- `tests/test_docs.py`, `tests/test_samples.py` - Unit tests for the docs categorization / title extraction and the samples markdown index/page parsers.
+- `tests/test_docs.py`, `tests/test_samples.py` - Unit tests for docs categorization / title extraction and public sample pagination, ZIP parsing, download limits, and caching.
 - `tests/test_data_retrieval_utils.py` - Unit tests for the shared `zoo.dev` fetch helpers (path safety, excerpt extraction, redirect-blocking fetch, markdown `Accept` header).
 - `tests/test_modeling_commands.py`, `tests/test_server_modeling_commands.py` - Mocked-transport tests for the modeling websocket layer, including the exact command sequence `zoo_snapshot` sends, how the `snapshot` tool resolves its `camera_view` argument, and the command deadline (success, engine failure, connection close, a stream of unmatched frames, and no-response timeout). The deadline tests drive a fake monotonic clock so a 300s budget is exercised without a 300s test.
-- `tests/test_live_zoo_dev.py` - Marked `live`; hits `zoo.dev` end-to-end for the docs and samples tools so breakages in the upstream markdown shape are caught. Deselect with `-m "not live"` when offline.
+- `tests/test_live_zoo_dev.py` - Marked `live`; exercises the docs tools against `zoo.dev` and the samples tools against the public projects API. Deselect with `-m "not live"` when offline.
 - All async tests use `pytest-asyncio`.
 
 ## Package Structure
