@@ -1929,6 +1929,91 @@ async def test_mock_execute_kcl_preserves_warning_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("inline_code", [False, True], ids=["path", "code"])
+@pytest.mark.parametrize("highlight_edges", [False, True])
+async def test_cpu_kcl_snapshots_and_measurements(
+    cube_kcl, inline_code, highlight_edges
+):
+    tools = zoo_mcp.zoo_tools
+    result = await tools.zoo_execute_kcl(
+        kcl_code=Path(cube_kcl).read_text() if inline_code else None,
+        kcl_path=None if inline_code else cube_kcl,
+        snapshot_request=tools.KclSnapshotRequest(
+            ("front", "right"), highlight_edges=highlight_edges
+        ),
+        physical_properties_request=tools.KclPhysicalPropertiesRequest(("volume",)),
+    )
+    assert result.ok, result.message
+    assert result.inspection is not None
+    inspection = result.inspection
+    assert inspection.rendered_snapshots_status == "succeeded", (
+        inspection.snapshot_errors
+    )
+    assert inspection.completed_snapshot_views == ["front", "right"]
+    assert inspection.rendered_snapshot is not None
+    image = PILImage.open(io.BytesIO(inspection.rendered_snapshot))
+    assert image.width > 0 and image.height > 0
+    assert inspection.physical_analysis_status == "succeeded"
+    assert inspection.physical_properties is not None
+    volume = inspection.physical_properties["volume"]
+    assert isinstance(volume, dict)
+    assert volume["value"] > 0
+
+
+@pytest.mark.asyncio
+async def test_cpu_session_preserves_camera_and_selection(cube_kcl):
+    tools = zoo_mcp.zoo_tools
+    session_id = await tools.zoo_start_modeling_session()
+    try:
+        execution = await tools.zoo_exec_kcl_project(
+            session_id=session_id, kcl_path=cube_kcl
+        )
+        assert execution.ok, execution.message
+        assert isinstance(execution, tools.ResultZooExecuteKclRemote)
+        graph = json.loads(Path(execution.path_artifact_graph).read_text())
+        face_id = next(
+            node["id"] for node in graph["map"].values() if node["type"] == "wall"
+        )
+        await tools.zoo_snapshot(session_id=session_id)
+        for name, arguments in (
+            ("set_selection_filter", {"entity_types": ["face"]}),
+            ("select_entities", {"entity_ids": [face_id]}),
+            ("highlight_set_entities", {"entity_ids": [face_id]}),
+            ("center_camera_on_selection", {}),
+        ):
+            await mcp.call_tool(name, arguments={"session_id": session_id, **arguments})
+
+        selected = await tools.zoo_snapshot(session_id=session_id, zoom=False)
+        repeated = await tools.zoo_snapshot(session_id=session_id, zoom=False)
+        assert selected == repeated, "Repeated snapshots must retain camera framing"
+        for name in ("select_entities", "highlight_set_entities"):
+            await mcp.call_tool(
+                name, arguments={"session_id": session_id, "entity_ids": []}
+            )
+        cleared = await tools.zoo_snapshot(session_id=session_id, zoom=False)
+        assert selected != cleared, "Selections and highlights must remain visible"
+        await mcp.call_tool(
+            "entity_get_index",
+            arguments={"session_id": session_id, "entity_id": face_id},
+        )
+    finally:
+        await tools.zoo_stop_modeling_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_cpu_session_imports_and_snapshots_cad(cube_stp):
+    tools = zoo_mcp.zoo_tools
+    session_id = await tools.zoo_start_modeling_session()
+    try:
+        object_id = await tools.zoo_import_cad_file(session_id, cube_stp)
+        assert object_id
+        image = await tools.zoo_snapshot(session_id=session_id)
+        assert PILImage.open(io.BytesIO(image)).format == "JPEG"
+    finally:
+        await tools.zoo_stop_modeling_session(session_id)
+
+
+@pytest.mark.asyncio
 async def test_snapshot_from_a_modeling_session(populated_modeling_session: str):
     response = await mcp.call_tool(
         "snapshot", arguments={"session_id": populated_modeling_session}

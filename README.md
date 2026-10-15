@@ -166,6 +166,12 @@ session with `execute_kcl`, `exec_kcl_project`, or `import_cad_file`; pass the
 same `session_id` to `snapshot` and modeling tools; then call
 `stop_modeling_session` when finished.
 
+KCL execution and persistent modeling sessions use the CPU engine pool. Isolated
+KCL snapshots temporarily enable CPU rendering. Persistent sessions initialize
+rendering on the first snapshot, selection, highlight, or camera tool and retain
+it until the session is stopped, preserving visual state across calls. Exports,
+measurements, and geometry queries do not initialize graphics.
+
 As of 0.28.0, `execute_kcl` and `exec_kcl_project` run mock execution before real
 execution and return separate `mock_preflight` and `real_execution` objects.
 Each contains `status` (`succeeded`, `failed`, or `not_run`), `message`, and
