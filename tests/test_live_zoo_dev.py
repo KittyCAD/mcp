@@ -1,7 +1,7 @@
-"""Live integration tests against zoo.dev for the KCL docs/samples pipeline.
+"""Live integration tests for KCL docs and public Aquarium samples.
 
-These exercise the real fetch + parse + search/get path end-to-end so that
-breakage in zoo.dev's markdown shape (or our parsers) is caught.
+These exercise real fetch + search/get paths against zoo.dev documentation
+and the Zoo public projects API.
 
 Marked ``live`` so they can be deselected locally with ``pytest -m 'not live'``
 when offline.
@@ -51,14 +51,16 @@ async def real_docs():
 
 @pytest_asyncio.fixture(scope="module")
 async def real_samples():
-    """Fetch the samples index from zoo.dev once for the module."""
+    """Fetch the public Aquarium project index once for the module."""
     saved = KCLSamples._instance
     KCLSamples._instance = None
     try:
         await KCLSamples.initialize()
-        assert KCLSamples._instance is not None
+        assert KCLSamples._instance is not None, (
+            "Zoo public projects API returned no samples"
+        )
         assert len(KCLSamples._instance.manifest) > 0, (
-            f"{ZOO_BASE_URL} returned no samples — /aquarium markdown shape likely changed"
+            "Zoo public projects API returned no samples"
         )
         yield KCLSamples._instance
     finally:
@@ -167,6 +169,5 @@ async def test_live_get_kcl_sample_from_listing(real_samples):
     assert isinstance(result, dict)
     assert result["name"] == name
     assert result["files"], f"no files returned for sample {name!r}"
-    main = next((f for f in result["files"] if f["filename"] == "main.kcl"), None)
-    assert main is not None, f"sample {name!r} is missing main.kcl"
-    assert len(main["content"]) > 0
+    assert all(f["filename"].lower().endswith(".kcl") for f in result["files"])
+    assert any(f["content"] for f in result["files"])

@@ -1,103 +1,57 @@
 """KCL Samples fetching and search.
 
-This module fetches the KCL samples index from zoo.dev and provides search
-functionality for LLMs. The index is loaded lazily — server.py kicks off the
-fetch in the background when the MCP server's lifespan starts, and tools
-``await KCLSamples.initialize()`` before serving so the first call also
-bootstraps if the lifespan hook hasn't run yet. Repeat calls are no-ops once
-the index is loaded.
-
-Both the index page (``/aquarium``) and per-sample pages
-(``/aquarium/<sample>``) are requested with ``Accept: text/markdown``.
-Per-sample pages embed each KCL file as a ``### <filename>.kcl`` section
-with a fenced ```kcl`` ... ``` `` block, which we parse to recover file
-contents on demand.
+Public Aquarium project metadata is indexed lazily from the Zoo API. Sample
+names are public project IDs. KCL files are read on demand from ZIP downloads,
+preserving project-relative paths. These endpoints do not need credentials;
+the shared index always uses production public projects rather than a caller's
+authenticated or alternate-host data.
 """
 
 import asyncio
+import io
 import re
+import stat
+import zipfile
 from dataclasses import dataclass, field
 from typing import ClassVar
 
 import httpx
+from kittycad import AsyncKittyCAD
+from kittycad.client import DEFAULT_BASE_URL
 
-# pydantic requires typing_extensions.TypedDict (not typing.TypedDict) to build
-# schemas on Python < 3.12; the MCP tools expose these TypedDicts, so import the
-# backport for consistent behavior across 3.11-3.13.
+# pydantic requires typing_extensions.TypedDict on Python < 3.12.
 from typing_extensions import TypedDict
 
 from zoo_mcp import ctx, logger
-from zoo_mcp.utils.data_retrieval_utils import (
-    ZOO_BASE_URL,
-    extract_excerpt,
-    fetch_markdown,
-    is_safe_path_component,
-)
+from zoo_mcp.utils.data_retrieval_utils import extract_excerpt, is_safe_path_component
 
-_AQUARIUM_BASE_URL = f"{ZOO_BASE_URL}/aquarium"
+_PUBLIC_PROJECTS_URL = f"{DEFAULT_BASE_URL}/projects/public"
 
-# Only allow safe characters in sample names and filenames
+# Project files may have nested paths, spaces, and Unicode names, but must
+# remain project-relative. Sample identifiers must be safe URL components.
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.kcl$")
-
-# Index entries look like:
-#   - [Title](/aquarium/<slug>) - <description> (<Categories>)
-# The ``- <description>`` chunk and the trailing categories chunk are both
-# optional — if a future zoo.dev page lists a slug with no description we
-# still want to capture it. Description text may itself contain parens (e.g.
-# embedded URLs), so we strip the trailing ``(...)`` group anchored at
-# end-of-line in a separate pass.
-_INDEX_LINE_RE = re.compile(
-    r"^- \[(?P<title>[^\]]+)\]"
-    r"\(/aquarium/(?P<name>[A-Za-z0-9_-]+)\)"
-    r"(?:\s*-\s*(?P<rest>.*))?\s*$"
-)
-
-# Strips a trailing ``(Cat)`` or ``(Cat1, Cat2, ...)`` group from a
-# description. Each token must start with an uppercase letter and contain
-# only letters, so acronyms (``(API)``, ``(CAD)``) and ``(Manufacturing)``
-# are recognized but prose parentheticals (``(see foo)``,
-# ``(https://...)``) are deliberately left intact. Categories containing
-# digits (``(3D Models)``), hyphens (``(KCL-Std)``), or internal spaces
-# (``(Power Tools)``) will NOT be stripped and will leak into the
-# description verbatim — extend this pattern if zoo.dev introduces such
-# labels.
-_TRAILING_CATEGORIES_RE = re.compile(
-    r"\s*\((?P<cats>[A-Z][A-Za-z]*(?:,\s*[A-Z][A-Za-z]*)*)\)\s*$"
-)
-
-# Matches each "### <filename>.kcl" header followed by a ```kcl ... ``` block
-# inside an /aquarium/<sample> page.
-_FILE_BLOCK_RE = re.compile(
-    r"^###[ \t]+(?P<filename>[^\s/\\]+\.kcl)[ \t]*\n+"
-    r"```kcl[ \t]*\n(?P<content>.*?)\n```",
-    re.MULTILINE | re.DOTALL,
-)
+_SAFE_FILENAME_RE = re.compile(r"^[^\\\x00-\x1f\x7f:%]+\.[kK][cC][lL]$")
 
 
 class SampleMetadata(TypedDict):
-    """Metadata for a single KCL sample, derived from the /aquarium index."""
+    """Metadata for a public Aquarium project."""
 
     title: str
     description: str
-    # ``multipleFiles`` is best-effort: the /aquarium index doesn't expose
-    # file counts, so it starts ``False`` for every sample and is corrected
-    # in-place by ``get_sample_content`` once the per-sample page has been
-    # fetched and parsed. Callers reading this field from a list/search
-    # response should treat it as a hint and re-check via ``get_kcl_sample``
-    # if a reliable value is needed.
+    # The public listing doesn't expose file counts. This hint is corrected
+    # after get_sample_content downloads and counts the project's KCL files.
     multipleFiles: bool
 
 
 class SampleFile(TypedDict):
-    """A single file within a KCL sample."""
+    """A KCL source with its project-relative path."""
 
     filename: str
     content: str
 
 
 class SampleData(TypedDict):
-    """Complete data for a KCL sample including all files."""
+    """Complete data for a KCL sample including its KCL files."""
 
     name: str
     title: str
@@ -108,11 +62,9 @@ class SampleData(TypedDict):
 
 @dataclass
 class KCLSamples:
-    """Container for KCL samples data."""
+    """Container for public Aquarium projects and cached KCL sources."""
 
-    # Sample metadata indexed by sample directory name
     manifest: dict[str, SampleMetadata] = field(default_factory=dict)
-    # Parsed file contents indexed by sample name -> filename -> content
     file_index: dict[str, dict[str, str]] = field(default_factory=dict)
 
     _instance: ClassVar["KCLSamples | None"] = None
@@ -125,62 +77,36 @@ class KCLSamples:
 
     @classmethod
     async def initialize(cls) -> None:
-        """Initialize the samples index from zoo.dev. Repeat and concurrent calls are safe."""
+        """Initialize from public projects. Repeat and concurrent calls are safe."""
         if cls._instance is not None:
             return
         if cls._init_lock is None:
             cls._init_lock = asyncio.Lock()
         async with cls._init_lock:
             if cls._instance is None:
-                result = await _fetch_index_from_zoo_dev()
+                result = await _fetch_index_from_api()
                 if result.manifest:
                     cls._instance = result
 
 
-def _parse_index_markdown(markdown: str) -> dict[str, SampleMetadata]:
-    """Parse the /aquarium markdown index into a {name: metadata} mapping."""
-    manifest: dict[str, SampleMetadata] = {}
-    for line in markdown.splitlines():
-        m = _INDEX_LINE_RE.match(line)
-        if m is None:
-            continue
-
-        name = m.group("name")
-        if not is_safe_path_component(name, _SAFE_NAME_RE):
-            logger.warning(f"Rejected unsafe sample name from index: {name!r}")
-            continue
-
-        raw_rest = m.group("rest")
-        rest = raw_rest.strip() if raw_rest else ""
-        cats_match = _TRAILING_CATEGORIES_RE.search(rest)
-        if cats_match:
-            description = rest[: cats_match.start()].rstrip()
-        else:
-            description = rest
-
-        manifest[name] = SampleMetadata(
-            title=m.group("title").strip(),
-            description=description,
-            multipleFiles=False,
-        )
-
-    return manifest
-
-
-def _parse_aquarium_markdown(markdown: str) -> dict[str, str]:
-    """Extract ``filename -> content`` pairs from an /aquarium/<sample> page.
-
-    The page contains a ``## Files`` section followed by repeated
-    ``### <filename>.kcl`` headers, each immediately followed by a fenced
-    ```kcl`` ... ``` `` block holding that file's source.
-    """
+def _parse_project_archive(content: bytes) -> dict[str, str]:
+    """Read KCL sources from a ZIP in memory, without extracting any files."""
     files: dict[str, str] = {}
-    for match in _FILE_BLOCK_RE.finditer(markdown):
-        filename = match.group("filename")
-        if is_safe_path_component(filename, _SAFE_FILENAME_RE):
-            files[filename] = match.group("content")
-        else:
-            logger.warning(f"Rejected unsafe filename in markdown: {filename!r}")
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        for member in archive.infolist():
+            filename = member.orig_filename
+            if member.is_dir() or not filename.lower().endswith(".kcl"):
+                continue
+            if (
+                filename.startswith("/")
+                or not is_safe_path_component(filename, _SAFE_FILENAME_RE)
+                or stat.S_ISLNK(member.external_attr >> 16)
+                or filename in files
+            ):
+                raise ValueError(
+                    f"Unsafe or duplicate KCL path in sample: {filename!r}"
+                )
+            files[filename] = archive.read(member).decode("utf-8")
     return files
 
 
@@ -188,33 +114,41 @@ async def _fetch_sample_files(
     client: httpx.AsyncClient,
     sample_name: str,
 ) -> dict[str, str]:
-    """Fetch a sample's files from /aquarium/<sample_name> as markdown."""
-    url = f"{_AQUARIUM_BASE_URL}/{sample_name}"
-    markdown = await fetch_markdown(client, url, sample_name)
-    if markdown is None:
+    """Download a public project's KCL files as a ZIP response."""
+    # The SDK's download method currently JSON-decodes archive responses.
+    # Read the binary endpoint directly until it supports binary downloads.
+    response = await client.get(
+        f"{_PUBLIC_PROJECTS_URL}/{sample_name}/download",
+        params={"format": "zip"},
+        follow_redirects=False,
+    )
+    if response.status_code == 404:
         return {}
-    return _parse_aquarium_markdown(markdown)
+    response.raise_for_status()
+    return _parse_project_archive(response.content)
 
 
-async def _fetch_index_from_zoo_dev() -> KCLSamples:
-    """Fetch the samples index from zoo.dev and return a KCLSamples instance."""
+async def _fetch_index_from_api() -> KCLSamples:
+    """Index every page of production public Aquarium project metadata."""
     samples = KCLSamples()
+    logger.info("Fetching public Aquarium projects from %s...", DEFAULT_BASE_URL)
 
-    logger.info(f"Fetching KCL samples index from {ZOO_BASE_URL}...")
+    async with AsyncKittyCAD(
+        token="", base_url=DEFAULT_BASE_URL, timeout=30.0, verify_ssl=ctx
+    ) as client:
+        async for project in client.projects.list_public_projects(limit=100):
+            samples.manifest[str(project.id)] = SampleMetadata(
+                title=project.title,
+                description=project.description,
+                multipleFiles=False,
+            )
 
-    async with httpx.AsyncClient(timeout=30.0, verify=ctx) as client:
-        markdown = await fetch_markdown(client, _AQUARIUM_BASE_URL, "/aquarium")
-        if markdown is None:
-            return samples
-
-        samples.manifest = _parse_index_markdown(markdown)
-
-    logger.info(f"KCL samples index loaded with {len(samples.manifest)} samples")
+    logger.info("KCL samples index loaded with %d samples", len(samples.manifest))
     return samples
 
 
 async def initialize_samples_index() -> None:
-    """Initialize the samples index from zoo.dev."""
+    """Initialize the samples index from public Aquarium projects."""
     await KCLSamples.initialize()
 
 
@@ -222,14 +156,14 @@ def list_available_samples() -> list[dict]:
     """Return a list of all available KCL samples with basic info.
 
     Returns a list of dictionaries, each containing:
-    - name: The sample directory name (used to retrieve the sample)
+    - name: The public project ID (used to retrieve the sample)
     - title: Human-readable title
     - description: Brief description of the sample
     - multipleFiles: Whether the sample contains multiple KCL files.
 
-    Note on ``multipleFiles``: the /aquarium index page does not expose
-    file counts, so this field is ``False`` for any sample whose per-sample
-    page has not yet been fetched. It becomes accurate only after
+    Note on ``multipleFiles``: the public projects listing does not expose
+    file counts, so this field is ``False`` for any sample whose project
+    has not yet been downloaded. It becomes accurate only after
     ``get_kcl_sample`` has been called for that sample (which caches the
     parsed file list and updates the metadata in-place). Treat
     ``multipleFiles`` as a best-effort hint here; call ``get_kcl_sample``
@@ -268,7 +202,7 @@ def search_samples(query: str, max_results: int = 5) -> list[dict]:
 
     Returns:
         list[dict]: List of search results, each containing:
-            - name: The sample directory name (used to retrieve the sample)
+            - name: The public project ID (used to retrieve the sample)
             - title: Human-readable title
             - description: Brief description of the sample
             - multipleFiles: Whether the sample contains multiple KCL files.
@@ -327,12 +261,12 @@ async def get_sample_content(sample_name: str) -> SampleData | None:
     search_kcl_samples() to find samples by keyword.
 
     Args:
-        sample_name (str): The sample directory name
-            (e.g., "ball-bearing", "axial-fan")
+        sample_name (str): The public project ID
+            returned by list_kcl_samples() or search_kcl_samples()
 
     Returns:
         SampleData | None: A dictionary containing:
-            - name: The sample directory name
+            - name: The public project ID
             - title: Human-readable title
             - description: Brief description
             - multipleFiles: Whether the sample contains multiple files
@@ -358,8 +292,8 @@ async def get_sample_content(sample_name: str) -> SampleData | None:
             return None
 
         samples.file_index[sample_name] = file_contents
-        # The index doesn't tell us file counts; record the real value now
-        # that we've parsed the per-sample page.
+        # The listing doesn't tell us file counts; record the real value now
+        # that we've downloaded the project.
         metadata["multipleFiles"] = len(file_contents) > 1
 
     files_list: list[SampleFile] = []

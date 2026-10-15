@@ -142,58 +142,66 @@ from zoo_mcp.zoo_tools import (
     zoo_visualize_sketch,
 )
 
+_KCLIndex = type[KCLDocs] | type[KCLSamples]
+_kcl_index_tasks: dict[_KCLIndex, asyncio.Task[None]] = {}
+
+
+def _get_kcl_index_task(index: _KCLIndex) -> asyncio.Task[None]:
+    """Share an index's in-flight attempt and retry it after failure."""
+    task = _kcl_index_tasks.get(index)
+    if task is None or (task.done() and index._instance is None):
+        task = asyncio.create_task(index.initialize(), name=index.__name__)
+
+        def log_failure(completed: asyncio.Task[None]) -> None:
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                logger.warning(
+                    "Failed to initialize %s index: %s", index.__name__, error
+                )
+
+        task.add_done_callback(log_failure)
+        _kcl_index_tasks[index] = task
+    return task
+
 
 async def _init_kcl_indexes() -> None:
-    """Populate the KCL docs and samples indexes from zoo.dev concurrently.
-
-    Each index is initialized independently — a failure in one does not
-    prevent the other from succeeding.
-    """
-
-    async def _safe(coro, label: str) -> None:
-        try:
-            await coro
-        except Exception as e:
-            logger.warning(f"Failed to initialize {label} index: {e}")
-
+    """Warm both indexes independently; tools observe their own fetch errors."""
     await asyncio.gather(
-        _safe(KCLDocs.initialize(), "KCL docs"),
-        _safe(KCLSamples.initialize(), "KCL samples"),
+        _get_kcl_index_task(KCLDocs),
+        _get_kcl_index_task(KCLSamples),
+        return_exceptions=True,
     )
 
 
-_kcl_index_task: asyncio.Task[None] | None = None
-
-
-async def _ensure_kcl_indexes() -> None:
-    """Ensure KCL indexes are initialized, kicking off the fetch on first call.
-
-    Subsequent calls await the same in-flight task, so initialization
-    runs at most once per process.
-    """
-    global _kcl_index_task
-    if _kcl_index_task is None:
-        _kcl_index_task = asyncio.create_task(_init_kcl_indexes())
-    await _kcl_index_task
+async def _ensure_kcl_index(index: _KCLIndex) -> None:
+    """Await only the requested index, keeping shared work alive on cancellation."""
+    if index._instance is not None:
+        return
+    await asyncio.shield(_get_kcl_index_task(index))
+    if index._instance is None:
+        label = "KCL documentation" if index is KCLDocs else "KCL samples"
+        raise RuntimeError(f"{label} index is unavailable; please retry")
 
 
 @asynccontextmanager
 async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
     """Eagerly start index population when the server starts.
 
-    Tools still ``await _ensure_kcl_indexes()`` so they wait for completion
-    if invoked before the background fetch finishes.
+    Each tool waits only for its own index if its background fetch is unfinished.
     """
-    global _kcl_index_task
-    if _kcl_index_task is None:
-        _kcl_index_task = asyncio.create_task(_init_kcl_indexes())
+    startup_task = asyncio.create_task(_init_kcl_indexes())
     try:
         yield
     finally:
         await zoo_stop_all_modeling_sessions()
-        if _kcl_index_task is not None and not _kcl_index_task.done():
-            _kcl_index_task.cancel()
-        _kcl_index_task = None
+        tasks = [startup_task, *_kcl_index_tasks.values()]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        _kcl_index_tasks.clear()
         KCLDocs._instance = None
         KCLSamples._instance = None
 
@@ -1574,16 +1582,18 @@ async def list_kcl_docs() -> dict | str:
     retrieved using get_kcl_doc().
 
     Returns:
-        dict | str: Categories mapped to lists of available documentation paths.
-        If there was an error, returns an error message string.
+        dict: Categories mapped to lists of available documentation paths.
+
+    Raises:
+        ToolError: Documentation could not be fetched; the call can be retried.
     """
     logger.info("list_kcl_docs tool called")
     try:
-        await _ensure_kcl_indexes()
+        await _ensure_kcl_index(KCLDocs)
         return list_available_docs()
     except Exception as e:
         logger.error("list_kcl_docs tool called with error: %s", e)
-        return f"There was an error listing KCL documentation: {e}"
+        raise ToolError(f"There was an error listing KCL documentation: {e}") from e
 
 
 @mcp.tool()
@@ -1598,20 +1608,22 @@ async def search_kcl_docs(query: str, max_results: int = 5) -> list[dict] | str:
         max_results (int): Maximum number of results to return (default: 5).
 
     Returns:
-        list[dict] | str: List of search results, each containing:
+        list[dict]: List of search results, each containing:
             - path: The documentation file path
             - title: The document title (from first heading)
             - excerpt: A relevant excerpt with the match highlighted in context
             - match_count: Number of times the query appears in the document
-            If there was an error, returns an error message string.
+
+    Raises:
+        ToolError: Documentation could not be fetched; the call can be retried.
     """
     logger.info("search_kcl_docs tool called with query: %s", query)
     try:
-        await _ensure_kcl_indexes()
+        await _ensure_kcl_index(KCLDocs)
         return search_docs(query, max_results)
     except Exception as e:
         logger.error("search_kcl_docs tool called with error: %s", e)
-        return f"There was an error searching KCL documentation: {e}"
+        raise ToolError(f"There was an error searching KCL documentation: {e}") from e
 
 
 @mcp.tool()
@@ -1628,47 +1640,51 @@ async def get_kcl_doc(doc_path: str) -> str:
 
     Returns:
         str: The full Markdown content of the documentation file,
-            or an error message if not found. If there was an error, returns an error message string.
+            or an error message if not found.
+
+    Raises:
+        ToolError: Documentation could not be fetched; the call can be retried.
     """
     logger.info("get_kcl_doc tool called for path: %s", doc_path)
     try:
-        await _ensure_kcl_indexes()
+        await _ensure_kcl_index(KCLDocs)
         content = get_doc_content(doc_path)
         if content is None:
             return f"Documentation not found: {doc_path}. Use list_kcl_docs() to see available paths."
         return content
     except Exception as e:
         logger.error("get_kcl_doc tool called with error: %s", e)
-        return f"There was an error retrieving KCL documentation: {e}"
+        raise ToolError(f"There was an error retrieving KCL documentation: {e}") from e
 
 
 @mcp.tool()
 async def list_kcl_samples() -> list[dict] | str:
     """List all available KCL sample projects.
 
-    Returns a list of all available KCL code samples from the Zoo samples
-    repository. Each sample demonstrates a specific CAD modeling technique
-    or creates a particular 3D model.
+    Returns the public Aquarium projects from the Zoo API. Each sample
+    demonstrates a CAD modeling technique or creates a particular 3D model.
 
     Returns:
-        list[dict] | str: List of sample information, each containing:
-            - name: The sample directory name (use with get_kcl_sample)
+        list[dict]: List of sample information, each containing:
+            - name: The public project ID (use with get_kcl_sample)
             - title: Human-readable title
             - description: Brief description of what the sample creates
             - multipleFiles: Whether the sample contains multiple KCL files.
-              Best-effort hint only. The /aquarium index doesn't expose file
+              Best-effort hint only. The public listing doesn't expose file
               counts, so this is ``False`` for any sample that has not yet
               been fetched via get_kcl_sample. Call get_kcl_sample if you
               need a reliable answer.
-            If there was an error, returns an error message string.
+
+    Raises:
+        ToolError: The sample index could not be fetched; the call can be retried.
     """
     logger.info("list_kcl_samples tool called")
     try:
-        await _ensure_kcl_indexes()
+        await _ensure_kcl_index(KCLSamples)
         return list_available_samples()
     except Exception as e:
         logger.error("list_kcl_samples tool called with error: %s", e)
-        return f"There was an error listing KCL samples: {e}"
+        raise ToolError(f"There was an error listing KCL samples: {e}") from e
 
 
 @mcp.tool()
@@ -1683,8 +1699,8 @@ async def search_kcl_samples(query: str, max_results: int = 5) -> list[dict] | s
         max_results (int): Maximum number of results to return (default: 5).
 
     Returns:
-        list[dict] | str: List of search results, each containing:
-            - name: The sample directory name (use with get_kcl_sample)
+        list[dict]: List of search results, each containing:
+            - name: The public project ID (use with get_kcl_sample)
             - title: Human-readable title
             - description: Brief description of the sample
             - multipleFiles: Whether the sample contains multiple KCL files.
@@ -1692,54 +1708,58 @@ async def search_kcl_samples(query: str, max_results: int = 5) -> list[dict] | s
               caveat. Call get_kcl_sample if you need a reliable answer.
             - match_count: Number of times the query appears in title/description
             - excerpt: A relevant excerpt with the match in context
-            If there was an error, returns an error message string.
+
+    Raises:
+        ToolError: The sample index could not be fetched; the call can be retried.
     """
     logger.info("search_kcl_samples tool called with query: %s", query)
     try:
-        await _ensure_kcl_indexes()
+        await _ensure_kcl_index(KCLSamples)
         return search_samples(query, max_results)
     except Exception as e:
         logger.error("search_kcl_samples tool called with error: %s", e)
-        return f"There was an error searching KCL samples: {e}"
+        raise ToolError(f"There was an error searching KCL samples: {e}") from e
 
 
 @mcp.tool()
 async def get_kcl_sample(sample_name: str) -> SampleData | str:
     """Get the full content of a specific KCL sample including all files.
 
-    Retrieves all KCL files that make up a sample project. Some samples
-    consist of a single main.kcl file, while others have multiple files
-    (e.g., parameters.kcl, components, etc.).
+    Downloads a public Aquarium project and retrieves its KCL files with
+    their project-relative paths, including files in subdirectories.
 
     Use list_kcl_samples() to see available sample names, or
     search_kcl_samples() to find samples by keyword.
 
     Args:
-        sample_name (str): The sample directory name
-            (e.g., "ball-bearing", "axial-fan", "gear")
+        sample_name (str): The public project ID returned by list_kcl_samples()
+            or search_kcl_samples().
 
     Returns:
         SampleData | str: A SampleData dictionary containing:
-            - name: The sample directory name
+            - name: The public project ID
             - title: Human-readable title
             - description: Brief description
             - multipleFiles: Whether the sample contains multiple files.
               Reliable here (unlike in list_kcl_samples / search_kcl_samples),
-              because this tool fetches the per-sample page and counts the
-              parsed files.
-            - files: List of SampleFile dictionaries, each with 'filename' and 'content'
-        Returns an error message string if the sample is not found. If there was an error, returns an error message string.
+              because this tool downloads the project and counts its KCL files.
+            - files: List of SampleFile dictionaries, each with a project-relative
+              'filename' and its 'content'
+        Returns an error message string if the sample is not found.
+
+    Raises:
+        ToolError: The sample could not be fetched; the call can be retried.
     """
     logger.info("get_kcl_sample tool called for sample: %s", sample_name)
     try:
-        await _ensure_kcl_indexes()
+        await _ensure_kcl_index(KCLSamples)
         sample = await get_sample_content(sample_name)
         if sample is None:
             return f"Sample not found: {sample_name}. Use list_kcl_samples() to see available samples."
         return sample
     except Exception as e:
         logger.error("get_kcl_sample tool called with error: %s", e)
-        return f"There was an error retrieving KCL sample: {e}"
+        raise ToolError(f"There was an error retrieving KCL sample: {e}") from e
 
 
 def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:
