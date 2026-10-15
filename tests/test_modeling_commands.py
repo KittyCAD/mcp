@@ -15,6 +15,7 @@ from kittycad.models import (
     ModelingCmd,
     StepImportTargetRepresentation,
     TakeSnapshot,
+    ToggleGraphics,
     WebSocketRequest,
     WebSocketResponse,
 )
@@ -45,6 +46,9 @@ from kittycad.models.ok_modeling_cmd_response import (
 from kittycad.models.ok_modeling_cmd_response import (
     OptionEntityGetIndex as ResponseEntityGetIndex,
 )
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionToggleGraphics as ResponseToggleGraphics,
+)
 from kittycad.models.ok_web_socket_response_data import (
     ModelingData,
     ModelingSessionDataData,
@@ -54,6 +58,7 @@ from kittycad.models.ok_web_socket_response_data import (
 )
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
+from pydantic import ValidationError
 from websockets.exceptions import ConnectionClosedError
 
 from zoo_mcp import ZooMCPException, zoo_tools
@@ -708,19 +713,8 @@ async def test_toggle_graphics_matches_its_response(enabled):
     websocket = AsyncMock()
 
     async def recv():
-        request = json.loads(websocket.send.call_args.args[0])
-        return json.dumps(
-            {
-                "success": True,
-                "request_id": request["cmd_id"],
-                "resp": {
-                    "type": "modeling",
-                    "data": {
-                        "modeling_response": {"type": "toggle_graphics", "data": {}}
-                    },
-                },
-            }
-        )
+        request = _sent_request(websocket)
+        return _ok_frame(request.cmd_id, ResponseToggleGraphics(data=ToggleGraphics()))
 
     frames = iter(
         [
@@ -748,6 +742,25 @@ async def test_toggle_graphics_matches_its_response(enabled):
         "graphics_enabled": enabled,
     }
     assert websocket.recv.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_toggle_graphics_rejects_malformed_response():
+    websocket = AsyncMock()
+
+    async def recv():
+        request = _sent_request(websocket)
+        frame = json.loads(
+            _ok_frame(request.cmd_id, ResponseToggleGraphics(data=ToggleGraphics()))
+        )
+        del frame["resp"]["data"]["modeling_response"]["data"]
+        return json.dumps(frame)
+
+    websocket.recv.side_effect = recv
+    with pytest.raises(ValidationError, match="data"):
+        await zoo_tools._toggle_modeling_graphics(
+            cast(Any, websocket), True, zoo_tools._Deadline()
+        )
 
 
 @pytest.mark.asyncio
@@ -1583,8 +1596,6 @@ async def test_rejected_handshake_captures_fallback_header(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_trace_observation_preserves_sdk_validation_error():
-    from pydantic import ValidationError
-
     websocket = AsyncMock()
     websocket.recv.return_value = "invalid JSON"
     with pytest.raises(ValidationError):

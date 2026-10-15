@@ -92,6 +92,7 @@ from kittycad.models.modeling_cmd import (
     OptionSetOrderIndependentTransparency,
     OptionSetSelectionFilter,
     OptionTakeSnapshot,
+    OptionToggleGraphics,
     OptionViewIsometric,
     OptionZoomToFit,
 )
@@ -121,6 +122,9 @@ from kittycad.models.ok_modeling_cmd_response import (
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionTakeSnapshot as ResponseTakeSnapshot,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionToggleGraphics as ResponseToggleGraphics,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionViewIsometric as ResponseViewIsometric,
@@ -3648,43 +3652,14 @@ async def zoo_execute_modeling_command(
 async def _toggle_modeling_graphics(
     ws: ClientConnection, enabled: bool, deadline: _Deadline
 ) -> None:
-    """Toggle CPU rendering; KittyCAD's generated SDK lacks this command."""
-    command_id = str(uuid4())
-    description = "enable graphics" if enabled else "disable graphics"
-    await _send_modeling_frame(
+    """Enable or disable CPU rendering through the typed modeling transport."""
+    await _send_modeling_command(
         ws,
-        json.dumps(
-            {
-                "type": "modeling_cmd_req",
-                "cmd_id": command_id,
-                "cmd": {"type": "toggle_graphics", "graphics_enabled": enabled},
-            }
-        ),
+        ModelingCmd(OptionToggleGraphics(graphics_enabled=enabled)),
+        ResponseToggleGraphics,
+        "enable graphics" if enabled else "disable graphics",
         deadline,
-        description,
     )
-    while True:
-        raw = await _recv_modeling_raw_frame(ws, deadline, description)
-        response = json.loads(raw)
-        request_id = response.get("request_id")
-        if not response.get("success", False):
-            if request_id is None or request_id == command_id:
-                raise ZooMCPException(
-                    _format_websocket_failure(
-                        WebSocketResponse.model_validate(response).root
-                    )
-                )
-            continue
-        if request_id != command_id:
-            continue
-        payload = response.get("resp", {})
-        if (
-            payload.get("type") != "modeling"
-            or payload.get("data", {}).get("modeling_response", {}).get("type")
-            != "toggle_graphics"
-        ):
-            raise ZooMCPException(f"Received an unexpected {description} response")
-        return
 
 
 async def _ensure_modeling_graphics(ws: ClientConnection, deadline: _Deadline) -> None:
