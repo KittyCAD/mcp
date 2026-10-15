@@ -1991,32 +1991,61 @@ async def _collect_session_snapshots(
     request: KclSnapshotRequest,
     inspection: KclExecutionInspection,
 ) -> None:
-    images: list[bytes] = []
+    # Each snapshots() call initializes and tears down CPU graphics. Batch
+    # compatible views, retaining their original positions for the collage.
+    batches: dict[bool, list[tuple[int, str, kcl.SnapshotOptions]]] = {}
     for index, view in enumerate(request.views):
         named = isinstance(view, str)
         view_name = view if isinstance(view, str) else f"custom_{index + 1}"
-        options = [
-            kcl.SnapshotOptions(
-                camera=(
-                    CameraView.to_kcl_camera(CameraView.views.value[view])
-                    if isinstance(view, str)
-                    else view
-                ),
-                padding=request.padding,
-            )
-        ]
+        options = kcl.SnapshotOptions(
+            camera=(
+                CameraView.to_kcl_camera(CameraView.views.value[view])
+                if isinstance(view, str)
+                else view
+            ),
+            padding=request.padding,
+        )
+        zoom = named if request.zoom is None else request.zoom
+        batches.setdefault(zoom, []).append((index, view_name, options))
+
+    completed: dict[int, tuple[str, bytes]] = {}
+
+    async def capture(
+        views: list[tuple[int, str, kcl.SnapshotOptions]], zoom: bool
+    ) -> None:
         try:
             rendered = await session.snapshots(
                 kcl.ImageFormat.Jpeg,
-                options,
-                zoom=named if request.zoom is None else request.zoom,
+                [options for _, _, options in views],
+                zoom=zoom,
             )
             if not rendered:
                 raise ZooMCPException("snapshot returned no image")
-            images.append(bytes(rendered[0]))
-            inspection.completed_snapshot_views.append(view_name)
+            if len(rendered) != len(views):
+                raise ZooMCPException(
+                    f"snapshot returned {len(rendered)} images for {len(views)} views"
+                )
+            images = [bytes(image) for image in rendered]
         except Exception as error:
-            inspection.snapshot_errors[view_name] = str(error)
+            if len(views) > 1:
+                # The bindings discard partial images when a batch fails.
+                # Isolate failures so other views can still be returned.
+                for view in views:
+                    await capture([view], zoom)
+            else:
+                inspection.snapshot_errors[views[0][1]] = str(error)
+        else:
+            for (index, view_name, _), image in zip(views, images, strict=True):
+                completed[index] = (view_name, image)
+
+    for zoom, views in batches.items():
+        await capture(views, zoom)
+
+    images: list[bytes] = []
+    for index in sorted(completed):
+        view_name, image = completed[index]
+        inspection.completed_snapshot_views.append(view_name)
+        images.append(image)
 
     if images:
         try:
