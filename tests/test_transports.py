@@ -20,6 +20,23 @@ server._init_kcl_indexes = AsyncMock()
 runpy.run_module("zoo_mcp", run_name="__main__")
 """
 
+_INDEX_RETRY_SERVER = (
+    """
+from unittest.mock import AsyncMock
+from zoo_mcp import kcl_samples
+
+kcl_samples._fetch_index_from_api = AsyncMock(side_effect=[
+    RuntimeError("Temporary Aquarium outage"),
+    kcl_samples.KCLSamples(manifest={
+        "public-project": kcl_samples.SampleMetadata(
+            title="Gear", description="A gear", multipleFiles=False
+        )
+    }),
+])
+"""
+    + _SERVER
+)
+
 
 async def _check_existing_tools(client: Client) -> None:
     tools = await client.list_tools()
@@ -43,6 +60,25 @@ async def test_stdio_default_and_explicit_transport(arguments):
     )
     async with asyncio.timeout(15), Client(command) as client:
         await _check_existing_tools(client)
+
+
+@pytest.mark.asyncio
+async def test_sample_fetch_failure_is_a_retryable_mcp_tool_error():
+    command = StdioServerParameters(
+        command=sys.executable, args=["-c", _INDEX_RETRY_SERVER]
+    )
+    async with asyncio.timeout(15), Client(command) as client:
+        failed = await client.call_tool("list_kcl_samples", {})
+        assert failed.is_error
+        assert any(
+            isinstance(content, TextContent)
+            and "Temporary Aquarium outage" in content.text
+            for content in failed.content
+        )
+        recovered = await client.call_tool("list_kcl_samples", {})
+        assert not recovered.is_error
+        assert recovered.structured_content is not None
+        assert recovered.structured_content["result"][0]["name"] == "public-project"
 
 
 @pytest.mark.asyncio

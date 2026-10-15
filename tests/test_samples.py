@@ -8,6 +8,7 @@ import zipfile
 import httpx
 import pytest
 from kittycad.exceptions import KittyCADServerError
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 from pytest_httpx import HTTPXMock
 
@@ -131,14 +132,26 @@ async def test_failed_later_page_does_not_cache_partial_index(httpx_mock: HTTPXM
 def initialized_docs(monkeypatch: pytest.MonkeyPatch) -> KCLDocs:
     docs = KCLDocs(docs={"docs/kcl-lang/functions": "# Functions"})
     monkeypatch.setattr(KCLDocs, "_instance", docs)
-    monkeypatch.setattr(server, "_kcl_index_task", None)
+    monkeypatch.setattr(server, "_kcl_index_tasks", {})
     return docs
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["later_page", "empty_listing"])
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("list_kcl_samples", {}),
+        ("search_kcl_samples", {"query": "gear"}),
+        ("get_kcl_sample", {"sample_name": _PROJECT_ID}),
+    ],
+)
 async def test_sample_tools_retry_an_uninitialized_index(
-    httpx_mock: HTTPXMock, initialized_docs: KCLDocs, failure: str
+    httpx_mock: HTTPXMock,
+    initialized_docs: KCLDocs,
+    failure: str,
+    tool_name: str,
+    arguments: dict,
 ):
     if failure == "later_page":
         httpx_mock.add_response(
@@ -155,10 +168,11 @@ async def test_sample_tools_retry_an_uninitialized_index(
         url=_LIST_URL, json={"items": [_project(_OTHER_ID, "Axial Fan")]}
     )
 
-    first = await server.mcp.call_tool("list_kcl_samples", arguments={})
-    assert isinstance(first, CallToolResult)
-    assert not first.is_error
-    assert not first.content
+    message = (
+        "Down" if failure == "later_page" else "index is unavailable; please retry"
+    )
+    with pytest.raises(ToolError, match=message):
+        await server.mcp.call_tool(tool_name, arguments=arguments)
     assert KCLSamples._instance is None
 
     recovered = await server.mcp.call_tool(
@@ -201,7 +215,8 @@ async def test_concurrent_tools_share_an_index_retry(
         )
 
     monkeypatch.setattr(kcl_samples, "_fetch_index_from_api", fetch)
-    await server.mcp.call_tool("list_kcl_samples", arguments={})
+    with pytest.raises(ToolError, match="Temporary listing failure"):
+        await server.mcp.call_tool("list_kcl_samples", arguments={})
     calls = [
         asyncio.create_task(server.mcp.call_tool("list_kcl_samples", arguments={}))
         for _ in range(5)
@@ -347,6 +362,45 @@ async def test_download_failure_does_not_cache_files(
     with pytest.raises(httpx.HTTPStatusError):
         await kcl_samples.get_sample_content(_PROJECT_ID)
     assert samples_index.file_index == {}
+
+
+@pytest.mark.asyncio
+async def test_sample_tool_reports_download_failure_and_retries(
+    httpx_mock: HTTPXMock, samples_index: KCLSamples
+):
+    httpx_mock.add_response(url=_DOWNLOAD_URL, status_code=503)
+    httpx_mock.add_response(
+        url=_DOWNLOAD_URL, content=_archive([("main.kcl", "x = 1")])
+    )
+
+    with pytest.raises(ToolError, match="503"):
+        await server.mcp.call_tool(
+            "get_kcl_sample", arguments={"sample_name": _PROJECT_ID}
+        )
+    assert samples_index.file_index == {}
+
+    recovered = await server.mcp.call_tool(
+        "get_kcl_sample", arguments={"sample_name": _PROJECT_ID}
+    )
+    assert isinstance(recovered, CallToolResult)
+    assert not recovered.is_error
+    assert recovered.structured_content is not None
+    assert recovered.structured_content["result"]["files"] == [
+        {"filename": "main.kcl", "content": "x = 1"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sample_search_can_successfully_return_no_matches(
+    samples_index: KCLSamples,
+):
+    result = await server.mcp.call_tool(
+        "search_kcl_samples", arguments={"query": "no matching sample"}
+    )
+    assert isinstance(result, CallToolResult)
+    assert not result.is_error
+    assert not result.content
+    assert result.structured_content == {"result": []}
 
 
 @pytest.mark.asyncio
