@@ -1,6 +1,6 @@
 """Caller-owned native results for sketch inspection across tool calls."""
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -55,7 +55,7 @@ def current_sketch_execution() -> SketchExecutionUse | None:
 @contextmanager
 def reuse_sketch_execution(
     previous: RetainedSketchExecution | None = None,
-) -> Iterator[SketchExecutionUse]:
+) -> Generator[SketchExecutionUse, None, None]:
     """Capture or reuse one result without putting native objects on the wire."""
     use = SketchExecutionUse(previous)
     token = _current.set(use)

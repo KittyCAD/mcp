@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import atexit
 import signal
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from types import FrameType
 from typing import TypeVar
@@ -186,7 +186,7 @@ async def _ensure_kcl_index(index: _KCLIndex) -> None:
 
 
 @asynccontextmanager
-async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
+async def _lifespan(_server: MCPServer) -> AsyncGenerator[None, None]:
     """Eagerly start index population when the server starts.
 
     Each tool waits only for its own index if its background fetch is unfinished.
