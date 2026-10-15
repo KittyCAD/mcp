@@ -5,7 +5,7 @@ import io
 import json
 import os
 import random
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -474,7 +474,9 @@ _execution_retry_event_buffer: ContextVar[list[ExecutionRetryEvent] | None] = (
 
 
 @contextmanager
-def capture_execution_retry_events() -> Iterator[list[ExecutionRetryEvent]]:
+def capture_execution_retry_events() -> Generator[
+    list[ExecutionRetryEvent], None, None
+]:
     """Collect retry events emitted in the current async context."""
 
     events: list[ExecutionRetryEvent] = []
@@ -1707,7 +1709,9 @@ _execution_stage_event_buffer: ContextVar[list[ExecutionStageEvent] | None] = (
 
 
 @contextmanager
-def capture_execution_stage_events() -> Iterator[list[ExecutionStageEvent]]:
+def capture_execution_stage_events() -> Generator[
+    list[ExecutionStageEvent], None, None
+]:
     """Collect execution stage events emitted in the current async context."""
     events: list[ExecutionStageEvent] = []
     token = _execution_stage_event_buffer.set(events)
@@ -1803,7 +1807,7 @@ async def _resolve_kcl_execution(
     kcl_path: Path | str | None,
     *,
     captured_project: CapturedKclProject | None = None,
-) -> AsyncIterator[_ResolvedKclExecution]:
+) -> AsyncGenerator[_ResolvedKclExecution, None]:
     """Capture input once and retain it through mock, real execution, and retries."""
     _check_kcl_code_or_path(kcl_code, kcl_path)
     if kcl_code:
@@ -2953,7 +2957,7 @@ def _record_session_event(session: _ModelingSession) -> None:
 
 
 @contextmanager
-def _capture_session_ids(session: _ModelingSession) -> Iterator[None]:
+def _capture_session_ids(session: _ModelingSession) -> Generator[None, None, None]:
     token = _active_modeling_session.set(session)
     _record_session_event(session)
     try:
@@ -3244,7 +3248,9 @@ def _evict_modeling_session(session_id: str) -> None:
 
 
 @asynccontextmanager
-async def _modeling_websocket(session_id: str) -> AsyncIterator[ClientConnection]:
+async def _modeling_websocket(
+    session_id: str,
+) -> AsyncGenerator[ClientConnection, None]:
     active_session = _modeling_session
     if (
         not isinstance(active_session, _ModelingSession)

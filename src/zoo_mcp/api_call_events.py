@@ -1,7 +1,7 @@
 """Context-local observations of Zoo backend identifiers."""
 
 import logging
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
@@ -30,7 +30,7 @@ _logger = logging.getLogger("zoo_mcp")
 
 
 @contextmanager
-def capture_api_call_events() -> Iterator[list[ApiCallEvent]]:
+def capture_api_call_events() -> Generator[list[ApiCallEvent], None, None]:
     """Collect observations, including nested captures and child tasks.
 
     The list remains available after failure or cancellation. Finish child tasks

@@ -1,4 +1,4 @@
-"""Shared utilities for fetching KCL docs and samples from zoo.dev.
+"""Shared path validation, text search, and zoo.dev fetching utilities.
 
 Provides path validation, URL fetching, and text extraction helpers used by
 both kcl_docs and kcl_samples modules.

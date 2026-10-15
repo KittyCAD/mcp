@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "zoo_mcp"
-version = "0.28.9"
+version = "0.28.10"
 requires-python = ">=3.11, <3.14"
 dependencies = [
     "aiofiles<26.0",
@@ -53,7 +53,7 @@ zoo-mcp = "zoo_mcp.server:main"
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
 markers = [
-    "live: hits live external services (zoo.dev). Runs by default; deselect locally with `-m 'not live'`.",
+    "live: hits live external services (zoo.dev and the Zoo API). Runs by default; deselect locally with `-m 'not live'`.",
 ]
 
 [tool.ruff.lint]
@@ -75,7 +75,7 @@ dev = [
     "pytest-httpx",
     "pytest-rerunfailures",
     "pytest-xdist",
-    "ruff==0.16.9",
+    "ruff==0.16.10",
     "ty",
     "uv-build",
 ]

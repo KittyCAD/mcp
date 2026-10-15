@@ -1,7 +1,7 @@
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,7 +68,7 @@ async def _clear_modeling_sessions():
 
 
 @asynccontextmanager
-async def _async_context(value: Any) -> AsyncIterator[Any]:
+async def _async_context(value: Any) -> AsyncGenerator[Any, None]:
     yield value
 
 

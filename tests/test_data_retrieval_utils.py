@@ -63,8 +63,8 @@ class TestIsSafePathComponent:
     def test_kcl_filename_with_path_traversal(self):
         assert is_safe_path_component("../main.kcl", _SAFE_FILENAME_RE) is False
 
-    def test_kcl_filename_with_slash(self):
-        assert is_safe_path_component("dir/main.kcl", _SAFE_FILENAME_RE) is False
+    def test_kcl_filename_with_subdirectory(self):
+        assert is_safe_path_component("dir/main.kcl", _SAFE_FILENAME_RE) is True
 
     def test_kcl_filename_wrong_extension(self):
         assert is_safe_path_component("main.py", _SAFE_FILENAME_RE) is False

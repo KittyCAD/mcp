@@ -1,7 +1,7 @@
 """Explicit, context-local credentials for Zoo SDK and KCL calls."""
 
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -51,7 +51,7 @@ def get_credentials() -> ZooCredentials:
 
 
 @contextmanager
-def use_credentials(credentials: ZooCredentials) -> Iterator[None]:
+def use_credentials(credentials: ZooCredentials) -> Generator[None, None, None]:
     """Scope credentials to this context and its child tasks without changing env."""
     previous = _credentials.set(credentials)
     try:
