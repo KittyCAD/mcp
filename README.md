@@ -166,6 +166,12 @@ session with `execute_kcl`, `exec_kcl_project`, or `import_cad_file`; pass the
 same `session_id` to `snapshot` and modeling tools; then call
 `stop_modeling_session` when finished.
 
+The KCL samples tools list and search public Aquarium projects from the Zoo API.
+Pass the returned `name` (a public project ID) to `get_kcl_sample` to download its
+KCL sources. Filenames preserve project-relative paths, including subdirectories.
+These public tools do not require an API token. The `multipleFiles` field in
+list/search results is a hint until the project has been downloaded.
+
 As of 0.28.0, `execute_kcl` and `exec_kcl_project` run mock execution before real
 execution and return separate `mock_preflight` and `real_execution` objects.
 Each contains `status` (`succeeded`, `failed`, or `not_run`), `message`, and
