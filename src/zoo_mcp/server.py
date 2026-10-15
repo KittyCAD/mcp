@@ -168,11 +168,14 @@ _kcl_index_task: asyncio.Task[None] | None = None
 async def _ensure_kcl_indexes() -> None:
     """Ensure KCL indexes are initialized, kicking off the fetch on first call.
 
-    Subsequent calls await the same in-flight task, so initialization
-    runs at most once per process.
+    Concurrent calls await the same in-flight task. Later calls retry any
+    index that is still missing; successfully populated indexes are reused.
     """
     global _kcl_index_task
-    if _kcl_index_task is None:
+    if _kcl_index_task is None or (
+        _kcl_index_task.done()
+        and (KCLDocs._instance is None or KCLSamples._instance is None)
+    ):
         _kcl_index_task = asyncio.create_task(_init_kcl_indexes())
     await _kcl_index_task
 

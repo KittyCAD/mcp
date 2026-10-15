@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import stat
 import warnings
 import zipfile
@@ -7,10 +8,12 @@ import zipfile
 import httpx
 import pytest
 from kittycad.exceptions import KittyCADServerError
+from mcp.types import CallToolResult, TextContent
 from pytest_httpx import HTTPXMock
 
-from zoo_mcp import kcl_samples
+from zoo_mcp import kcl_samples, server
 from zoo_mcp.credentials import ZooCredentials, use_credentials
+from zoo_mcp.kcl_docs import KCLDocs
 from zoo_mcp.kcl_samples import KCLSamples, SampleMetadata
 
 _PROJECT_ID = "e9996d92-3ec1-447d-b91e-a68188b41b07"
@@ -66,7 +69,10 @@ def samples_index(monkeypatch: pytest.MonkeyPatch) -> KCLSamples:
 
 
 @pytest.mark.asyncio
-async def test_index_follows_all_pages_without_credentials(httpx_mock: HTTPXMock):
+async def test_index_follows_all_pages_without_credentials(
+    httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("ZOO_HOST", "https://alternate.example")
     httpx_mock.add_response(
         url=_LIST_URL,
         json={"items": [_project()], "next_page": "second"},
@@ -119,6 +125,104 @@ async def test_failed_later_page_does_not_cache_partial_index(httpx_mock: HTTPXM
         await KCLSamples.initialize()
     assert KCLSamples._instance is None
     assert kcl_samples.list_available_samples() == []
+
+
+@pytest.fixture
+def initialized_docs(monkeypatch: pytest.MonkeyPatch) -> KCLDocs:
+    docs = KCLDocs(docs={"docs/kcl-lang/functions": "# Functions"})
+    monkeypatch.setattr(KCLDocs, "_instance", docs)
+    monkeypatch.setattr(server, "_kcl_index_task", None)
+    return docs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["later_page", "empty_listing"])
+async def test_sample_tools_retry_an_uninitialized_index(
+    httpx_mock: HTTPXMock, initialized_docs: KCLDocs, failure: str
+):
+    if failure == "later_page":
+        httpx_mock.add_response(
+            url=_LIST_URL, json={"items": [_project()], "next_page": "second"}
+        )
+        httpx_mock.add_response(
+            url=f"{_LIST_URL}&page_token=second",
+            status_code=503,
+            json={"message": "Down"},
+        )
+    else:
+        httpx_mock.add_response(url=_LIST_URL, json={"items": []})
+    httpx_mock.add_response(
+        url=_LIST_URL, json={"items": [_project(_OTHER_ID, "Axial Fan")]}
+    )
+
+    first = await server.mcp.call_tool("list_kcl_samples", arguments={})
+    assert isinstance(first, CallToolResult)
+    assert not first.is_error
+    assert not first.content
+    assert KCLSamples._instance is None
+
+    recovered = await server.mcp.call_tool(
+        "search_kcl_samples", arguments={"query": "fan"}
+    )
+    assert isinstance(recovered, CallToolResult)
+    assert not recovered.is_error
+    assert len(recovered.content) == 1
+    assert isinstance(recovered.content[0], TextContent)
+    assert json.loads(recovered.content[0].text)["name"] == _OTHER_ID
+    assert set(KCLSamples.get().manifest) == {_OTHER_ID}
+    assert KCLDocs.get() is initialized_docs
+
+    # A successful retry is reused without fetching the index again.
+    await server.mcp.call_tool("list_kcl_samples", arguments={})
+    assert len(httpx_mock.get_requests()) == (3 if failure == "later_page" else 2)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_tools_share_an_index_retry(
+    monkeypatch: pytest.MonkeyPatch, initialized_docs: KCLDocs
+):
+    attempts = 0
+    retry_started = asyncio.Event()
+    release_retry = asyncio.Event()
+
+    async def fetch() -> KCLSamples:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("Temporary listing failure")
+        retry_started.set()
+        await release_retry.wait()
+        return KCLSamples(
+            manifest={
+                _PROJECT_ID: SampleMetadata(
+                    title="Cycloidal Gear", description="", multipleFiles=False
+                )
+            }
+        )
+
+    monkeypatch.setattr(kcl_samples, "_fetch_index_from_api", fetch)
+    await server.mcp.call_tool("list_kcl_samples", arguments={})
+    calls = [
+        asyncio.create_task(server.mcp.call_tool("list_kcl_samples", arguments={}))
+        for _ in range(5)
+    ]
+    try:
+        async with asyncio.timeout(5):
+            await retry_started.wait()
+            assert attempts == 2
+            release_retry.set()
+            results = await asyncio.gather(*calls)
+        for result in results:
+            assert isinstance(result, CallToolResult)
+            assert not result.is_error
+            assert len(result.content) == 1
+            assert isinstance(result.content[0], TextContent)
+            assert json.loads(result.content[0].text)["name"] == _PROJECT_ID
+        assert attempts == 2
+        assert KCLDocs.get() is initialized_docs
+    finally:
+        release_retry.set()
+        await asyncio.gather(*calls, return_exceptions=True)
 
 
 @pytest.mark.asyncio

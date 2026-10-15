@@ -133,7 +133,9 @@ async def _fetch_index_from_api() -> KCLSamples:
     samples = KCLSamples()
     logger.info("Fetching public Aquarium projects from %s...", DEFAULT_BASE_URL)
 
-    async with AsyncKittyCAD(token="", timeout=30.0, verify_ssl=ctx) as client:
+    async with AsyncKittyCAD(
+        token="", base_url=DEFAULT_BASE_URL, timeout=30.0, verify_ssl=ctx
+    ) as client:
         async for project in client.projects.list_public_projects(limit=100):
             samples.manifest[str(project.id)] = SampleMetadata(
                 title=project.title,
