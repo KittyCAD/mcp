@@ -5,6 +5,7 @@ import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from kittycad.client import DEFAULT_BASE_URL
@@ -146,6 +147,10 @@ async def test_explicit_credentials_reach_native_kcl_without_environment_changes
     await asyncio.gather(connect("first-token"), connect("refreshed-token"))
     assert len(requests) == 2
     assert all(path.startswith("/ws/modeling/commands?") for path, _ in requests)
+    for path, _ in requests:
+        query = parse_qs(urlsplit(path).query)
+        assert query["geometry_only"] == ["true"]
+        assert query["pool"] == ["cpu"]
     assert {authorization for _, authorization in requests} == {
         "Bearer first-token",
         "Bearer refreshed-token",

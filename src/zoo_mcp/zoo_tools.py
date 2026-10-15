@@ -79,15 +79,20 @@ from kittycad.models.input_format3d import (
     OptionStl,
 )
 from kittycad.models.modeling_cmd import (
+    OptionDefaultCameraCenterToSelection,
     OptionDefaultCameraLookAt,
     OptionDefaultCameraSetOrthographic,
     OptionEdgeLinesVisible,
     OptionFaceGetCenter,
     OptionFaceGetGradient,
     OptionFaceGetPosition,
+    OptionHighlightSetEntities,
     OptionImportFiles,
+    OptionSelectReplace,
     OptionSetOrderIndependentTransparency,
+    OptionSetSelectionFilter,
     OptionTakeSnapshot,
+    OptionToggleGraphics,
     OptionViewIsometric,
     OptionZoomToFit,
 )
@@ -117,6 +122,9 @@ from kittycad.models.ok_modeling_cmd_response import (
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionTakeSnapshot as ResponseTakeSnapshot,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionToggleGraphics as ResponseToggleGraphics,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionViewIsometric as ResponseViewIsometric,
@@ -649,6 +657,7 @@ async def _open_kcl_session(
         if kcl_code is not None:
             session = await kcl.new_kcl_session_code(
                 kcl_code,
+                geometry_only=True,
                 highlight_edges=highlight_edges,
                 video_res_width=video_res_width,
                 video_res_height=video_res_height,
@@ -659,6 +668,7 @@ async def _open_kcl_session(
             assert kcl_path is not None
             session = await kcl.new_kcl_session(
                 str(kcl_path),
+                geometry_only=True,
                 highlight_edges=highlight_edges,
                 video_res_width=video_res_width,
                 video_res_height=video_res_height,
@@ -2933,6 +2943,7 @@ class _ModelingSession:
     artifact_graph_paths: set[Path] = field(default_factory=set)
     api_call_id: str | None = None
     websocket_upgrade_request_id: str | None = None
+    graphics_enabled: bool = False
 
 
 _active_modeling_session: ContextVar[_ModelingSession | None] = ContextVar(
@@ -3001,6 +3012,8 @@ async def _open_modeling_websocket(client: AsyncKittyCAD) -> ClientConnection:
     query = urlencode(
         {
             "fps": 30,
+            "geometry_only": "true",
+            "pool": "cpu",
             "post_effect": PostEffectType.SSAO,
             "show_grid": "false",
             "unlocked_framerate": "false",
@@ -3464,11 +3477,11 @@ def _modeling_timeout(deadline: _Deadline, description: str) -> ZooMCPTimeoutErr
     )
 
 
-async def _recv_modeling_frame(
+async def _recv_modeling_raw_frame(
     ws: ClientConnection,
     deadline: _Deadline,
     description: str,
-) -> WebSocketResponse:
+) -> str | bytes:
     """Read one frame, bounded by what is left of the whole call's budget.
 
     A live session interleaves unsolicited frames every few seconds. Applying
@@ -3490,6 +3503,15 @@ async def _recv_modeling_frame(
         pass
     else:
         _observe_modeling_frame(response)
+    return raw_response
+
+
+async def _recv_modeling_frame(
+    ws: ClientConnection,
+    deadline: _Deadline,
+    description: str,
+) -> WebSocketResponse:
+    raw_response = await _recv_modeling_raw_frame(ws, deadline, description)
     return WebSocketResponse.model_validate_json(raw_response)
 
 
@@ -3607,13 +3629,52 @@ async def zoo_execute_modeling_command(
 ) -> _ModelingResponseT:
     """Run one modeling command in an existing session."""
     async with _modeling_websocket(session_id) as ws:
+        deadline = _Deadline()
+        if isinstance(
+            command.root,
+            (
+                OptionDefaultCameraCenterToSelection,
+                OptionHighlightSetEntities,
+                OptionSelectReplace,
+                OptionSetSelectionFilter,
+            ),
+        ):
+            await _ensure_modeling_graphics(ws, deadline)
         return await _send_modeling_command(
             ws,
             command,
             expected_response,
             response_description,
-            _Deadline(),
+            deadline,
         )
+
+
+async def _toggle_modeling_graphics(
+    ws: ClientConnection, enabled: bool, deadline: _Deadline
+) -> None:
+    """Enable or disable CPU rendering through the typed modeling transport."""
+    await _send_modeling_command(
+        ws,
+        ModelingCmd(OptionToggleGraphics(graphics_enabled=enabled)),
+        ResponseToggleGraphics,
+        "enable graphics" if enabled else "disable graphics",
+        deadline,
+    )
+
+
+async def _ensure_modeling_graphics(ws: ClientConnection, deadline: _Deadline) -> None:
+    """Enable CPU rendering once, retaining camera and selection until session close.
+
+    Disabling graphics resets visual state, so persistent sessions keep their
+    renderer after the first visual tool. Geometry-only work never initializes it.
+    The session lock held by _modeling_websocket serializes this transition.
+    """
+    session = _active_modeling_session.get()
+    if session is not None and session.graphics_enabled:
+        return
+    await _toggle_modeling_graphics(ws, True, deadline)
+    if session is not None:
+        session.graphics_enabled = True
 
 
 @api_operation
@@ -3643,12 +3704,15 @@ async def zoo_snapshot(
     highlighted via highlight_set_entities stand out instead of competing with
     the outline drawn on every edge in the scene. Order-independent transparency
     is enabled so material opacity is represented in the captured image.
+    CPU graphics are initialized on the first visual tool and retained until the
+    session is stopped, preserving camera framing, selections, and highlights.
     """
     # One budget for the whole capture. A per-command budget would multiply by
-    # the command count, which for a four-view capture is fifteen commands.
+    # the command count, which for a first four-view capture is sixteen commands.
     deadline = _Deadline()
 
     async with _modeling_websocket(session_id) as ws:
+        await _ensure_modeling_graphics(ws, deadline)
         await _send_modeling_command(
             ws,
             ModelingCmd(OptionDefaultCameraSetOrthographic()),

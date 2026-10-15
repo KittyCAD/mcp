@@ -166,6 +166,12 @@ session with `execute_kcl`, `exec_kcl_project`, or `import_cad_file`; pass the
 same `session_id` to `snapshot` and modeling tools; then call
 `stop_modeling_session` when finished.
 
+KCL execution and persistent modeling sessions use the CPU engine pool. Isolated
+KCL snapshots temporarily enable CPU rendering. Persistent sessions initialize
+rendering on the first snapshot, selection, highlight, or camera tool and retain
+it until the session is stopped, preserving visual state across calls. Exports,
+measurements, and geometry queries do not initialize graphics.
+
 The KCL samples tools list and search public Aquarium projects from the Zoo API.
 Pass the returned `name` (a public project ID) to `get_kcl_sample` to download its
 KCL sources. Filenames preserve project-relative paths, including subdirectories.

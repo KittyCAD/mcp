@@ -15,6 +15,7 @@ from kittycad.models import (
     ModelingCmd,
     StepImportTargetRepresentation,
     TakeSnapshot,
+    ToggleGraphics,
     WebSocketRequest,
     WebSocketResponse,
 )
@@ -22,11 +23,15 @@ from kittycad.models.api_error import ApiError
 from kittycad.models.failure_web_socket_response import FailureWebSocketResponse
 from kittycad.models.input_format3d import OptionStep
 from kittycad.models.modeling_cmd import (
+    OptionDefaultCameraCenterToSelection,
     OptionDefaultCameraLookAt,
     OptionDefaultCameraSetOrthographic,
     OptionEdgeLinesVisible,
     OptionEntityGetIndex,
+    OptionHighlightSetEntities,
+    OptionSelectReplace,
     OptionSetOrderIndependentTransparency,
+    OptionSetSelectionFilter,
     OptionTakeSnapshot,
     OptionViewIsometric,
     OptionZoomToFit,
@@ -36,7 +41,13 @@ from kittycad.models.ok_modeling_cmd_response import (
     OkModelingCmdResponse,
 )
 from kittycad.models.ok_modeling_cmd_response import (
+    OptionDefaultCameraCenterToSelection as ResponseDefaultCameraCenterToSelection,
+)
+from kittycad.models.ok_modeling_cmd_response import (
     OptionEntityGetIndex as ResponseEntityGetIndex,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionToggleGraphics as ResponseToggleGraphics,
 )
 from kittycad.models.ok_web_socket_response_data import (
     ModelingData,
@@ -47,6 +58,7 @@ from kittycad.models.ok_web_socket_response_data import (
 )
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
+from pydantic import ValidationError
 from websockets.exceptions import ConnectionClosedError
 
 from zoo_mcp import ZooMCPException, zoo_tools
@@ -147,7 +159,7 @@ async def test_modeling_websocket_uses_async_client_configuration(
     assert result is connection
     open_websocket.assert_awaited_once_with(
         "wss://api.example.test/ws/modeling/commands?"
-        "fps=30&post_effect=ssao&show_grid=false&unlocked_framerate=false&"
+        "fps=30&geometry_only=true&pool=cpu&post_effect=ssao&show_grid=false&unlocked_framerate=false&"
         "video_res_height=1024&video_res_width=1024&webrtc=false",
         additional_headers={"Authorization": "Bearer token"},
         close_timeout=120,
@@ -680,6 +692,7 @@ def _capture_snapshot_commands(
         return responses[cast(Any, expected_response)]
 
     monkeypatch.setattr(zoo_tools, "_send_modeling_command", send_command)
+    monkeypatch.setattr(zoo_tools, "_toggle_modeling_graphics", AsyncMock())
     monkeypatch.setattr(
         zoo_tools,
         "_modeling_websocket",
@@ -692,6 +705,198 @@ def _camera_view(name: str) -> OptionDefaultCameraLookAt:
     return zoo_tools.CameraView.to_kittycad_camera(
         zoo_tools.CameraView.views.value[name]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_toggle_graphics_matches_its_response(enabled):
+    websocket = AsyncMock()
+
+    async def recv():
+        request = _sent_request(websocket)
+        return _ok_frame(request.cmd_id, ResponseToggleGraphics(data=ToggleGraphics()))
+
+    frames = iter(
+        [
+            _session_frame(),
+            _failure_frame("stale-command", "unrelated failure"),
+            _ok_frame(
+                "stale-command",
+                ResponseEntityGetIndex(data=EntityGetIndex(entity_index=1)),
+            ),
+        ]
+    )
+
+    async def receive_with_unsolicited_frames():
+        return next(frames, None) or await recv()
+
+    websocket.recv.side_effect = receive_with_unsolicited_frames
+    await zoo_tools._toggle_modeling_graphics(
+        cast(Any, websocket), enabled, zoo_tools._Deadline()
+    )
+
+    request = json.loads(websocket.send.call_args.args[0])
+    assert request["type"] == "modeling_cmd_req"
+    assert request["cmd"] == {
+        "type": "toggle_graphics",
+        "graphics_enabled": enabled,
+    }
+    assert websocket.recv.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_toggle_graphics_rejects_malformed_response():
+    websocket = AsyncMock()
+
+    async def recv():
+        request = _sent_request(websocket)
+        frame = json.loads(
+            _ok_frame(request.cmd_id, ResponseToggleGraphics(data=ToggleGraphics()))
+        )
+        del frame["resp"]["data"]["modeling_response"]["data"]
+        return json.dumps(frame)
+
+    websocket.recv.side_effect = recv
+    with pytest.raises(ValidationError, match="data"):
+        await zoo_tools._toggle_modeling_graphics(
+            cast(Any, websocket), True, zoo_tools._Deadline()
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connection_failure", [False, True])
+async def test_toggle_graphics_surfaces_engine_rejection(connection_failure):
+    websocket = AsyncMock()
+
+    async def recv():
+        request = json.loads(websocket.send.call_args.args[0])
+        return _failure_frame(
+            None if connection_failure else request["cmd_id"], "rendering unavailable"
+        )
+
+    websocket.recv.side_effect = recv
+    with pytest.raises(ZooMCPException, match="rendering unavailable"):
+        await zoo_tools._toggle_modeling_graphics(
+            cast(Any, websocket), True, zoo_tools._Deadline()
+        )
+
+
+@pytest.mark.asyncio
+async def test_toggle_graphics_unsolicited_frames_consume_deadline(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(zoo_tools, "monotonic", clock)
+    websocket = AsyncMock()
+
+    async def recv():
+        clock.advance(100)
+        return _session_frame()
+
+    websocket.recv.side_effect = recv
+    with pytest.raises(zoo_tools.ZooMCPTimeoutError, match="enable graphics"):
+        await zoo_tools._toggle_modeling_graphics(
+            cast(Any, websocket), True, zoo_tools._Deadline(300)
+        )
+    assert websocket.recv.await_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reject_first_snapshot", [False, True])
+async def test_snapshot_retains_cpu_graphics_across_calls(
+    monkeypatch, reject_first_snapshot
+):
+    modeling_websocket = zoo_tools._modeling_websocket
+    _capture_snapshot_commands(monkeypatch)
+    send = zoo_tools._send_modeling_command
+    monkeypatch.setattr(zoo_tools, "_modeling_websocket", modeling_websocket)
+    websocket = AsyncMock()
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
+    toggle = AsyncMock()
+    monkeypatch.setattr(zoo_tools, "_toggle_modeling_graphics", toggle)
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
+    session_id = await zoo_tools.zoo_start_modeling_session()
+    if reject_first_snapshot:
+        monkeypatch.setattr(
+            zoo_tools,
+            "_send_modeling_command",
+            AsyncMock(side_effect=ZooMCPException("snapshot rejected")),
+        )
+        with pytest.raises(ZooMCPException, match="snapshot rejected"):
+            await zoo_tools.zoo_snapshot(session_id=session_id)
+        monkeypatch.setattr(zoo_tools, "_send_modeling_command", send)
+    else:
+        await zoo_tools.zoo_snapshot(session_id=session_id)
+    await zoo_tools.zoo_snapshot(session_id=session_id, zoom=False)
+    assert [call.args[1] for call in toggle.await_args_list] == [True]
+    assert isinstance(zoo_tools._modeling_session, zoo_tools._ModelingSession)
+    assert zoo_tools._modeling_session.graphics_enabled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [zoo_tools.ZooMCPTimeoutError("timeout"), asyncio.CancelledError()]
+)
+async def test_snapshot_discards_session_after_timeout_or_cancellation(
+    monkeypatch, failure
+):
+    modeling_websocket = zoo_tools._modeling_websocket
+    _capture_snapshot_commands(monkeypatch)
+    monkeypatch.setattr(zoo_tools, "_modeling_websocket", modeling_websocket)
+    websocket = AsyncMock()
+    websocket.transport = MagicMock()
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
+    monkeypatch.setattr(
+        zoo_tools,
+        "_toggle_modeling_graphics",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        zoo_tools, "_send_modeling_command", AsyncMock(side_effect=failure)
+    )
+    session_id = await zoo_tools.zoo_start_modeling_session()
+    with pytest.raises(type(failure)):
+        await zoo_tools.zoo_snapshot(session_id=session_id)
+    websocket.transport.abort.assert_called_once_with()
+    assert zoo_tools._modeling_session is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        OptionDefaultCameraCenterToSelection(),
+        OptionHighlightSetEntities(entities=[]),
+        OptionSelectReplace(entities=[]),
+        OptionSetSelectionFilter(filter=[]),
+    ],
+)
+async def test_visual_commands_enable_cpu_graphics(monkeypatch, command):
+    websocket = AsyncMock()
+    monkeypatch.setattr(
+        zoo_tools, "_modeling_websocket", lambda _: _async_context(websocket)
+    )
+    calls = []
+
+    async def toggle(_ws, enabled, deadline):
+        calls.append((enabled, deadline))
+
+    async def send(_ws, _command, _response, _description, deadline):
+        calls.append(("command", deadline))
+        return SimpleNamespace(data=None)
+
+    monkeypatch.setattr(zoo_tools, "_toggle_modeling_graphics", toggle)
+    monkeypatch.setattr(zoo_tools, "_send_modeling_command", send)
+    await zoo_tools.zoo_execute_modeling_command(
+        ModelingCmd(command),
+        ResponseDefaultCameraCenterToSelection,
+        "camera centering",
+        "session-id",
+    )
+    assert [step for step, _ in calls] == [True, "command"]
+    assert len({id(deadline) for _, deadline in calls}) == 1
 
 
 @pytest.mark.asyncio
@@ -1103,7 +1308,7 @@ async def test_connection_close_mid_command_reports_a_dead_session(
 async def test_snapshot_shares_one_budget_across_all_its_commands(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Otherwise a four-view capture gets fifteen separate budgets."""
+    """Otherwise a first four-view capture gets sixteen separate budgets."""
     seen: list[object] = []
 
     async def send_command(
@@ -1119,6 +1324,8 @@ async def test_snapshot_shares_one_budget_across_all_its_commands(
         return SimpleNamespace(data=None)
 
     monkeypatch.setattr(zoo_tools, "_send_modeling_command", send_command)
+    toggle_graphics = AsyncMock()
+    monkeypatch.setattr(zoo_tools, "_toggle_modeling_graphics", toggle_graphics)
     monkeypatch.setattr(
         zoo_tools,
         "_modeling_websocket",
@@ -1137,6 +1344,8 @@ async def test_snapshot_shares_one_budget_across_all_its_commands(
     assert len(seen) > 1
     assert all(isinstance(deadline, zoo_tools._Deadline) for deadline in seen)
     assert len({id(deadline) for deadline in seen}) == 1
+    assert [call.args[1] for call in toggle_graphics.await_args_list] == [True]
+    assert all(call.args[2] is seen[0] for call in toggle_graphics.await_args_list)
 
 
 def _stub_import_transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
@@ -1387,8 +1596,6 @@ async def test_rejected_handshake_captures_fallback_header(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_trace_observation_preserves_sdk_validation_error():
-    from pydantic import ValidationError
-
     websocket = AsyncMock()
     websocket.recv.return_value = "invalid JSON"
     with pytest.raises(ValidationError):

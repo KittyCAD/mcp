@@ -577,7 +577,7 @@ async def exec_kcl_project(
 
 @mcp.tool()
 async def start_modeling_session() -> str:
-    """Open an empty modeling websocket for subsequent tools.
+    """Open an empty CPU modeling session for subsequent tools.
 
     Only one modeling session can be open at a time. Stop the current session
     before starting another. If one is already open, or is still connecting,
