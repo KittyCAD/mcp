@@ -29,6 +29,7 @@ from kittycad.models.modeling_cmd import (
     OptionEdgeLinesVisible,
     OptionEntityGetIndex,
     OptionHighlightSetEntities,
+    OptionReconfigureStream,
     OptionSelectReplace,
     OptionSetOrderIndependentTransparency,
     OptionSetSelectionFilter,
@@ -675,6 +676,7 @@ def _capture_snapshot_commands(
         zoo_tools.ResponseViewIsometric: SimpleNamespace(data=None),
         zoo_tools.ResponseZoomToFit: SimpleNamespace(data=None),
         zoo_tools.ResponseEdgeLinesVisible: SimpleNamespace(data=None),
+        zoo_tools.ResponseReconfigureStream: SimpleNamespace(data=None),
         zoo_tools.ResponseSetOrderIndependentTransparency: SimpleNamespace(data=None),
         zoo_tools.ResponseTakeSnapshot: SimpleNamespace(
             data=TakeSnapshot(contents="anBlZw==")
@@ -805,7 +807,7 @@ async def test_snapshot_retains_cpu_graphics_across_calls(
     monkeypatch, reject_first_snapshot
 ):
     modeling_websocket = zoo_tools._modeling_websocket
-    _capture_snapshot_commands(monkeypatch)
+    commands = _capture_snapshot_commands(monkeypatch)
     send = zoo_tools._send_modeling_command
     monkeypatch.setattr(zoo_tools, "_modeling_websocket", modeling_websocket)
     websocket = AsyncMock()
@@ -817,10 +819,18 @@ async def test_snapshot_retains_cpu_graphics_across_calls(
     monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
     session_id = await zoo_tools.zoo_start_modeling_session()
     if reject_first_snapshot:
+
+        async def reject_snapshot(
+            ws, command, expected_response, description, deadline=None
+        ):
+            if expected_response is zoo_tools.ResponseTakeSnapshot:
+                raise ZooMCPException("snapshot rejected")
+            return await send(ws, command, expected_response, description, deadline)
+
         monkeypatch.setattr(
             zoo_tools,
             "_send_modeling_command",
-            AsyncMock(side_effect=ZooMCPException("snapshot rejected")),
+            reject_snapshot,
         )
         with pytest.raises(ZooMCPException, match="snapshot rejected"):
             await zoo_tools.zoo_snapshot(session_id=session_id)
@@ -831,6 +841,44 @@ async def test_snapshot_retains_cpu_graphics_across_calls(
     assert [call.args[1] for call in toggle.await_args_list] == [True]
     assert isinstance(zoo_tools._modeling_session, zoo_tools._ModelingSession)
     assert zoo_tools._modeling_session.graphics_enabled
+    resizes = [
+        command.root
+        for command in commands
+        if isinstance(command.root, OptionReconfigureStream)
+    ]
+    assert len(resizes) == 1
+    assert resizes[0].width == resizes[0].height == 1024
+
+
+@pytest.mark.asyncio
+async def test_snapshot_retries_graphics_configuration_after_resize_rejection(
+    monkeypatch,
+):
+    modeling_websocket = zoo_tools._modeling_websocket
+    commands = _capture_snapshot_commands(monkeypatch)
+    send = zoo_tools._send_modeling_command
+    monkeypatch.setattr(zoo_tools, "_modeling_websocket", modeling_websocket)
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=AsyncMock())
+    )
+    monkeypatch.setattr(zoo_tools, "resize_image", MagicMock(return_value=b"jpeg"))
+    session_id = await zoo_tools.zoo_start_modeling_session()
+
+    monkeypatch.setattr(
+        zoo_tools,
+        "_send_modeling_command",
+        AsyncMock(side_effect=ZooMCPException("resize rejected")),
+    )
+    with pytest.raises(ZooMCPException, match="resize rejected"):
+        await zoo_tools.zoo_snapshot(session_id=session_id)
+    assert isinstance(zoo_tools._modeling_session, zoo_tools._ModelingSession)
+    assert not zoo_tools._modeling_session.graphics_enabled
+    assert not commands
+
+    monkeypatch.setattr(zoo_tools, "_send_modeling_command", send)
+    await zoo_tools.zoo_snapshot(session_id=session_id)
+    assert zoo_tools._modeling_session.graphics_enabled
+    assert isinstance(commands[0].root, OptionReconfigureStream)
 
 
 @pytest.mark.asyncio
@@ -895,7 +943,7 @@ async def test_visual_commands_enable_cpu_graphics(monkeypatch, command):
         "camera centering",
         "session-id",
     )
-    assert [step for step, _ in calls] == [True, "command"]
+    assert [step for step, _ in calls] == [True, "command", "command"]
     assert len({id(deadline) for _, deadline in calls}) == 1
 
 
@@ -914,6 +962,7 @@ async def test_snapshot_frames_the_scene_before_capturing(
 
     assert result == b"resized-jpeg"
     assert [type(command.root) for command in commands] == [
+        OptionReconfigureStream,
         OptionDefaultCameraSetOrthographic,
         OptionEdgeLinesVisible,
         OptionSetOrderIndependentTransparency,

@@ -88,6 +88,7 @@ from kittycad.models.modeling_cmd import (
     OptionFaceGetPosition,
     OptionHighlightSetEntities,
     OptionImportFiles,
+    OptionReconfigureStream,
     OptionSelectReplace,
     OptionSetOrderIndependentTransparency,
     OptionSetSelectionFilter,
@@ -116,6 +117,9 @@ from kittycad.models.ok_modeling_cmd_response import (
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionImportFiles as ResponseImportFiles,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionReconfigureStream as ResponseReconfigureStream,
 )
 from kittycad.models.ok_modeling_cmd_response import (
     OptionSetOrderIndependentTransparency as ResponseSetOrderIndependentTransparency,
@@ -3702,6 +3706,21 @@ async def _ensure_modeling_graphics(ws: ClientConnection, deadline: _Deadline) -
     if session is not None and session.graphics_enabled:
         return
     await _toggle_modeling_graphics(ws, True, deadline)
+    # Older CPU engines discard the dimensions supplied at connection time.
+    # Resize before camera setup so framing uses the requested aspect ratio.
+    await _send_modeling_command(
+        ws,
+        ModelingCmd(
+            OptionReconfigureStream(
+                width=MODELING_VIDEO_RESOLUTION,
+                height=MODELING_VIDEO_RESOLUTION,
+                fps=30,
+            )
+        ),
+        ResponseReconfigureStream,
+        "snapshot resolution",
+        deadline,
+    )
     if session is not None:
         session.graphics_enabled = True
 
