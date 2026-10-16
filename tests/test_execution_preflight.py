@@ -3,7 +3,7 @@ import json
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import kcl
@@ -197,6 +197,186 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
         "volume": {"value": 12.5, "unit": "mm3"},
         "surface_area": {"value": 42.0, "unit": "mm2"},
     }
+
+
+def _snapshot_positions(created, requested):
+    positions = {id(options): index for index, options in enumerate(created)}
+    return [positions[id(options)] for options in requested]
+
+
+@pytest.fixture
+def snapshot_capture(monkeypatch):
+    created = []
+    snapshot_options = kcl.SnapshotOptions
+
+    def record_options(*, camera, padding):
+        options = snapshot_options(camera=camera, padding=padding)
+        created.append(options)
+        return options
+
+    async def render(image_format, options, *, zoom):
+        assert image_format == kcl.ImageFormat.Jpeg
+        return [
+            f"image:{index}".encode() for index in _snapshot_positions(created, options)
+        ]
+
+    session = Session(Outcome())
+    session.snapshots = AsyncMock(side_effect=render)
+    monkeypatch.setattr(kcl, "SnapshotOptions", record_options)
+    monkeypatch.setattr(zoo_tools, "resize_image", lambda image, _dimension: image)
+    monkeypatch.setattr(
+        zoo_tools, "create_image_collage", lambda images: b"|".join(images)
+    )
+    return session, created
+
+
+def _snapshot_views(mode):
+    camera = zoo_tools.CameraView.to_kcl_camera(
+        {"up": [0, 0, 1], "vantage": [150, -150, 120], "center": [10, 0, 0]}
+    )
+    if mode == "named":
+        return ("front", "right", "top", "left")
+    if mode == "custom":
+        return (camera,) * 4
+    return ("front", camera, "right", camera)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "zoom", "expected_zoom"),
+    [("named", None, True), ("custom", None, False), ("mixed", True, True)],
+)
+async def test_compatible_snapshot_views_share_one_call(
+    snapshot_capture, mode, zoom, expected_zoom
+):
+    session, created = snapshot_capture
+    views = _snapshot_views(mode)
+    inspection = zoo_tools.KclExecutionInspection()
+
+    await zoo_tools._collect_session_snapshots(
+        cast(Any, session), zoo_tools.KclSnapshotRequest(views, zoom=zoom), inspection
+    )
+
+    session.snapshots.assert_awaited_once()
+    call = session.snapshots.await_args
+    assert _snapshot_positions(created, call.args[1]) == [0, 1, 2, 3]
+    assert call.kwargs["zoom"] is expected_zoom
+    assert inspection.rendered_snapshots_status == "succeeded"
+    assert inspection.rendered_snapshot == b"image:0|image:1|image:2|image:3"
+    assert inspection.completed_snapshot_views == [
+        view if isinstance(view, str) else f"custom_{index + 1}"
+        for index, view in enumerate(views)
+    ]
+    assert inspection.snapshot_errors == {}
+
+
+@pytest.mark.asyncio
+async def test_mixed_snapshot_batches_preserve_zoom_and_request_order(snapshot_capture):
+    session, created = snapshot_capture
+    inspection = zoo_tools.KclExecutionInspection()
+
+    await zoo_tools._collect_session_snapshots(
+        cast(Any, session),
+        zoo_tools.KclSnapshotRequest(_snapshot_views("mixed")),
+        inspection,
+    )
+
+    calls = session.snapshots.await_args_list
+    assert [_snapshot_positions(created, call.args[1]) for call in calls] == [
+        [0, 2],
+        [1, 3],
+    ]
+    assert [call.kwargs["zoom"] for call in calls] == [True, False]
+    assert inspection.rendered_snapshot == b"image:0|image:1|image:2|image:3"
+    assert inspection.completed_snapshot_views == [
+        "front",
+        "custom_2",
+        "right",
+        "custom_4",
+    ]
+    assert inspection.rendered_snapshots_status == "succeeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch_failure", ["exception", "wrong_count"])
+@pytest.mark.parametrize("failed_views", [(), (1,), (0, 1, 2, 3)])
+async def test_failed_snapshot_batch_isolates_individual_results(
+    snapshot_capture, batch_failure, failed_views
+):
+    session, created = snapshot_capture
+    views = _snapshot_views("named")
+    inspection = zoo_tools.KclExecutionInspection()
+
+    async def render(_format, options, *, zoom):
+        indices = _snapshot_positions(created, options)
+        if len(indices) > 1:
+            if batch_failure == "exception":
+                raise RuntimeError("batch failed")
+            return [b"incomplete batch"]
+        index = indices[0]
+        if index in failed_views:
+            raise RuntimeError(f"view {index} failed")
+        return [f"image:{index}".encode()]
+
+    session.snapshots.side_effect = render
+    await zoo_tools._collect_session_snapshots(
+        cast(Any, session), zoo_tools.KclSnapshotRequest(views), inspection
+    )
+
+    assert [
+        _snapshot_positions(created, call.args[1])
+        for call in session.snapshots.await_args_list
+    ] == [[0, 1, 2, 3], [0], [1], [2], [3]]
+    completed = [index for index in range(4) if index not in failed_views]
+    assert inspection.completed_snapshot_views == [views[index] for index in completed]
+    assert inspection.snapshot_errors == {
+        views[index]: f"view {index} failed" for index in failed_views
+    }
+    assert inspection.rendered_snapshot == (
+        b"|".join(f"image:{index}".encode() for index in completed)
+        if completed
+        else None
+    )
+    assert inspection.rendered_snapshots_status == (
+        "succeeded" if not failed_views else "partial" if completed else "failed"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_result", [False, True])
+async def test_failed_single_snapshot_is_not_retried(snapshot_capture, empty_result):
+    session, _created = snapshot_capture
+    session.snapshots.side_effect = (
+        None if empty_result else RuntimeError("view failed")
+    )
+    session.snapshots.return_value = []
+    inspection = zoo_tools.KclExecutionInspection()
+
+    await zoo_tools._collect_session_snapshots(
+        cast(Any, session), zoo_tools.KclSnapshotRequest(("front",)), inspection
+    )
+
+    session.snapshots.assert_awaited_once()
+    assert inspection.snapshot_errors == {
+        "front": "snapshot returned no image" if empty_result else "view failed"
+    }
+    assert inspection.completed_snapshot_views == []
+    assert inspection.rendered_snapshots_status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_snapshot_batch_does_not_retry_views(snapshot_capture):
+    session, _created = snapshot_capture
+    session.snapshots.side_effect = asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await zoo_tools._collect_session_snapshots(
+            cast(Any, session),
+            zoo_tools.KclSnapshotRequest(_snapshot_views("named")),
+            zoo_tools.KclExecutionInspection(),
+        )
+
+    session.snapshots.assert_awaited_once()
 
 
 @pytest.mark.asyncio
