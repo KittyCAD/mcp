@@ -342,7 +342,7 @@ async def calculate_cad_physical_properties(
 
     Args:
         input_file (str): The path of the file. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-        unit_length (str): The unit of length for center of mass. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
+        unit_length (str): The unit of length for center of mass and bounding box. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
         unit_mass (str): The unit of mass for the mass result. One of 'g', 'kg', 'lb'.
         unit_density (str): The unit of density for the material. One of 'lb:ft3', 'kg:m3'.
         density (float): The density of the material.

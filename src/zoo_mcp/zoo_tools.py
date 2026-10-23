@@ -49,6 +49,7 @@ from kittycad.models import (
     FileExportFormat,
     FileImportFormat,
     FileMass,
+    FilePhysicalProperties,
     FileSurfaceArea,
     FileVolume,
     ImageFormat,
@@ -224,7 +225,12 @@ _PENDING_API_CALL_STATUSES = {
 }
 
 FileApiCall: TypeAlias = (
-    FileCenterOfMass | FileConversion | FileMass | FileSurfaceArea | FileVolume
+    FileCenterOfMass
+    | FileConversion
+    | FileMass
+    | FilePhysicalProperties
+    | FileSurfaceArea
+    | FileVolume
 )
 _FileApiCallT = TypeVar("_FileApiCallT", bound=FileApiCall)
 
@@ -232,6 +238,7 @@ _ASYNC_FILE_API_CALL_TYPES: dict[type[FileApiCall], str] = {
     FileCenterOfMass: "file_center_of_mass",
     FileConversion: "file_conversion",
     FileMass: "file_mass",
+    FilePhysicalProperties: "file_physical_properties",
     FileSurfaceArea: "file_surface_area",
     FileVolume: "file_volume",
 }
@@ -263,7 +270,7 @@ async def _resolve_file_api_call(
     if deadline is None:
         deadline = monotonic() + FILE_API_CALL_TIMEOUT
 
-    status = getattr(current, "status", ApiCallStatus.COMPLETED)
+    status = ApiCallStatus(getattr(current, "status", ApiCallStatus.COMPLETED))
     while status in _PENDING_API_CALL_STATUSES:
         remaining = deadline - monotonic()
         if remaining <= 0:
@@ -294,9 +301,9 @@ async def _resolve_file_api_call(
             )
 
         current = expected_type.model_construct(
-            **async_result.model_dump(exclude={"type"})
+            **{name: value for name, value in async_result if name != "type"}
         )
-        status = current.status
+        status = ApiCallStatus(current.status)
         if status in _PENDING_API_CALL_STATUSES:
             remaining = deadline - monotonic()
             if remaining <= 0:
@@ -1205,11 +1212,9 @@ async def zoo_calculate_cad_physical_properties(
 ) -> dict:
     """Calculate physical properties (volume, mass, surface area, center of mass, bounding box) of a CAD file.
 
-    NOTE: The bounding box will be returned in the same unit length as the original CAD file.
-
     Args:
         file_path (Path | str): The path to the file. The file should be one of the supported formats: .fbx, .gltf, .obj, .ply, .sldprt, .step, .stp, .stl (case-insensitive)
-        unit_length (str): The unit of length for center of mass. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
+        unit_length (str): The unit of length for center of mass and bounding box. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
         unit_mass (str): The unit of mass for the mass result. One of 'g', 'kg', 'lb'.
         unit_density (str): The unit of density for the material. One of 'lb:ft3', 'kg:m3'.
         density (float): The density of the material.
@@ -1226,105 +1231,45 @@ async def zoo_calculate_cad_physical_properties(
     async with aiofiles.open(file_path, "rb") as inp:
         data = await inp.read()
 
-    normalized_ext = _normalize_ext(file_path.suffix.split(".")[1])
-    src_format = FileImportFormat(normalized_ext)
+    src_format = FileImportFormat(_normalize_ext(file_path.suffix.split(".")[1]))
     deadline = monotonic() + FILE_API_CALL_TIMEOUT
 
     async with _new_zoo_client() as client:
-        volume_result = await client.file.create_file_volume(
-            output_unit=UnitVolume(unit_vol),
+        result = await client.file.create_file_physical_properties(
             src_format=src_format,
-            body=data,
-        )
-        volume_result = await _resolve_file_api_call(
-            client,
-            volume_result,
-            FileVolume,
-            "calculate volume",
-            deadline=deadline,
-        )
-        if volume_result.volume is None:
-            raise ZooMCPException("Failed to calculate volume")
-
-        mass_result = await client.file.create_file_mass(
-            output_unit=UnitMass(unit_mass),
-            src_format=src_format,
-            body=data,
-            material_density_unit=UnitDensity(unit_density),
             material_density=density,
-        )
-        mass_result = await _resolve_file_api_call(
-            client,
-            mass_result,
-            FileMass,
-            "calculate mass",
-            deadline=deadline,
-        )
-        if mass_result.mass is None:
-            raise ZooMCPException("Failed to calculate mass")
-
-        sa_result = await client.file.create_file_surface_area(
-            output_unit=UnitArea(unit_area),
-            src_format=src_format,
+            material_density_unit=UnitDensity(unit_density),
+            volume_output_unit=UnitVolume(unit_vol),
+            mass_output_unit=UnitMass(unit_mass),
+            surface_area_output_unit=UnitArea(unit_area),
+            center_of_mass_output_unit=UnitLength(unit_length),
+            bounding_box_output_unit=UnitLength(unit_length),
             body=data,
         )
-        sa_result = await _resolve_file_api_call(
+        result = await _resolve_file_api_call(
             client,
-            sa_result,
-            FileSurfaceArea,
-            "calculate surface area",
+            result,
+            FilePhysicalProperties,
+            "calculate physical properties",
             deadline=deadline,
         )
-        if sa_result.surface_area is None:
-            raise ZooMCPException("Failed to calculate surface area")
 
-        com_result = await client.file.create_file_center_of_mass(
-            src_format=src_format,
-            body=data,
-            output_unit=UnitLength(unit_length),
-        )
-        com_result = await _resolve_file_api_call(
-            client,
-            com_result,
-            FileCenterOfMass,
-            "calculate center of mass",
-            deadline=deadline,
-        )
-        if com_result.center_of_mass is None:
-            raise ZooMCPException("Failed to calculate center of mass")
+    if (
+        result.volume is None
+        or result.mass is None
+        or result.surface_area is None
+        or result.center_of_mass is None
+        or result.bounding_box is None
+    ):
+        raise ZooMCPException("Failed to calculate physical properties: missing result")
 
-        if normalized_ext == "stl":
-            stl_data = data
-        else:
-            stl_result = await client.file.create_file_conversion(
-                src_format=src_format,
-                output_format=FileExportFormat.STL,
-                body=data,
-            )
-            stl_result = await _resolve_file_api_call(
-                client,
-                stl_result,
-                FileConversion,
-                "convert file for bounding box calculation",
-                deadline=deadline,
-            )
-            if stl_result.outputs is None or len(stl_result.outputs) == 0:
-                raise ZooMCPException(
-                    "Failed to convert file for bounding box calculation, no output"
-                )
-            stl_data = next(iter(stl_result.outputs.values()))
-
-    bbox = await asyncio.to_thread(_compute_stl_bounding_box, stl_data)
-
-    physical_properties = {
-        "volume": volume_result.volume,
-        "mass": mass_result.mass,
-        "surface_area": sa_result.surface_area,
-        "center_of_mass": com_result.center_of_mass.to_dict(),
-        "bounding_box": bbox,
+    return {
+        "volume": result.volume,
+        "mass": result.mass,
+        "surface_area": result.surface_area,
+        "center_of_mass": result.center_of_mass.to_dict(),
+        "bounding_box": result.bounding_box.to_dict(),
     }
-
-    return physical_properties
 
 
 @api_operation
