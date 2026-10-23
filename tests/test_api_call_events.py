@@ -9,6 +9,7 @@ import pytest
 from kittycad import AsyncKittyCAD
 from kittycad.exceptions import KittyCADServerError
 from kittycad.models import ApiCallStatus, FileVolume
+from kittycad.models.async_api_call_output import OptionFileVolume
 
 from zoo_mcp import ZooMCPException, zoo_tools
 from zoo_mcp.api_call_events import (
@@ -391,13 +392,10 @@ async def test_polling_captures_request_ids_and_original_operation_id(
         response = await client.get_http_client().get("https://example.test/poll")
         response.raise_for_status()
         return SimpleNamespace(
-            root=SimpleNamespace(
-                type="file_volume",
-                model_dump=lambda **_: {
-                    "id": operation_id,
-                    "status": ApiCallStatus.COMPLETED,
-                    "volume": 42,
-                },
+            root=OptionFileVolume.model_construct(
+                id=operation_id,
+                status=ApiCallStatus.COMPLETED,
+                volume=42,
             )
         )
 
