@@ -206,6 +206,21 @@ this structured result instead of a path string: check `ok`, then read
 `path_artifact_graph` on session success. The standalone `mock_execute_kcl` tool
 continues to return its existing boolean/message pair.
 
+### Engine-side KCL bindings
+
+This checkout pins `zoo-kcl` to the merged
+[engine-side execution implementation](https://github.com/KittyCAD/modeling-app/pull/14616)
+in `pyproject.toml` and `uv.lock`. Run `uv sync --locked` to build those bindings
+with the installed Rust `stable` toolchain (install it via <https://rustup.rs>).
+Real KCL execution uploads the project to the engine and keeps the connection
+for snapshots, exports, and measurements. Mock preflight still runs locally.
+
+The source pin applies to `uv sync` and `uv run` from this checkout. Package
+installers, including pip and `uvx zoo-mcp`, resolve the published `zoo-kcl`
+dependency instead. Before releasing this change, replace the source pin with
+a minimum PyPI version containing engine-side execution and regenerate the lock
+file. PyPI `zoo-kcl` 0.3.193 predates this implementation.
+
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request on the [GitHub repository](https://github.com/KittyCAD/mcp)
