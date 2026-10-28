@@ -206,12 +206,6 @@ this structured result instead of a path string: check `ok`, then read
 `path_artifact_graph` on session success. The standalone `mock_execute_kcl` tool
 continues to return its existing boolean/message pair.
 
-### Engine-side KCL bindings
-
-`zoo-kcl` 0.3.194 and later execute real KCL on the engine. Execution uploads
-the project once and keeps the connection for snapshots, exports, and
-measurements. Mock preflight still runs locally.
-
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request on the [GitHub repository](https://github.com/KittyCAD/mcp)
