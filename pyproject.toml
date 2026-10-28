@@ -17,7 +17,7 @@ dependencies = [
     "truststore<1.0",
     "typing-extensions>=4.12",
     "websockets>=14.1,<17.0",
-    "zoo-kcl>=0.3.193",
+    "zoo-kcl>=0.3.194",
 ]
 authors = [
     { name = "Ryan Barton", email = "ryan@zoo.dev" },
@@ -79,10 +79,3 @@ dev = [
     "ty",
     "uv-build",
 ]
-
-[tool.uv.extra-build-variables]
-zoo-kcl = { RUSTUP_TOOLCHAIN = "stable" }
-
-[tool.uv.sources]
-# Engine-side execution from modeling-app#14616, pending a PyPI release.
-zoo-kcl = { git = "https://github.com/KittyCAD/modeling-app", subdirectory = "rust/kcl-python-bindings", rev = "8c5942e5aa60558d8c3991f04fb2ad701080b657" }

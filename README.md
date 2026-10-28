@@ -208,18 +208,9 @@ continues to return its existing boolean/message pair.
 
 ### Engine-side KCL bindings
 
-This checkout pins `zoo-kcl` to the merged
-[engine-side execution implementation](https://github.com/KittyCAD/modeling-app/pull/14616)
-in `pyproject.toml` and `uv.lock`. Run `uv sync --locked` to build those bindings
-with the installed Rust `stable` toolchain (install it via <https://rustup.rs>).
-Real KCL execution uploads the project to the engine and keeps the connection
-for snapshots, exports, and measurements. Mock preflight still runs locally.
-
-The source pin applies to `uv sync` and `uv run` from this checkout. Package
-installers, including pip and `uvx zoo-mcp`, resolve the published `zoo-kcl`
-dependency instead. Before releasing this change, replace the source pin with
-a minimum PyPI version containing engine-side execution and regenerate the lock
-file. PyPI `zoo-kcl` 0.3.193 predates this implementation.
+`zoo-kcl` 0.3.194 and later execute real KCL on the engine. Execution uploads
+the project once and keeps the connection for snapshots, exports, and
+measurements. Mock preflight still runs locally.
 
 ## Contributing
 
