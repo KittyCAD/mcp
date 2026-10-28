@@ -150,7 +150,8 @@ async def test_explicit_credentials_reach_native_kcl_without_environment_changes
     for path, _ in requests:
         query = parse_qs(urlsplit(path).query)
         assert query["geometry_only"] == ["true"]
-        assert query["pool"] == ["cpu"]
+        # The API routes geometry-only requests to CPU without an explicit pool.
+        assert query["webrtc"] == ["false"]
     assert {authorization for _, authorization in requests} == {
         "Bearer first-token",
         "Bearer refreshed-token",
