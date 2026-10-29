@@ -4201,57 +4201,70 @@ class ProjectFileSystem:
         _validate_project_paths(paths)
         return data
 
+    async def _download_archive(
+        self, client: httpx.AsyncClient, metadata: dict
+    ) -> io.BytesIO:
+        """Download a ZIP within the project size bound plus archive overhead."""
+        archive = io.BytesIO()
+        # ZIP overhead includes entry names and headers, even for empty files.
+        wire_limit = (
+            self.limit
+            + self.limit // 1000
+            + 1024 * 1024
+            + sum(
+                256 + 2 * len(entry["relative_path"].encode())
+                for entry in metadata["files"]
+            )
+        )
+        async with client.stream(
+            "GET", self.url + "/download", params={"format": "zip"}
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                if archive.tell() + len(chunk) > wire_limit:
+                    raise ZooMCPException(
+                        "Project archive exceeds the download size limit"
+                    )
+                archive.write(chunk)
+        return archive
+
+    def _read_archive(self, archive: io.BytesIO) -> dict[str, bytes]:
+        """Read ZIP contents, validating paths, file types, and uncompressed size."""
+        files: dict[str, bytes] = {}
+        total = 0
+        try:
+            with zipfile.ZipFile(archive) as zip_file:
+                for entry in zip_file.infolist():
+                    if entry.is_dir():
+                        continue
+                    path = _project_path(entry.filename)
+                    if (
+                        not path
+                        or path in files
+                        or (entry.external_attr >> 16) & 0o170000 == 0o120000
+                    ):
+                        raise ZooMCPException(
+                            "Invalid or duplicate project archive path"
+                        )
+                    total += entry.file_size
+                    _check_project_size(total, self.limit)
+                    with zip_file.open(entry) as source:
+                        content = source.read(
+                            self.limit - (total - entry.file_size) + 1
+                        )
+                    if len(content) != entry.file_size:
+                        raise ZooMCPException("Invalid project archive entry size")
+                    files[path] = content
+        except (zipfile.BadZipFile, RuntimeError, EOFError) as exc:
+            raise ZooMCPException("Invalid project ZIP archive") from exc
+        return files
+
     async def _snapshot(self, client: httpx.AsyncClient) -> _ProjectSnapshot:
+        """Load files that agree with a stable metadata revision."""
         for _ in range(_PROJECT_ATTEMPTS):
             metadata = await self._metadata(client)
-            archive = io.BytesIO()
-            # ZIP overhead includes entry names and headers, even for empty files.
-            wire_limit = (
-                self.limit
-                + self.limit // 1000
-                + 1024 * 1024
-                + sum(
-                    256 + 2 * len(entry["relative_path"].encode())
-                    for entry in metadata["files"]
-                )
-            )
-            async with client.stream(
-                "GET", self.url + "/download", params={"format": "zip"}
-            ) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    if archive.tell() + len(chunk) > wire_limit:
-                        raise ZooMCPException(
-                            "Project archive exceeds the download size limit"
-                        )
-                    archive.write(chunk)
-            files: dict[str, bytes] = {}
-            total = 0
-            try:
-                with zipfile.ZipFile(archive) as zip_file:
-                    for entry in zip_file.infolist():
-                        if entry.is_dir():
-                            continue
-                        path = _project_path(entry.filename)
-                        if (
-                            not path
-                            or path in files
-                            or (entry.external_attr >> 16) & 0o170000 == 0o120000
-                        ):
-                            raise ZooMCPException(
-                                "Invalid or duplicate project archive path"
-                            )
-                        total += entry.file_size
-                        _check_project_size(total, self.limit)
-                        with zip_file.open(entry) as source:
-                            content = source.read(
-                                self.limit - (total - entry.file_size) + 1
-                            )
-                        if len(content) != entry.file_size:
-                            raise ZooMCPException("Invalid project archive entry size")
-                        files[path] = content
-            except (zipfile.BadZipFile, RuntimeError, EOFError) as exc:
-                raise ZooMCPException("Invalid project ZIP archive") from exc
+            archive = await self._download_archive(client, metadata)
+            files = self._read_archive(archive)
             # Metadata and downloads are separate requests; verify their agreement.
             latest = await self._metadata(client)
             if latest["revision"] != metadata["revision"]:
