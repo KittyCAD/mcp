@@ -20,6 +20,7 @@ from typing import ClassVar
 from urllib.parse import unquote, urlparse
 
 import httpx
+from markdown_it import MarkdownIt
 
 from zoo_mcp import ctx, logger
 from zoo_mcp.utils.data_retrieval_utils import (
@@ -66,6 +67,17 @@ class KCLDocs:
 
     _instance: ClassVar["KCLDocs | None"] = None
     _init_lock: ClassVar[asyncio.Lock | None] = None
+    _parsed_docs: dict[str, tuple[str, "_ParsedDoc"]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    def parsed_doc(self, path: str, content: str) -> "_ParsedDoc":
+        """Parse each page once, refreshing it if its source changes."""
+        cached = self._parsed_docs.get(path)
+        if cached is None or cached[0] != content:
+            cached = (content, _parse_doc(content))
+            self._parsed_docs[path] = cached
+        return cached[1]
 
     @classmethod
     def get(cls) -> "KCLDocs":
@@ -259,81 +271,162 @@ def search_docs(query: str, max_results: int = 5) -> list[dict]:
     return results[:max_results]
 
 
-_HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$")
-_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_TABLE_DELIMITER_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+_MARKDOWN = MarkdownIt("commonmark").enable("table")
+_MODEL_VIEWER_START = re.compile(r"^\s*<model-viewer(?:\s|>)", re.IGNORECASE)
+_MODEL_VIEWER_END = re.compile(r"</model-viewer\s*>", re.IGNORECASE)
 
 
-def _markdown_sections(content: str) -> list[tuple[str, list[str]]]:
-    """Split into sections and atomic blocks, never splitting a fenced example."""
-    sections: list[tuple[str, list[str]]] = []
-    heading = ""
-    blocks: list[str] = []
-    lines: list[str] = []
-    fence = ""
+@dataclass
+class _MarkdownBlock:
+    text: str
+    kind: str
+    has_code: bool = False
+    complete: bool = True
+    table_header: str = ""
+    table_rows: list[str] = field(default_factory=list)
 
-    def flush() -> None:
-        if lines:
-            # Fence indentation controls how Markdown dedents the code inside.
-            # Keep it along with list indentation when excerpting source blocks.
-            blocks.append("\n".join(lines))
-            lines.clear()
 
-    for line in content.splitlines():
-        marker = _FENCE_RE.match(line)
-        if fence:
-            lines.append(line)
-            if (
-                marker
-                and marker[1][0] == fence[0]
-                and len(marker[1]) >= len(fence)
-                and not marker[2].strip()
-            ):
-                fence = ""
-                flush()
-        elif marker:
-            flush()
-            fence = marker[1]
-            lines.append(line)
-        elif match := _HEADING_RE.match(line):
-            flush()
-            if blocks:
-                sections.append((heading, blocks))
-            heading, blocks = match[1], [line.strip()]
-        elif not line.strip():
-            flush()
+@dataclass
+class _MarkdownSection:
+    heading: str = ""
+    heading_source: str = ""
+    blocks: list[_MarkdownBlock] = field(default_factory=list)
+    heading_tokens: set[str] = field(default_factory=set)
+    tokens: set[str] = field(default_factory=set)
+
+
+@dataclass
+class _ParsedDoc:
+    title: str
+    sections: list[_MarkdownSection]
+    title_tokens: set[str]
+    heading_tokens: set[str]
+    tokens: set[str]
+
+
+def _parse_doc(content: str) -> _ParsedDoc:
+    """Use Markdown source maps to retain whole blocks in their original syntax."""
+    # Match the parser's newline normalization, without stripping indentation.
+    lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    tokens = _MARKDOWN.parse(content)
+    roots = [i for i, token in enumerate(tokens) if token.level == 0 and token.map]
+    sections: list[_MarkdownSection] = []
+    section = _MarkdownSection()
+    title = ""
+    cursor = 0
+
+    def source(start: int, end: int) -> str:
+        return "\n".join(lines[start:end]).strip("\n")
+
+    def keep_gap(end: int) -> None:
+        # Reference definitions have source lines but no block tokens.
+        text = source(cursor, end)
+        if text.strip():
+            section.blocks.append(_MarkdownBlock(text, "reference"))
+
+    for position, token_index in enumerate(roots):
+        token = tokens[token_index]
+        assert token.map is not None
+        start, end = token.map
+        if start < cursor:
+            continue
+        keep_gap(start)
+        text = source(start, end)
+        if token.type == "heading_open":
+            if section.heading_source or section.blocks:
+                sections.append(section)
+            heading = tokens[token_index + 1].content
+            section = _MarkdownSection(heading=heading, heading_source=text)
+            if token.tag == "h1" and not title:
+                title = heading
         else:
-            lines.append(line)
-    # An incomplete source fence is omitted, not presented as a complete example.
-    if not fence:
-        flush()
-    if blocks:
-        sections.append((heading, blocks))
-    return sections
+            next_index = (
+                roots[position + 1] if position + 1 < len(roots) else len(tokens)
+            )
+            children = tokens[token_index:next_index]
+            code = [
+                child for child in children if child.type in {"fence", "code_block"}
+            ]
+            # CommonMark accepts EOF as a fence terminator. Our excerpts require
+            # an explicit closing fence, including inside lists and blockquotes.
+            complete = all(
+                child.type != "fence"
+                or (
+                    child.map is not None
+                    and child.map[1] - child.map[0] == child.content.count("\n") + 2
+                    and (not child.content or child.content.endswith("\n"))
+                )
+                for child in code
+            )
+            block = _MarkdownBlock(text, token.type, bool(code), complete)
+            if token.type in {
+                "paragraph_open",
+                "html_block",
+            } and _MODEL_VIEWER_START.match(text):
+                # The site's multiline custom element can span several CommonMark
+                # blocks. Keep the entire widget attached to its code example.
+                block.kind = "model_viewer"
+                closing = next(
+                    (
+                        i + 1
+                        for i in range(start, len(lines))
+                        if _MODEL_VIEWER_END.search(lines[i])
+                    ),
+                    None,
+                )
+                block.complete = closing is not None
+                if closing is not None:
+                    end = max(end, closing)
+                    block.text = source(start, end)
+            if token.type == "table_open":
+                rows = [
+                    child.map
+                    for child in children
+                    if child.type == "tr_open"
+                    and child.map
+                    and child.map[0] > start + 1
+                ]
+                if rows:
+                    block.table_header = source(start, rows[0][0])
+                    block.table_rows = [source(*row) for row in rows]
+            section.blocks.append(block)
+        cursor = end
+    keep_gap(len(lines))
+    if section.heading_source or section.blocks:
+        sections.append(section)
+    for section in sections:
+        section.heading_tokens = _lookup_tokens(section.heading)
+        section.tokens = _lookup_tokens(
+            "\n".join(
+                [section.heading_source, *(block.text for block in section.blocks)]
+            )
+        )
+    return _ParsedDoc(
+        title,
+        sections,
+        _lookup_tokens(title),
+        set().union(*(section.heading_tokens for section in sections)),
+        _lookup_tokens(content),
+    )
 
 
 def _lookup_tokens(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
-def _compact_block(block: str, budget: int, tokens: set[str]) -> str:
+def _compact_block(block: _MarkdownBlock, budget: int, tokens: set[str]) -> str:
     """Keep whole blocks, or a table header with complete, relevant data rows."""
-    if len(block) <= budget:
-        return block
-    lines = block.splitlines()
-    if (
-        _FENCE_RE.match(lines[0])
-        or len(lines) < 3
-        or not _TABLE_DELIMITER_RE.fullmatch(lines[1])
-        or any("|" not in line for line in lines)
-    ):
+    if not block.complete:
         return ""
-
-    header = "\n".join(lines[:2])
+    if len(block.text) <= budget:
+        return block.text
+    if not block.table_rows:
+        return ""
+    header = block.table_header
     used = len(header)
     kept: dict[int, str] = {}
     rows = sorted(
-        enumerate(lines[2:]),
+        enumerate(block.table_rows),
         key=lambda item: (-len(tokens & _lookup_tokens(item[1])), item[0]),
     )
     for index, row in rows:
@@ -355,48 +448,47 @@ def lookup_docs(query: str, max_results: int = 3, max_chars: int = 6000) -> dict
         return {"results": [], "message": "Provide a symbol or documentation topic."}
 
     candidates = []
-    for path, content in KCLDocs.get().docs.items():
-        title = _extract_title(content)
-        sections = _markdown_sections(content)
-        headings = " ".join(heading for heading, _ in sections)
+    docs = KCLDocs.get()
+    for path, content in docs.docs.items():
+        parsed = docs.parsed_doc(path, content)
         # A qualified std symbol and its unqualified name both count as exact.
-        symbol = title.strip("` ").lower()
+        symbol = parsed.title.strip("` ").lower()
         exact = query in {
             symbol,
             symbol.rsplit("::", 1)[-1],
             path.rsplit("/", 1)[-1].lower(),
         }
-        title_matches = len(tokens & _lookup_tokens(title))
-        heading_matches = len(tokens & _lookup_tokens(headings))
-        body_matches = len(tokens & _lookup_tokens(content))
+        title_matches = len(tokens & parsed.title_tokens)
+        heading_matches = len(tokens & parsed.heading_tokens)
+        body_matches = len(tokens & parsed.tokens)
         if exact or title_matches or heading_matches or body_matches:
             score = (exact, title_matches, heading_matches, body_matches)
-            candidates.append((score, path, title, content, sections))
+            candidates.append((score, path, parsed))
     candidates.sort(key=lambda item: (tuple(-n for n in item[0]), item[1]))
     selected = candidates[:max_results]
     results = []
     remaining = max_chars
-    for position, (_, path, title, content, sections) in enumerate(selected):
+    for position, (_, path, parsed) in enumerate(selected):
         # Share the remaining budget so the first long page cannot hide alternatives.
         budget = remaining // (len(selected) - position)
         ranked = sorted(
-            enumerate(sections),
+            enumerate(parsed.sections),
             key=lambda item: (
-                -len(tokens & _lookup_tokens(item[1][0])),
-                -len(tokens & _lookup_tokens("\n".join(item[1][1]))),
+                -len(tokens & item[1].heading_tokens),
+                -len(tokens & item[1].tokens),
                 item[0],
             ),
         )
         excerpts: dict[int, dict[str, str]] = {}
         used = 0
         omitted = False
-        for index, (heading, blocks) in ranked:
+        for index, section in ranked:
             # A heading is only useful when some of its content fits too. Reserve
             # its cost without charging the page for sections we cannot include.
-            has_heading = bool(_HEADING_RE.fullmatch(blocks[0]))
-            kept = blocks[:1] if has_heading else []
+            has_heading = bool(section.heading_source)
+            kept = [section.heading_source] if has_heading else []
             section_used = len(kept[0]) if kept else 0
-            body = blocks[1:] if has_heading else blocks
+            body = section.blocks
             example_included = False
             for block_index, block in enumerate(body):
                 # Generated pages can repeat their introductory paragraph. Keep
@@ -404,43 +496,41 @@ def lookup_docs(query: str, max_results: int = 3, max_chars: int = 6000) -> dict
                 if (
                     index == 0
                     and block_index > 0
-                    and block == body[block_index - 1]
-                    and not _FENCE_RE.match(block.splitlines()[0])
+                    and block.text == body[block_index - 1].text
+                    and block.kind == body[block_index - 1].kind == "paragraph_open"
                 ):
                     continue
                 # The viewer belongs to the preceding code example. Returning
                 # just its HTML would make an omitted example look populated.
-                if block.lstrip().startswith("<model-viewer") and not example_included:
+                if block.kind == "model_viewer" and not example_included:
                     omitted = True
                     continue
                 separator_cost = 2 if kept else 0
                 excerpt = _compact_block(
                     block, budget - used - section_used - separator_cost, tokens
                 )
-                if _FENCE_RE.match(block.splitlines()[0]):
+                if block.has_code:
                     example_included = bool(excerpt)
-                if excerpt != block:
+                if excerpt != block.text:
                     omitted = True
                 if excerpt:
                     kept.append(excerpt)
                     section_used += len(excerpt) + separator_cost
             if len(kept) > int(has_heading):
                 used += section_used
-                excerpts[index] = {"heading": heading, "content": "\n\n".join(kept)}
+                excerpts[index] = {
+                    "heading": section.heading,
+                    "content": "\n\n".join(kept),
+                }
             else:
                 omitted = True
         remaining -= used
-        # Also flag malformed source fences omitted by the parser.
-        source_lines = " ".join(content.split())
-        parsed_lines = " ".join(
-            " ".join(block for _, blocks in sections for block in blocks).split()
-        )
         results.append(
             {
                 "path": path,
-                "title": title,
+                "title": parsed.title,
                 "sections": [excerpts[index] for index in sorted(excerpts)],
-                "truncated": omitted or source_lines != parsed_lines,
+                "truncated": omitted,
             }
         )
     return {

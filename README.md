@@ -164,6 +164,11 @@ omitted and repeated introductory paragraphs are collapsed. Results indicate
 `truncated: true` when content is omitted. Use `get_kcl_doc` for a full page when
 needed; existing search and listing tools remain available.
 
+The lookup parses CommonMark and tables with `markdown-it-py`, using source
+ranges to preserve the original Markdown. Lists and blockquotes stay intact,
+including any nested examples. Parsed pages and ranking tokens are cached for
+subsequent lookups and refreshed when a page's source changes.
+
 `src/zoo_mcp/zoo_tools.py` acts as a large toolset to interact with Zoo's KCL and
 engine facilities. This source file houses other utilities like `parse_unit` or
 `normalize_ext` (normalizing file extensions).

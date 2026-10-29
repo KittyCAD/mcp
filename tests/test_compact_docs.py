@@ -1,9 +1,11 @@
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
 
+from zoo_mcp import kcl_docs
 from zoo_mcp.kcl_docs import KCLDocs, lookup_docs
 from zoo_mcp.server import mcp
 
@@ -69,8 +71,14 @@ def test_indented_fence_keeps_source_indentation(monkeypatch, indent):
     assert not page["truncated"]
 
 
-def test_omitted_example_does_not_leave_viewer_only_section(monkeypatch):
-    viewer = '<model-viewer src="/model.glb">\n</model-viewer>'
+@pytest.mark.parametrize(
+    "viewer",
+    [
+        '<model-viewer src="/model.glb">\n</model-viewer>',
+        '<model-viewer\n  src="/model.glb"\n  camera-controls\n>\n</model-viewer>',
+    ],
+)
+def test_omitted_example_does_not_leave_viewer_only_section(monkeypatch, viewer):
     content = "# Example\n\nIntro.\n\n## Examples\n\n```kcl\n" + "x" * 500
     content += f"\n```\n\n{viewer}"
     monkeypatch.setattr(
@@ -136,6 +144,118 @@ def test_incomplete_source_fence_is_not_returned(monkeypatch):
     assert "```" not in str(page["sections"])
 
 
+def test_setext_headings_keep_original_source(monkeypatch):
+    intro = "extrude\n=======\n\nExtend a sketch."
+    arguments = "Arguments\n---------\n\nSpecify the extrusion length."
+    monkeypatch.setattr(
+        KCLDocs,
+        "_instance",
+        KCLDocs(docs={"docs/kcl-lang/example": intro + "\n\n" + arguments}),
+    )
+    page = lookup_docs("extrude")["results"][0]
+    assert page["title"] == "extrude"
+    assert page["sections"] == [
+        {"heading": "extrude", "content": intro},
+        {"heading": "Arguments", "content": arguments},
+    ]
+    assert not page["truncated"]
+
+
+@pytest.mark.parametrize(
+    "container",
+    [
+        "- Follow these steps:\n\n  # Nested heading\n\n  ```kcl\n  x = 1\n  ```\n\n- Finish.",
+        "> # Nested heading\n>\n> A quoted example.\n>\n> ```kcl\n> x = 1\n> ```",
+        "    # Indented code, not a heading\n\n    x = 1",
+    ],
+)
+def test_nested_blocks_are_atomic_and_do_not_create_sections(monkeypatch, container):
+    content = "# Example\n\nIntro.\n\n" + container
+    monkeypatch.setattr(
+        KCLDocs, "_instance", KCLDocs(docs={"docs/kcl-lang/example": content})
+    )
+    full = lookup_docs("example")["results"][0]
+    assert full["sections"] == [{"heading": "Example", "content": content}]
+    assert not full["truncated"]
+    compact = lookup_docs("example", max_chars=len(content) - 1)["results"][0]
+    assert compact["sections"] == [
+        {"heading": "Example", "content": "# Example\n\nIntro."}
+    ]
+    assert compact["truncated"]
+
+
+@pytest.mark.parametrize("prefix", ["", "> ", "  "])
+@pytest.mark.parametrize("ending", ["", "\n", "\n``` trailing text"])
+def test_unclosed_fences_inside_containers_are_omitted(monkeypatch, prefix, ending):
+    incomplete = "```kcl\nx = 1" + ending
+    incomplete = "\n".join(prefix + line for line in incomplete.split("\n"))
+    if prefix == "  ":
+        incomplete = "- Example:\n\n" + incomplete
+    content = "# Example\n\nIntro.\n\n" + incomplete
+    monkeypatch.setattr(
+        KCLDocs, "_instance", KCLDocs(docs={"docs/kcl-lang/example": content})
+    )
+    page = lookup_docs("example")["results"][0]
+    assert page["sections"] == [
+        {"heading": "Example", "content": "# Example\n\nIntro."}
+    ]
+    assert page["truncated"]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "```kcl\n```",
+        "~~~~kcl\n\n~~~~~",
+        "```kcl\nx = 1\n````  ",
+        "```kcl\nx = 1\n\n```",
+        "```kcl\nx = 1\n```\n",
+    ],
+)
+def test_closed_fences_remain_complete_with_crlf_source(monkeypatch, code):
+    content = "# Example\n\n" + code
+    monkeypatch.setattr(
+        KCLDocs,
+        "_instance",
+        KCLDocs(docs={"docs/kcl-lang/example": content.replace("\n", "\r\n")}),
+    )
+    page = lookup_docs("example")["results"][0]
+    assert page["sections"] == [{"heading": "Example", "content": content.rstrip("\n")}]
+    assert not page["truncated"]
+
+
+def test_reference_definitions_are_preserved(monkeypatch):
+    content = (
+        '[first]: /first "A reference"\n\n# Example\n\n'
+        "Read [first] and [second].\n\n[second]: /second"
+    )
+    monkeypatch.setattr(
+        KCLDocs, "_instance", KCLDocs(docs={"docs/kcl-lang/example": content})
+    )
+    page = lookup_docs("example")["results"][0]
+    assert "\n\n".join(section["content"] for section in page["sections"]) == content
+    assert not page["truncated"]
+
+
+def test_parsed_pages_are_reused_and_refresh_when_source_changes(docs, monkeypatch):
+    parse = Mock(wraps=kcl_docs._MARKDOWN.parse)
+    monkeypatch.setattr(kcl_docs._MARKDOWN, "parse", parse)
+    first = lookup_docs("extrude")
+    assert parse.call_count == len(docs)
+    assert lookup_docs("extrude") == first
+    lookup_docs("hole", max_chars=2000)
+    assert parse.call_count == len(docs)
+
+    docs["docs/kcl-std/functions/extrude"] = "# extrude\n\nUpdated description."
+    page = lookup_docs("extrude")["results"][0]
+    assert "Updated description." in page["sections"][0]["content"]
+    assert parse.call_count == len(docs) + 1
+
+    monkeypatch.setattr(KCLDocs, "_instance", KCLDocs(docs=docs.copy()))
+    lookup_docs("extrude")
+    assert parse.call_count == 2 * len(docs) + 1
+
+
 @pytest.fixture
 def extrude_doc(monkeypatch):
     # zoo.dev's actual layout: an inline signature, duplicate intro, and a long
@@ -178,10 +298,15 @@ def test_extrude_excerpts_have_bodies_and_complete_source_rows(extrude_doc, budg
     assert page["truncated"] == (budget < 10000)
 
 
-def test_partial_table_prioritizes_matching_rows(monkeypatch):
-    header = "| Name | Description |\n| --- | --- |"
+@pytest.mark.parametrize("outer_pipes", [True, False])
+def test_partial_table_prioritizes_matching_rows(monkeypatch, outer_pipes):
+    header = "| Name | Description |\n| :--- | ---: |"
     first = "| length | Extrusion length. |"
     target = "| twistAngle | Twist the sketch; accepts `a \\| b`. |"
+    if not outer_pipes:
+        header = "\n".join(line.strip("| ") for line in header.splitlines())
+        first = first.strip("| ")
+        target = target.strip("| ")
     content = f"# extrude\n\n## Arguments\n\n{header}\n{first}\n{target}"
     monkeypatch.setattr(
         KCLDocs, "_instance", KCLDocs(docs={"docs/kcl-lang/example": content})
