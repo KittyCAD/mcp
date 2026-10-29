@@ -11,7 +11,6 @@ import zipfile
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
@@ -4022,7 +4021,7 @@ def _project_path(path: str) -> str:
     path = path.strip().replace("\\", "/")
     if path in ("", ".", "/"):
         return ""
-    if path.startswith("/") or "\x00" in path or ".." in path.split("/"):
+    if path.startswith("/") or ".." in path.split("/"):
         raise ZooMCPException("Expected a project-relative POSIX path without '..'")
     result = str(PurePosixPath(path))
     if result == ".":
@@ -4095,13 +4094,13 @@ async def _project_multipart(
     for path, content in sorted(files.items()):
         filename = path.replace("\\", "\\\\").replace('"', '\\"')
         content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        yield delimiter + (
-            '\r\nContent-Disposition: form-data; name="files"; filename="'
-            + filename
-            + '"\r\nContent-Type: '
-            + content_type
-            + "\r\n\r\n"
-        ).encode("utf-8")
+        yield (
+            delimiter
+            + (
+                f'\r\nContent-Disposition: form-data; name="files"; filename="{filename}"\r\n'
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode()
+        )
         for offset in range(0, len(content), 64 * 1024):
             yield content[offset : offset + 64 * 1024]
         yield b"\r\n"
@@ -4141,7 +4140,7 @@ def _project_manifest_stamped(
         original = tomllib.loads(before.decode("utf-8"))
         requested = tomllib.loads(expected.decode("utf-8"))
         stored = tomllib.loads(latest.decode("utf-8"))
-    except (ValueError, UnicodeError):
+    except ValueError:
         return False
     original_cloud = original.get("cloud", {})
     if not isinstance(original_cloud, dict):
@@ -4153,15 +4152,14 @@ def _project_manifest_stamped(
     ]
     if len(environments) != 1:
         return False
-    stamped = deepcopy(requested)
-    cloud = stamped.setdefault("cloud", {})
+    cloud = requested.setdefault("cloud", {})
     if not isinstance(cloud, dict):
         return False
     identity = cloud.setdefault(environments[0], {})
     if not isinstance(identity, dict):
         return False
     identity["project_id"] = project_id
-    return _project_toml_equal(stamped, stored)
+    return _project_toml_equal(requested, stored)
 
 
 @dataclass(frozen=True)
@@ -4172,63 +4170,61 @@ class _ProjectMutation:
     removed: tuple[str, ...] = ()
 
 
-def _project_upload_landed(
-    before: dict[str, bytes],
-    expected: dict[str, bytes],
-    mutation: _ProjectMutation,
-    latest: dict[str, bytes],
-    *,
-    project_id: str,
-    manifest_path: str,
-) -> bool:
-    """Check operation postconditions, including complete removed subtrees."""
-    written = set(mutation.written) | {
-        path for path, content in expected.items() if before.get(path) != content
-    }
-    removed = before.keys() - expected.keys()
-
-    def removed_tree(files: dict[str, bytes]) -> dict[str, bytes]:
-        return {
-            path: content
-            for path, content in files.items()
-            if any(
-                path == root or path.startswith(root + "/") for root in mutation.removed
-            )
-        }
-
-    remaining = removed_tree(latest)
-    if (
-        all(
-            latest.get(path) == expected[path]
-            or (
-                path == manifest_path
-                and _project_manifest_stamped(
-                    before.get(path),
-                    expected[path],
-                    latest.get(path),
-                    project_id,
-                )
-            )
-            for path in written
-        )
-        and not (removed & latest.keys())
-        and not remaining
-    ):
-        return True
-    if any(
-        latest.get(path) != before.get(path) for path in written | removed
-    ) or remaining != removed_tree(before):
-        raise ZooMCPException(
-            "Upload outcome is uncertain and affected paths changed; "
-            "inspect the project before retrying"
-        )
-    return False
-
-
 @dataclass
 class _ProjectSnapshot:
     metadata: dict
     files: dict[str, bytes]
+
+
+@dataclass
+class _ProjectUpload:
+    before: _ProjectSnapshot
+    files: dict[str, bytes]
+    mutation: _ProjectMutation
+    project_id: str
+
+    def landed(self, latest: _ProjectSnapshot) -> bool:
+        """Confirm the effects, allow a safe retry, or raise on ambiguous changes."""
+        before, expected, current = self.before.files, self.files, latest.files
+        written = set(self.mutation.written) | {
+            path for path, content in expected.items() if before.get(path) != content
+        }
+        removed = before.keys() - expected.keys()
+
+        def removed_tree(files: dict[str, bytes]) -> dict[str, bytes]:
+            # New descendants also matter when checking a recursive removal.
+            return {
+                path: content
+                for path, content in files.items()
+                if any(
+                    path == root or path.startswith(root + "/")
+                    for root in self.mutation.removed
+                )
+            }
+
+        remaining = removed_tree(current)
+        writes_match = all(
+            current.get(path) == expected[path]
+            or (
+                path == self.before.metadata["project_toml_path"]
+                and _project_manifest_stamped(
+                    before.get(path), expected[path], current.get(path), self.project_id
+                )
+            )
+            for path in written
+        )
+        removals_match = not (removed & current.keys()) and not remaining
+        if writes_match and removals_match:
+            return True
+        if any(
+            current.get(path) != before.get(path) for path in written | removed
+        ) or remaining != removed_tree(before):
+            raise ZooMCPException(
+                "Upload outcome is uncertain and affected paths changed; "
+                "inspect the project before retrying"
+            )
+        # The affected paths still match the original snapshot, so reapply safely.
+        return False
 
 
 class ProjectFileSystem:
@@ -4267,6 +4263,7 @@ class ProjectFileSystem:
         )
 
     def _lock(self) -> asyncio.Lock:
+        # Locks belong to their event loop; weak references discard idle locks.
         loop = asyncio.get_running_loop()
         locks = _project_locks.setdefault(loop, WeakValueDictionary())
         key = (self.url, sha256(self.credentials.token.encode()).digest())
@@ -4366,6 +4363,7 @@ class ProjectFileSystem:
                         files[path] = content
             except (zipfile.BadZipFile, RuntimeError, EOFError) as exc:
                 raise ZooMCPException("Invalid project ZIP archive") from exc
+            # Metadata and downloads are separate requests; verify their agreement.
             latest = await self._metadata(client)
             if latest["revision"] != metadata["revision"]:
                 continue
@@ -4467,6 +4465,33 @@ class ProjectFileSystem:
         content = snapshot.files[path]
         return content.decode("utf-8") if encoding else content
 
+    async def _put(
+        self, client: httpx.AsyncClient, upload: _ProjectUpload
+    ) -> httpx.Response:
+        """Build and send one complete project replacement."""
+        metadata = upload.before.metadata
+        removed = upload.before.files.keys() - upload.files.keys()
+        previews = {
+            entry["relative_path"]
+            for entry in metadata["files"]
+            if entry["file_role"] == "preview_image"
+        }
+        body = {
+            key: metadata[key]
+            for key in ("title", "description", "entrypoint_path", "category_ids")
+        }
+        # Omit publication_status to preserve server-owned workflow states.
+        body.update(
+            expected_revision=metadata["revision"],
+            deleted_paths=sorted(removed - previews),
+        )
+        boundary = uuid4().hex
+        return await client.put(
+            self.url,
+            content=_project_multipart(body, upload.files, boundary),
+            headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
+        )
+
     async def _mutate(
         self,
         transform: Callable[[dict[str, bytes]], _ProjectMutation],
@@ -4474,9 +4499,7 @@ class ProjectFileSystem:
         lock = self._lock()
         async with self._operation() as client, lock:
             snapshot = await self._snapshot(client)
-            pending: (
-                tuple[dict[str, bytes], dict[str, bytes], _ProjectMutation] | None
-            ) = None
+            pending: _ProjectUpload | None = None
             for _ in range(_PROJECT_ATTEMPTS):
                 if not snapshot.metadata["access"]["can_edit"]:
                     raise ZooMCPException("The caller cannot edit this project")
@@ -4484,6 +4507,7 @@ class ProjectFileSystem:
                     raise ZooMCPException(
                         "Filesystem mutations require main.kcl as the entrypoint"
                     )
+                # Reapply the requested operation to every refreshed snapshot.
                 updated = snapshot.files.copy()
                 mutation = transform(updated)
                 _validate_project_paths(updated)
@@ -4495,76 +4519,36 @@ class ProjectFileSystem:
                         "Cannot remove or move project.toml; the Project API requires "
                         "it and regenerates it when omitted"
                     )
-                removed = snapshot.files.keys() - updated.keys()
-                previews = {
-                    entry["relative_path"]
-                    for entry in snapshot.metadata["files"]
-                    if entry["file_role"] == "preview_image"
-                }
-                body = {
-                    key: snapshot.metadata[key]
-                    for key in (
-                        "title",
-                        "description",
-                        "entrypoint_path",
-                        "category_ids",
-                    )
-                }
-                # Publication state can include server-owned states (e.g. published).
-                # Omitting it preserves the existing publication workflow state.
-                body.update(
-                    expected_revision=snapshot.metadata["revision"],
-                    deleted_paths=sorted(removed - previews),
-                )
-                boundary = uuid4().hex
-                uncertain = False
+                upload = _ProjectUpload(snapshot, updated, mutation, self.id)
                 try:
-                    response = await client.put(
-                        self.url,
-                        content=_project_multipart(body, updated, boundary),
-                        headers={
-                            "Content-Type": "multipart/form-data; boundary=" + boundary
-                        },
-                    )
-                    if response.status_code == 409:
-                        snapshot = await self._snapshot(client)
-                        # A previously timed-out request may have committed while
-                        # this replacement was in flight, causing this conflict.
-                        if pending and _project_upload_landed(
-                            *pending,
-                            snapshot.files,
-                            project_id=self.id,
-                            manifest_path=snapshot.metadata["project_toml_path"],
-                        ):
-                            return snapshot.metadata
-                        continue
-                    if response.status_code >= 500:
-                        uncertain = True
-                    else:
-                        response.raise_for_status()
-                        try:
-                            return response.json()
-                        except ValueError:
-                            uncertain = True
+                    response = await self._put(client, upload)
                 except httpx.TransportError:
-                    uncertain = True
-                if uncertain:
+                    response = None
+
+                conflict = response is not None and response.status_code == 409
+                if response is not None and response.status_code < 500 and not conflict:
+                    response.raise_for_status()
                     try:
-                        latest = await self._snapshot(client)
-                    except (httpx.HTTPError, ZooMCPException) as exc:
-                        raise ZooMCPException(
-                            "Upload outcome is uncertain; could not reload the project "
-                            "to reconcile it. Inspect the latest project before retrying."
-                        ) from exc
-                    pending = (snapshot.files, updated, mutation)
-                    if _project_upload_landed(
-                        *pending,
-                        latest.files,
-                        project_id=self.id,
-                        manifest_path=snapshot.metadata["project_toml_path"],
-                    ):
-                        return latest.metadata
-                    snapshot = latest
+                        return response.json()
+                    except ValueError:
+                        pass
+
+                # A 409 rejects this attempt; retain any earlier unconfirmed upload.
+                # Lost responses, 5xx, and unreadable success bodies are uncertain.
+                if not conflict:
+                    pending = upload
+                try:
+                    snapshot = await self._snapshot(client)
+                except (httpx.HTTPError, ZooMCPException) as exc:
+                    if pending is None:
+                        raise
+                    raise ZooMCPException(
+                        "Upload outcome is uncertain; could not reload the project "
+                        "to reconcile it. Inspect the latest project before retrying."
+                    ) from exc
+                # A rejected retry may reveal that an earlier timed-out write landed.
+                if pending and pending.landed(snapshot):
+                    return snapshot.metadata
             raise ZooMCPException(
                 "Project write could not be confirmed after three attempts; refresh and try again"
             )
