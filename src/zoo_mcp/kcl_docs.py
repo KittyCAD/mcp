@@ -259,6 +259,136 @@ def search_docs(query: str, max_results: int = 5) -> list[dict]:
     return results[:max_results]
 
 
+_HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _markdown_sections(content: str) -> list[tuple[str, list[str]]]:
+    """Split into sections and atomic blocks, never splitting a fenced example."""
+    sections: list[tuple[str, list[str]]] = []
+    heading = ""
+    blocks: list[str] = []
+    lines: list[str] = []
+    fence = ""
+
+    def flush() -> None:
+        if lines:
+            blocks.append("\n".join(lines).strip())
+            lines.clear()
+
+    for line in content.splitlines():
+        marker = _FENCE_RE.match(line)
+        if fence:
+            lines.append(line)
+            if (
+                marker
+                and marker[1][0] == fence[0]
+                and len(marker[1]) >= len(fence)
+                and not marker[2].strip()
+            ):
+                fence = ""
+                flush()
+        elif marker:
+            flush()
+            fence = marker[1]
+            lines.append(line)
+        elif match := _HEADING_RE.match(line):
+            flush()
+            if blocks:
+                sections.append((heading, blocks))
+            heading, blocks = match[1], [line.strip()]
+        elif not line.strip():
+            flush()
+        else:
+            lines.append(line)
+    # An incomplete source fence is omitted, not presented as a complete example.
+    if not fence:
+        flush()
+    if blocks:
+        sections.append((heading, blocks))
+    return sections
+
+
+def _lookup_tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def lookup_docs(query: str, max_results: int = 3, max_chars: int = 6000) -> dict:
+    """Return ranked source sections within one Markdown-content budget."""
+    if max_results < 1 or max_chars < 1:
+        raise ValueError("max_results and max_chars must be positive")
+    query = query.strip().lower()
+    tokens = _lookup_tokens(query)
+    if not tokens:
+        return {"results": [], "message": "Provide a symbol or documentation topic."}
+
+    candidates = []
+    for path, content in KCLDocs.get().docs.items():
+        title = _extract_title(content)
+        sections = _markdown_sections(content)
+        headings = " ".join(heading for heading, _ in sections)
+        # A qualified std symbol and its unqualified name both count as exact.
+        symbol = title.strip("` ").lower()
+        exact = query in {symbol, symbol.rsplit("::", 1)[-1], path.rsplit("/", 1)[-1]}
+        title_matches = len(tokens & _lookup_tokens(title))
+        heading_matches = len(tokens & _lookup_tokens(headings))
+        body_matches = len(tokens & _lookup_tokens(content))
+        if exact or title_matches or heading_matches or body_matches:
+            score = (exact, title_matches, heading_matches, body_matches)
+            candidates.append((score, path, title, content, sections))
+    candidates.sort(key=lambda item: (tuple(-n for n in item[0]), item[1]))
+    selected = candidates[:max_results]
+    results = []
+    remaining = max_chars
+    for position, (_, path, title, content, sections) in enumerate(selected):
+        # Share the remaining budget so the first long page cannot hide alternatives.
+        budget = remaining // (len(selected) - position)
+        ranked = sorted(
+            enumerate(sections),
+            key=lambda item: (
+                -len(tokens & _lookup_tokens(item[1][0])),
+                -len(tokens & _lookup_tokens("\n".join(item[1][1]))),
+                item[0],
+            ),
+        )
+        excerpts: dict[int, dict[str, str]] = {}
+        used = 0
+        omitted = False
+        for index, (heading, blocks) in ranked:
+            kept: list[str] = []
+            for block in blocks:
+                cost = len(block) + (2 if kept else 0)
+                if used + cost <= budget:
+                    kept.append(block)
+                    used += cost
+                else:
+                    omitted = True
+            if kept:
+                excerpts[index] = {"heading": heading, "content": "\n\n".join(kept)}
+        remaining -= used
+        # Also flag malformed source fences omitted by the parser.
+        source_lines = " ".join(content.split())
+        parsed_lines = " ".join(
+            " ".join(block for _, blocks in sections for block in blocks).split()
+        )
+        results.append(
+            {
+                "path": path,
+                "title": title,
+                "sections": [excerpts[index] for index in sorted(excerpts)],
+                "truncated": omitted or source_lines != parsed_lines,
+            }
+        )
+    return {
+        "results": results,
+        "message": (
+            "Use get_kcl_doc(path) for full pages when a result is truncated."
+            if results
+            else "No matching KCL documentation. Try a symbol or fewer keywords."
+        ),
+    }
+
+
 def get_doc_content(doc_path: str) -> str | None:
     """Get the full content of a specific KCL documentation file.
 

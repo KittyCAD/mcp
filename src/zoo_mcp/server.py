@@ -93,6 +93,7 @@ from zoo_mcp.kcl_docs import (
     KCLDocs,
     get_doc_content,
     list_available_docs,
+    lookup_docs,
     search_docs,
 )
 from zoo_mcp.kcl_samples import (
@@ -1597,9 +1598,30 @@ async def list_kcl_docs() -> dict | str:
 
 
 @mcp.tool()
+async def lookup_kcl_docs(
+    query: str, max_results: int = 3, max_chars: int = 6000
+) -> dict[str, object]:
+    """Look up compact KCL reference sections. Prefer this for initial docs lookup.
+
+    Matches symbols, titles, headings, and keywords. Returns source paths and
+    sections with complete examples when they fit. max_chars is a shared budget
+    for Markdown content across all results (metadata is additional). Truncated
+    results can be expanded with get_kcl_doc(path). Both limits must be positive.
+    """
+    if max_results < 1 or max_chars < 1:
+        raise ToolError("max_results and max_chars must be positive")
+    try:
+        await _ensure_kcl_index(KCLDocs)
+        return lookup_docs(query, max_results, max_chars)
+    except Exception as error:
+        raise ToolError(f"Could not look up KCL documentation: {error}") from error
+
+
+@mcp.tool()
 async def search_kcl_docs(query: str, max_results: int = 5) -> list[dict] | str:
     """Search KCL documentation by keyword.
 
+    Prefer lookup_kcl_docs for compact reference sections and examples.
     Searches across all KCL language and standard library documentation
     for the given query. Returns relevant excerpts with surrounding context.
 
@@ -1630,6 +1652,7 @@ async def search_kcl_docs(query: str, max_results: int = 5) -> list[dict] | str:
 async def get_kcl_doc(doc_path: str) -> str:
     """Get the full content of a specific KCL documentation file.
 
+    Prefer lookup_kcl_docs first; fetch a full page when more detail is needed.
     Use list_kcl_docs() to see available documentation paths, or
     search_kcl_docs() to find relevant documentation by keyword.
 

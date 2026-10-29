@@ -155,6 +155,13 @@ The script prompts for a request, runs Codex with the Zoo MCP server, and saves 
 Tools are defined in `src/zoo_mcp/*.py`, where they are then imported into
 `src/zoo_mcp/server.py` and tied to actual `@mcp.tool()` decorated functions.
 
+For initial documentation lookup, use `lookup_kcl_docs` with a symbol or topic.
+It ranks symbol/title matches before heading/body keyword matches and returns
+source sections within a shared Markdown budget (6,000 characters by default;
+metadata is additional). Code examples are included whole or omitted, with
+`truncated: true` when content is omitted. Use `get_kcl_doc` for a full page when
+needed; existing search and listing tools remain available.
+
 `src/zoo_mcp/zoo_tools.py` acts as a large toolset to interact with Zoo's KCL and
 engine facilities. This source file houses other utilities like `parse_unit` or
 `normalize_ext` (normalizing file extensions).
