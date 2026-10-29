@@ -2,16 +2,6 @@ from zoo_mcp import kcl_docs
 from zoo_mcp.utils.data_retrieval_utils import extract_excerpt
 
 
-def test_extract_title():
-    """Test title extraction from Markdown content."""
-    content = "# My Title\n\nSome content here."
-    assert kcl_docs._extract_title(content) == "My Title"
-
-    # Test with no title
-    content_no_title = "Some content without a heading."
-    assert kcl_docs._extract_title(content_no_title) == ""
-
-
 def test_extract_excerpt():
     """Test excerpt extraction with context."""
     content = "This is some text before. The keyword appears here in the middle. And this is text after."

@@ -26,7 +26,6 @@ from zoo_mcp import ctx, logger
 from zoo_mcp.utils.data_retrieval_utils import (
     ZOO_BASE_URL,
     ZOO_SITEMAP_URL,
-    extract_excerpt,
     fetch_markdown,
     is_safe_path_component,
 )
@@ -111,15 +110,6 @@ def _categorize_doc_path(path: str) -> str | None:
     elif path.startswith("docs/kcl-std/modules/"):
         return "kcl-std-modules"
     return None
-
-
-def _extract_title(content: str) -> str:
-    """Extract the title from Markdown content (first # heading)."""
-    for line in content.split("\n"):
-        line = line.strip()
-        if line.startswith("# "):
-            return line[2:].strip()
-    return ""
 
 
 async def _discover_doc_paths(client: httpx.AsyncClient) -> list[str]:
@@ -222,53 +212,6 @@ def list_available_docs() -> dict[str, list[str]]:
         dict: Categories mapped to lists of available documentation paths.
     """
     return KCLDocs.get().index
-
-
-def search_docs(query: str, max_results: int = 5) -> list[dict]:
-    """Search docs by keyword.
-
-    Searches across all KCL language and standard library documentation
-    for the given query. Returns relevant excerpts with surrounding context.
-
-    Args:
-        query (str): The search query (case-insensitive).
-        max_results (int): Maximum number of results to return (default: 5).
-
-    Returns:
-        list[dict]: List of search results, each containing:
-            - path: The documentation path
-            - title: The document title (from first heading)
-            - excerpt: A relevant excerpt with the match highlighted in context
-            - match_count: Number of times the query appears in the document
-    """
-
-    if not query or not query.strip():
-        return [{"error": "Empty search query"}]
-
-    query = query.strip()
-    query_lower = query.lower()
-    results: list[dict] = []
-
-    for path, content in KCLDocs.get().docs.items():
-        content_lower = content.lower()
-
-        match_count = content_lower.count(query_lower)
-        if match_count > 0:
-            title = _extract_title(content)
-            excerpt = extract_excerpt(content, query)
-
-            results.append(
-                {
-                    "path": path,
-                    "title": title,
-                    "excerpt": excerpt,
-                    "match_count": match_count,
-                }
-            )
-
-    results.sort(key=lambda x: x["match_count"], reverse=True)
-
-    return results[:max_results]
 
 
 _MARKDOWN = MarkdownIt("commonmark").enable("table")

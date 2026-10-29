@@ -94,20 +94,6 @@ async def test_live_list_kcl_docs(real_docs):
 
 
 @pytest.mark.xdist_group(name="live-docs")
-async def test_live_search_kcl_docs_extrude(real_docs):
-    response = await mcp.call_tool(
-        "search_kcl_docs", arguments={"query": "extrude", "max_results": 5}
-    )
-    inner = _content_list(response)
-    assert len(inner) > 0, "expected matches for 'extrude'"
-
-    results = [json.loads(tc.text) for tc in inner]
-    first = results[0]
-    assert {"path", "title", "excerpt", "match_count"} <= set(first.keys())
-    assert any("extrude" in r["path"].lower() for r in results)
-
-
-@pytest.mark.xdist_group(name="live-docs")
 async def test_live_get_kcl_doc_from_listing(real_docs):
     """Pick a path from the live listing and fetch it — avoids hard-coding."""
     listing = await mcp.call_tool("list_kcl_docs", arguments={})

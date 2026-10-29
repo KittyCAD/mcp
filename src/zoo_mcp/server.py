@@ -94,7 +94,6 @@ from zoo_mcp.kcl_docs import (
     get_doc_content,
     list_available_docs,
     lookup_docs,
-    search_docs,
 )
 from zoo_mcp.kcl_samples import (
     KCLSamples,
@@ -1616,43 +1615,6 @@ async def lookup_kcl_docs(
         return lookup_docs(query, max_results, max_chars)
     except Exception as error:
         raise ToolError(f"Could not look up KCL documentation: {error}") from error
-
-
-@mcp.tool(
-    meta={
-        "zoo.dev/deprecated": True,
-        "zoo.dev/replacements": ["lookup_kcl_docs"],
-    }
-)
-async def search_kcl_docs(query: str, max_results: int = 5) -> list[dict] | str:
-    """Deprecated: use lookup_kcl_docs for documentation discovery.
-
-    Retained for compatibility with existing keyword-search clients. Its
-    arguments and excerpt/match_count response remain unchanged.
-    Searches across all KCL language and standard library documentation
-    for the given query. Returns relevant excerpts with surrounding context.
-
-    Args:
-        query (str): The search query (case-insensitive).
-        max_results (int): Maximum number of results to return (default: 5).
-
-    Returns:
-        list[dict]: List of search results, each containing:
-            - path: The documentation file path
-            - title: The document title (from first heading)
-            - excerpt: A relevant excerpt with the match highlighted in context
-            - match_count: Number of times the query appears in the document
-
-    Raises:
-        ToolError: Documentation could not be fetched; the call can be retried.
-    """
-    logger.info("search_kcl_docs tool called with query: %s", query)
-    try:
-        await _ensure_kcl_index(KCLDocs)
-        return search_docs(query, max_results)
-    except Exception as e:
-        logger.error("search_kcl_docs tool called with error: %s", e)
-        raise ToolError(f"There was an error searching KCL documentation: {e}") from e
 
 
 @mcp.tool()

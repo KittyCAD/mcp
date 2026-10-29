@@ -324,6 +324,10 @@ def test_empty_and_unmatched_queries(docs, query):
 
 @pytest.mark.asyncio
 async def test_lookup_through_mcp(docs):
+    tools = {tool.name for tool in await mcp.list_tools()}
+    assert "lookup_kcl_docs" in tools and "search_kcl_docs" not in tools
+    with pytest.raises(ToolError, match="Unknown tool: search_kcl_docs"):
+        await mcp.call_tool("search_kcl_docs", {"query": "extrude"})
     result = await mcp.call_tool(
         "lookup_kcl_docs", {"query": "extrude", "max_results": 1}
     )

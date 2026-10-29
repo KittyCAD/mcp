@@ -162,7 +162,7 @@ metadata is additional). Code examples are included whole or omitted. Long
 tables retain complete rows, prioritizing query matches; empty sections are
 omitted and repeated introductory paragraphs are collapsed. Results indicate
 `truncated: true` when content is omitted. Use `get_kcl_doc` for a full page when
-needed; existing search and listing tools remain available.
+needed; `list_kcl_docs` remains available for browsing.
 
 `src/zoo_mcp/zoo_tools.py` acts as a large toolset to interact with Zoo's KCL and
 engine facilities. This source file houses other utilities like `parse_unit` or
