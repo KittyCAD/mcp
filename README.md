@@ -109,8 +109,10 @@ four times text-to-CAD's 64 MiB DFM capture limit. Callers can override
 archive, and after mutations. A complete operation has a 300-second deadline.
 There is no persistent content cache.
 
-- `project_write_file` writes UTF-8 text or, with `encoding="base64"`, binary
-  contents. Its parent directory must exist.
+- `project_write_file` accepts raw Python bytes when encoding is omitted;
+  strings default to UTF-8. Explicit `encoding="utf-8"` or `encoding="base64"`
+  applies to strings. Use base64 for binary contents over JSON MCP transports.
+  Its parent directory must exist.
 - `project_mkdir` requires an existing parent and a nonexistent target. It
   persists the directory using a visible, zero-byte `.empty` file. That marker
   can stay after files are added. Removing or moving a directory's last child
