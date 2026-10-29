@@ -4014,22 +4014,15 @@ _project_locks: WeakKeyDictionary = WeakKeyDictionary()
 
 def _project_path(path: str) -> str:
     """Canonical project-relative POSIX paths, never local filesystem paths."""
+    # Match the API's normalization before checking relative path components.
+    path = path.strip().replace("\\", "/")
     if path in ("", ".", "/"):
         return ""
-    if (
-        path.startswith("/")
-        or any(char in path for char in ("\\", "\x00", ":"))
-        or ".." in path.split("/")
-        or len(path.encode()) > 1024
-    ):
+    if path.startswith("/") or "\x00" in path or ".." in path.split("/"):
         raise ZooMCPException("Expected a project-relative POSIX path without '..'")
     result = str(PurePosixPath(path))
     if result == ".":
         return ""
-    if result != result.strip():
-        raise ZooMCPException(
-            "Project paths cannot have leading or trailing whitespace"
-        )
     return result
 
 
@@ -4078,23 +4071,45 @@ def _project_size(files: dict[str, bytes], limit: int) -> None:
         )
 
 
+@dataclass(frozen=True)
+class _ProjectMutation:
+    # Include explicitly written paths even when their bytes were already equal.
+    written: tuple[str, ...] = ()
+    # These paths and all their descendants must be absent after the operation.
+    removed: tuple[str, ...] = ()
+
+
 def _project_upload_landed(
     before: dict[str, bytes],
     expected: dict[str, bytes],
+    mutation: _ProjectMutation,
     latest: dict[str, bytes],
 ) -> bool:
-    """Reconcile only affected paths; preserve unrelated concurrent edits."""
-    changed = {
-        path: content
-        for path, content in expected.items()
-        if before.get(path) != content
+    """Check operation postconditions, including complete removed subtrees."""
+    written = set(mutation.written) | {
+        path for path, content in expected.items() if before.get(path) != content
     }
     removed = before.keys() - expected.keys()
-    if all(latest.get(path) == content for path, content in changed.items()) and not (
-        removed & latest.keys()
+
+    def removed_tree(files: dict[str, bytes]) -> dict[str, bytes]:
+        return {
+            path: content
+            for path, content in files.items()
+            if any(
+                path == root or path.startswith(root + "/") for root in mutation.removed
+            )
+        }
+
+    remaining = removed_tree(latest)
+    if (
+        all(latest.get(path) == expected[path] for path in written)
+        and not (removed & latest.keys())
+        and not remaining
     ):
         return True
-    if any(latest.get(path) != before.get(path) for path in changed.keys() | removed):
+    if any(
+        latest.get(path) != before.get(path) for path in written | removed
+    ) or remaining != removed_tree(before):
         raise ZooMCPException(
             "Upload outcome is uncertain and affected paths changed; "
             "inspect the project before retrying"
@@ -4194,7 +4209,15 @@ class ProjectFileSystem:
             metadata = await self._metadata(client)
             archive = io.BytesIO()
             # ZIP overhead includes entry names and headers, even for empty files.
-            wire_limit = self.limit + len(metadata["files"]) * 4096 + 1024 * 1024
+            wire_limit = (
+                self.limit
+                + self.limit // 1000
+                + 1024 * 1024
+                + sum(
+                    256 + 2 * len(entry["relative_path"].encode())
+                    for entry in metadata["files"]
+                )
+            )
             async with client.stream(
                 "GET", self.url + "/download", params={"format": "zip"}
             ) as response:
@@ -4270,42 +4293,57 @@ class ProjectFileSystem:
         path = _project_path(path)
         async with self._operation() as client:
             metadata = await self._metadata(client)
-        return self._stat(metadata, path)
+        return self._stat(self._entries(metadata), path)
 
     @staticmethod
-    def _stat(metadata: dict, path: str) -> dict:
-        files = {entry["relative_path"]: entry for entry in metadata["files"]}
-        kind = _project_kind(files, path)
-        if kind is None:
+    def _entries(metadata: dict) -> dict[str, dict]:
+        """Index file and inferred directory metadata once per response."""
+
+        def directory(path: str) -> dict:
+            # Directories have no independent API record.
+            return {
+                "relative_path": path,
+                "kind": "directory",
+                "id": None,
+                "created_at": None,
+                "updated_at": None,
+                "sha256": None,
+                "byte_size": None,
+                "content_type": None,
+            }
+
+        entries = {"": directory("")}
+        for entry in metadata["files"]:
+            path = entry["relative_path"]
+            entries[path] = {**entry, "kind": "file"}
+            for parent in PurePosixPath(path).parents:
+                parent_path = "" if str(parent) == "." else str(parent)
+                if parent_path in entries:
+                    break
+                entries[parent_path] = directory(parent_path)
+        return entries
+
+    @staticmethod
+    def _stat(entries: dict[str, dict], path: str) -> dict:
+        if path not in entries:
             raise ZooMCPException(f"Path does not exist: {path}")
-        if kind == "file":
-            return {**files[path], "kind": kind}
-        # Directories have no independent API record. Keep unavailable fields null.
-        return {
-            "relative_path": path,
-            "kind": kind,
-            "id": None,
-            "created_at": None,
-            "updated_at": None,
-            "sha256": None,
-            "byte_size": None,
-            "content_type": None,
-        }
+        return entries[path]
 
     @api_operation
     async def readdir(self, path: str = ".") -> dict:
         path = _project_path(path)
         async with self._operation() as client:
             metadata = await self._metadata(client)
-        if self._stat(metadata, path)["kind"] != "directory":
+        entries = self._entries(metadata)
+        if self._stat(entries, path)["kind"] != "directory":
             raise ZooMCPException(f"Not a directory: {path}")
         prefix = path + "/" if path else ""
         children = {
-            prefix + entry["relative_path"][len(prefix) :].split("/")[0]
-            for entry in metadata["files"]
-            if entry["relative_path"].startswith(prefix)
+            prefix + name[len(prefix) :].split("/")[0]
+            for name in entries
+            if name != path and name.startswith(prefix)
         }
-        return {"files": [self._stat(metadata, name) for name in sorted(children)]}
+        return {"files": [entries[name] for name in sorted(children)]}
 
     @api_operation
     async def read_file(
@@ -4321,11 +4359,16 @@ class ProjectFileSystem:
         content = snapshot.files[path]
         return content.decode("utf-8") if encoding else content
 
-    async def _mutate(self, transform: Callable[[dict[str, bytes]], None]) -> dict:
+    async def _mutate(
+        self,
+        transform: Callable[[dict[str, bytes]], _ProjectMutation],
+    ) -> dict:
         lock = self._lock()
         async with self._operation() as client, lock:
             snapshot = await self._snapshot(client)
-            pending: tuple[dict[str, bytes], dict[str, bytes]] | None = None
+            pending: (
+                tuple[dict[str, bytes], dict[str, bytes], _ProjectMutation] | None
+            ) = None
             for _ in range(_PROJECT_ATTEMPTS):
                 if not snapshot.metadata["access"]["can_edit"]:
                     raise ZooMCPException("The caller cannot edit this project")
@@ -4334,7 +4377,7 @@ class ProjectFileSystem:
                         "Filesystem mutations require main.kcl as the entrypoint"
                     )
                 updated = snapshot.files.copy()
-                transform(updated)
+                mutation = transform(updated)
                 _validate_project_paths(updated)
                 _project_size(updated, self.limit)
                 if "main.kcl" not in updated:
@@ -4405,7 +4448,7 @@ class ProjectFileSystem:
                             "Upload outcome is uncertain; could not reload the project "
                             "to reconcile it. Inspect the latest project before retrying."
                         ) from exc
-                    pending = (snapshot.files, updated)
+                    pending = (snapshot.files, updated, mutation)
                     if _project_upload_landed(*pending, latest.files):
                         return latest.metadata
                     snapshot = latest
@@ -4418,11 +4461,12 @@ class ProjectFileSystem:
         path = _project_path(path)
         content = contents.encode("utf-8") if isinstance(contents, str) else contents
 
-        def transform(files: dict[str, bytes]) -> None:
+        def transform(files: dict[str, bytes]) -> _ProjectMutation:
             if _project_kind(files, path) == "directory":
                 raise ZooMCPException(f"Cannot overwrite a directory: {path}")
             _project_parent(files, path)
             files[path] = content
+            return _ProjectMutation(written=(path,))
 
         return await self._mutate(transform)
 
@@ -4430,12 +4474,13 @@ class ProjectFileSystem:
     async def mkdir(self, path: str) -> dict:
         path = _project_path(path)
 
-        def transform(files: dict[str, bytes]) -> None:
+        def transform(files: dict[str, bytes]) -> _ProjectMutation:
             if _project_kind(files, path) is not None:
                 raise ZooMCPException(f"Path already exists: {path}")
             _project_parent(files, path)
             # A zero-byte .empty file persists the directory in the file-only Project API.
             files[path + "/.empty"] = b""
+            return _ProjectMutation(written=(path + "/.empty",))
 
         return await self._mutate(transform)
 
@@ -4445,7 +4490,7 @@ class ProjectFileSystem:
         if not path or path == "main.kcl":
             raise ZooMCPException("Cannot remove the project root or main.kcl")
 
-        def transform(files: dict[str, bytes]) -> None:
+        def transform(files: dict[str, bytes]) -> _ProjectMutation:
             targets = [
                 name for name in files if name == path or name.startswith(path + "/")
             ]
@@ -4454,6 +4499,7 @@ class ProjectFileSystem:
             for name in targets:
                 del files[name]
             _preserve_project_parent(files, path)
+            return _ProjectMutation(removed=(path,))
 
         return await self._mutate(transform)
 
@@ -4462,7 +4508,7 @@ class ProjectFileSystem:
         if not source or (move and source == "main.kcl"):
             raise ZooMCPException("Cannot copy the project root or move main.kcl")
 
-        def transform(files: dict[str, bytes]) -> None:
+        def transform(files: dict[str, bytes]) -> _ProjectMutation:
             kind = _project_kind(files, source)
             if kind is None:
                 raise ZooMCPException(f"Path does not exist: {source}")
@@ -4492,6 +4538,10 @@ class ProjectFileSystem:
                 for name in selected:
                     del files[name]
                 _preserve_project_parent(files, source)
+            return _ProjectMutation(
+                written=tuple(target + name[len(source) :] for name in selected),
+                removed=(source,) if move else (),
+            )
 
         return await self._mutate(transform)
 

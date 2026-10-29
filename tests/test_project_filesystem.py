@@ -241,7 +241,7 @@ async def test_invalid_mutations_never_upload(api, op, args):
 
 
 @pytest.mark.parametrize(
-    "path", ["../a", "parts/../a", "/etc/passwd", "C:/a", "a\\b", "a\x00b", " a", "a "]
+    "path", ["../a", "parts/../a", "/etc/passwd", "a\x00b", "a\\..\\b", "\\absolute"]
 )
 def test_unsafe_paths(path):
     with pytest.raises(ZooMCPException):
@@ -683,3 +683,226 @@ async def test_raw_bytes_require_omitted_encoding(api, encoding):
             },
         )
     assert not api.uploads
+
+
+@pytest.mark.asyncio
+async def test_uncertain_recursive_remove_cannot_succeed_with_new_children(
+    api, monkeypatch
+):
+    original = api.handle
+
+    def handle(request):
+        if request.method == "PUT":
+            # The upload never committed. A concurrent writer replaced the old
+            # child with a new one before we reconciled the lost response.
+            del api.files["parts/a.bin"]
+            api.files["parts/new.bin"] = b"concurrent child"
+            api.revision += 1
+            raise httpx.ReadTimeout("response lost", request=request)
+        return original(request)
+
+    monkeypatch.setattr(
+        ProjectFileSystem,
+        "_client",
+        lambda _: httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            headers={"Authorization": "Bearer test-token"},
+        ),
+    )
+    with pytest.raises(ZooMCPException, match="uncertain"):
+        await ProjectFileSystem(PROJECT_ID).rm("parts")
+    assert api.files["parts/new.bin"] == b"concurrent child"
+
+
+@pytest.mark.asyncio
+async def test_uncertain_move_checks_destination_even_if_it_was_already_identical(
+    api, monkeypatch
+):
+    api.files.update({"source.bin": b"same", "destination.bin": b"same"})
+    original = api.handle
+
+    def handle(request):
+        if request.method == "PUT":
+            del api.files["source.bin"]
+            api.files["destination.bin"] = b"concurrent destination edit"
+            api.revision += 1
+            raise httpx.ReadTimeout("response lost", request=request)
+        return original(request)
+
+    monkeypatch.setattr(
+        ProjectFileSystem,
+        "_client",
+        lambda _: httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            headers={"Authorization": "Bearer test-token"},
+        ),
+    )
+    with pytest.raises(ZooMCPException, match="uncertain"):
+        await ProjectFileSystem(PROJECT_ID).mv("source.bin", "destination.bin")
+    assert api.files["destination.bin"] == b"concurrent destination edit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    ["part:v1.kcl", "/".join(["long-name" * 20] * 8) + "/model.kcl"],
+    ids=["colon", "long"],
+)
+async def test_api_valid_paths_do_not_disable_other_files(api, path):
+    api.files[path] = b"// valid API file"
+    fs = ProjectFileSystem(PROJECT_ID)
+    assert (await fs.stat("main.kcl"))["kind"] == "file"
+    assert await fs.read_file(path) == b"// valid API file"
+    await fs.write_file(path, b"// updated")
+    assert api.files[path] == b"// updated"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True])
+async def test_large_directory_listing_scans_metadata_linearly(
+    api, monkeypatch, nested
+):
+    count = 2000
+    api.files = {
+        f"child-{n}/file" if nested else f"child-{n}": b"" for n in range(count)
+    }
+    metadata = api.metadata()
+
+    class CountingEntries(list):
+        visits = 0
+
+        def __iter__(self):
+            for entry in super().__iter__():
+                self.visits += 1
+                yield entry
+
+    entries = CountingEntries(metadata["files"])
+    metadata["files"] = entries
+    fs = ProjectFileSystem(PROJECT_ID)
+
+    async def load_metadata(client):
+        return metadata
+
+    monkeypatch.setattr(fs, "_metadata", load_metadata)
+    children = (await fs.readdir())["files"]
+    assert len(children) == count
+    assert {entry["kind"] for entry in children} == {"directory" if nested else "file"}
+    # Count work instead of asserting wall-clock timing on CI machines.
+    assert entries.visits <= count * 4
+
+
+@pytest.mark.asyncio
+async def test_write_path_normalization_matches_api(api):
+    fs = ProjectFileSystem(PROJECT_ID)
+    await fs.write_file("  .\\parts\\part:v1.kcl  ", "// normalized")
+    assert api.files["parts/part:v1.kcl"] == b"// normalized"
+    assert await fs.read_file(" parts\\part:v1.kcl ") == b"// normalized"
+
+
+@pytest.mark.asyncio
+async def test_late_conflict_reconciles_complete_removed_subtree(api, monkeypatch):
+    original = api.handle
+    api.failure = "timeout_before"
+    attempts = 0
+
+    def handle(request):
+        nonlocal attempts
+        if request.method == "PUT":
+            attempts += 1
+            if attempts == 2:
+                del api.files["parts/a.bin"]
+                api.files["parts/new.bin"] = b"concurrent child"
+                api.revision += 1
+                return httpx.Response(409)
+        return original(request)
+
+    monkeypatch.setattr(
+        ProjectFileSystem,
+        "_client",
+        lambda _: httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            headers={"Authorization": "Bearer test-token"},
+        ),
+    )
+    with pytest.raises(ZooMCPException, match="uncertain"):
+        await ProjectFileSystem(PROJECT_ID).rm("parts")
+    assert attempts == 2
+    assert api.files["parts/new.bin"] == b"concurrent child"
+
+
+@pytest.mark.asyncio
+async def test_uncertain_directory_move_checks_source_subtree(api, monkeypatch):
+    original = api.handle
+    api.failure = "timeout_after"
+
+    def handle(request):
+        try:
+            return original(request)
+        except httpx.ReadTimeout:
+            api.files["parts/new.bin"] = b"concurrent source recreation"
+            api.revision += 1
+            raise
+
+    monkeypatch.setattr(
+        ProjectFileSystem,
+        "_client",
+        lambda _: httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            headers={"Authorization": "Bearer test-token"},
+        ),
+    )
+    with pytest.raises(ZooMCPException, match="uncertain"):
+        await ProjectFileSystem(PROJECT_ID).mv("parts", "moved")
+    assert len(api.uploads) == 1
+    assert api.files["parts/new.bin"] == b"concurrent source recreation"
+    assert api.files["moved/a.bin"] == b"\xff\x00"
+
+
+@pytest.mark.asyncio
+async def test_uncertain_mkdir_preserves_unrelated_new_children(api, monkeypatch):
+    original = api.handle
+    api.failure = "timeout_after"
+
+    def handle(request):
+        try:
+            return original(request)
+        except httpx.ReadTimeout:
+            api.files["new/child"] = b"added after creation"
+            api.revision += 1
+            raise
+
+    monkeypatch.setattr(
+        ProjectFileSystem,
+        "_client",
+        lambda _: httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            headers={"Authorization": "Bearer test-token"},
+        ),
+    )
+    await ProjectFileSystem(PROJECT_ID).mkdir("new")
+    assert len(api.uploads) == 1
+    assert api.files["new/child"] == b"added after creation"
+
+
+@pytest.mark.asyncio
+async def test_uncertain_noop_write_checks_requested_contents(api, monkeypatch):
+    original = api.handle
+
+    def handle(request):
+        if request.method == "PUT":
+            api.files["main.kcl"] = b"// concurrent edit"
+            api.revision += 1
+            raise httpx.ReadTimeout("response lost", request=request)
+        return original(request)
+
+    monkeypatch.setattr(
+        ProjectFileSystem,
+        "_client",
+        lambda _: httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            headers={"Authorization": "Bearer test-token"},
+        ),
+    )
+    with pytest.raises(ZooMCPException, match="uncertain"):
+        await ProjectFileSystem(PROJECT_ID).write_file("main.kcl", b"// main")
+    assert api.files["main.kcl"] == b"// concurrent edit"
