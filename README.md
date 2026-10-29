@@ -172,35 +172,6 @@ rendering on the first snapshot, selection, highlight, or camera tool and retain
 it until the session is stopped, preserving visual state across calls. Exports,
 measurements, and geometry queries do not initialize graphics.
 
-When several outputs are known in advance, use `evaluate_kcl` to execute once,
-measure, and render before closing the isolated session. For example, these MCP
-arguments check a saved project:
-
-```json
-{
-  "kcl_path": "/path/to/project/main.kcl",
-  "snapshot_request": {"views": ["front", "isometric"]},
-  "physical_properties_request": {
-    "properties": ["volume", "bounding_box"],
-    "unit_volume": "mm3",
-    "unit_length": "mm"
-  }
-}
-```
-
-Provide exactly one of `kcl_path` or self-contained `kcl_code`. Optional output
-requests can be omitted for execution only. A snapshot request accepts up to
-four named views or camera objects with `up`, `vantage`, and `center`; `{}` requests
-an isometric image. Mass measurement additionally requires `density` and
-`unit_density`. The tool returns structured execution and inspection results
-and an inline image when available. Images are not duplicated in the JSON
-result. `ok` describes execution, so check individual output statuses before
-using artifacts. Failed inspection does not rerun geometry, and completed
-outputs remain available.
-
-Mock errors prevent hosted execution. The existing standalone tools and
-persistent-session workflow remain available.
-
 The KCL samples tools list and search public Aquarium projects from the Zoo API.
 Pass the returned `name` (a public project ID) to `get_kcl_sample` to download its
 KCL sources. Filenames preserve project-relative paths, including subdirectories.
