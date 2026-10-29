@@ -6,7 +6,6 @@ import json
 import mimetypes
 import os
 import random
-import tomllib
 import zipfile
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
@@ -4107,61 +4106,6 @@ async def _project_multipart(
     yield delimiter + b"--\r\n"
 
 
-def _project_toml_equal(left: object, right: object) -> bool:
-    # TOML distinguishes booleans, integers, and floats; Python equality does not.
-    if type(left) is not type(right):
-        return False
-    if isinstance(left, dict) and isinstance(right, dict):
-        return left.keys() == right.keys() and all(
-            _project_toml_equal(value, right[key]) for key, value in left.items()
-        )
-    if isinstance(left, list) and isinstance(right, list):
-        return len(left) == len(right) and all(
-            _project_toml_equal(a, b) for a, b in zip(left, right)
-        )
-    return left == right
-
-
-def _project_manifest_stamped(
-    before: bytes | None,
-    expected: bytes,
-    latest: bytes | None,
-    project_id: str,
-) -> bool:
-    """Allow only the API-owned cloud identity change when comparing TOML values.
-
-    Discover the environment from the previous server-stamped manifest, rather
-    than guessing from a possibly proxied API URL. All other settings, including
-    other cloud environments, must retain their requested values.
-    """
-    if before is None or latest is None:
-        return False
-    try:
-        original = tomllib.loads(before.decode("utf-8"))
-        requested = tomllib.loads(expected.decode("utf-8"))
-        stored = tomllib.loads(latest.decode("utf-8"))
-    except ValueError:
-        return False
-    original_cloud = original.get("cloud", {})
-    if not isinstance(original_cloud, dict):
-        return False
-    environments = [
-        name
-        for name, identity in original_cloud.items()
-        if isinstance(identity, dict) and identity.get("project_id") == project_id
-    ]
-    if len(environments) != 1:
-        return False
-    cloud = requested.setdefault("cloud", {})
-    if not isinstance(cloud, dict):
-        return False
-    identity = cloud.setdefault(environments[0], {})
-    if not isinstance(identity, dict):
-        return False
-    identity["project_id"] = project_id
-    return _project_toml_equal(requested, stored)
-
-
 @dataclass(frozen=True)
 class _ProjectMutation:
     # Include explicitly written paths even when their bytes were already equal.
@@ -4181,7 +4125,6 @@ class _ProjectUpload:
     before: _ProjectSnapshot
     files: dict[str, bytes]
     mutation: _ProjectMutation
-    project_id: str
 
     def landed(self, latest: _ProjectSnapshot) -> bool:
         """Confirm the effects, allow a safe retry, or raise on ambiguous changes."""
@@ -4203,16 +4146,7 @@ class _ProjectUpload:
             }
 
         remaining = removed_tree(current)
-        writes_match = all(
-            current.get(path) == expected[path]
-            or (
-                path == self.before.metadata["project_toml_path"]
-                and _project_manifest_stamped(
-                    before.get(path), expected[path], current.get(path), self.project_id
-                )
-            )
-            for path in written
-        )
+        writes_match = all(current.get(path) == expected[path] for path in written)
         removals_match = not (removed & current.keys()) and not remaining
         if writes_match and removals_match:
             return True
@@ -4519,7 +4453,7 @@ class ProjectFileSystem:
                         "Cannot remove or move project.toml; the Project API requires "
                         "it and regenerates it when omitted"
                     )
-                upload = _ProjectUpload(snapshot, updated, mutation, self.id)
+                upload = _ProjectUpload(snapshot, updated, mutation)
                 try:
                     response = await self._put(client, upload)
                 except httpx.TransportError:

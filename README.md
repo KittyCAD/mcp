@@ -102,9 +102,8 @@ reapplies the operation, up to three upload attempts. Thus a write replaces the
 target's latest contents, and recursive removal includes files added before a
 retry. Unrelated files and project metadata are preserved. If an upload loses
 its response, the implementation checks the latest affected paths before
-returning success or retrying; ambiguous changes produce a tool error. Manifest
-reconciliation compares TOML values while accounting for the API's cloud identity
-stamp; other settings and cloud environments must match the requested values.
+returning success or retrying; ambiguous changes produce a tool error. File
+contents are compared byte for byte, including `project.toml`.
 
 The default limit is **256 MiB of total uncompressed project contents**, based on
 four times text-to-CAD's 64 MiB DFM capture limit. Callers can override
