@@ -1921,7 +1921,7 @@ async def project_readdir(
 ) -> dict:
     """List immediate cloud directory children as {files: [metadata, ...]}.
 
-    Includes .empty markers. Requires a cloud:<uuid> project ID.
+    Requires a cloud:<uuid> project ID.
     Default total uncompressed project limit: 256 MiB.
     """
     return await ProjectFileSystem(project_id, max_project_bytes).readdir(path)

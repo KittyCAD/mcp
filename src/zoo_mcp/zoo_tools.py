@@ -4056,6 +4056,7 @@ def _preserve_project_parent(files: dict[str, bytes], path: str) -> None:
         and parent != "."
         and _project_kind(files, parent) is None
     ):
+        # A zero-byte .empty file persists the directory in the file-only Project API.
         files[parent + "/.empty"] = b""
 
 
@@ -4433,6 +4434,7 @@ class ProjectFileSystem:
             if _project_kind(files, path) is not None:
                 raise ZooMCPException(f"Path already exists: {path}")
             _project_parent(files, path)
+            # A zero-byte .empty file persists the directory in the file-only Project API.
             files[path + "/.empty"] = b""
 
         return await self._mutate(transform)

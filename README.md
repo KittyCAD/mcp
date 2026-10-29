@@ -130,8 +130,7 @@ There is no persistent content cache.
 - `project_access` returns the API's current project capabilities for an existing
   path. `project_stat` returns file metadata or an inferred directory record;
   directory IDs, timestamps, sizes, and hashes are null.
-- `project_readdir` returns `{ "files": [...] }` for immediate children,
-  including `.empty` markers.
+- `project_readdir` returns `{ "files": [...] }` for immediate children.
 - `project_read_file` returns `{ "contents": "...", "encoding": "utf-8" }`.
   Set `encoding="base64"` for binary files.
 
