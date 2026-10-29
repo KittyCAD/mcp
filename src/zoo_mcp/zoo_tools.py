@@ -6,10 +6,12 @@ import json
 import mimetypes
 import os
 import random
+import tomllib
 import zipfile
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
@@ -4014,6 +4016,8 @@ _project_locks: WeakKeyDictionary = WeakKeyDictionary()
 
 def _project_path(path: str) -> str:
     """Canonical project-relative POSIX paths, never local filesystem paths."""
+    if any(ord(char) < 32 or ord(char) == 127 for char in path):
+        raise ZooMCPException("Project paths cannot contain control characters")
     # Match the API's normalization before checking relative path components.
     path = path.strip().replace("\\", "/")
     if path in ("", ".", "/"):
@@ -4071,6 +4075,95 @@ def _project_size(files: dict[str, bytes], limit: int) -> None:
         )
 
 
+async def _project_multipart(
+    body: dict,
+    files: dict[str, bytes],
+    boundary: str,
+) -> AsyncGenerator[bytes, None]:
+    """Stream quoted-pair filenames, as understood by the API's multer parser.
+
+    HTTPX's files= encoder percent-encodes quotes, which multer preserves
+    literally. A literal %22 filename must remain distinct from a quote.
+    """
+    delimiter = ("--" + boundary).encode("ascii")
+    yield (
+        delimiter
+        + b'\r\nContent-Disposition: form-data; name="body"\r\nContent-Type: application/json\r\n\r\n'
+    )
+    yield json.dumps(body).encode("utf-8")
+    yield b"\r\n"
+    for path, content in sorted(files.items()):
+        filename = path.replace("\\", "\\\\").replace('"', '\\"')
+        content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        yield delimiter + (
+            '\r\nContent-Disposition: form-data; name="files"; filename="'
+            + filename
+            + '"\r\nContent-Type: '
+            + content_type
+            + "\r\n\r\n"
+        ).encode("utf-8")
+        for offset in range(0, len(content), 64 * 1024):
+            yield content[offset : offset + 64 * 1024]
+        yield b"\r\n"
+    yield delimiter + b"--\r\n"
+
+
+def _project_toml_equal(left: object, right: object) -> bool:
+    # TOML distinguishes booleans, integers, and floats; Python equality does not.
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            _project_toml_equal(value, right[key]) for key, value in left.items()
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _project_toml_equal(a, b) for a, b in zip(left, right)
+        )
+    return left == right
+
+
+def _project_manifest_stamped(
+    before: bytes | None,
+    expected: bytes,
+    latest: bytes | None,
+    project_id: str,
+) -> bool:
+    """Allow only the API-owned cloud identity change when comparing TOML values.
+
+    Discover the environment from the previous server-stamped manifest, rather
+    than guessing from a possibly proxied API URL. All other settings, including
+    other cloud environments, must retain their requested values.
+    """
+    if before is None or latest is None:
+        return False
+    try:
+        original = tomllib.loads(before.decode("utf-8"))
+        requested = tomllib.loads(expected.decode("utf-8"))
+        stored = tomllib.loads(latest.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        return False
+    original_cloud = original.get("cloud", {})
+    if not isinstance(original_cloud, dict):
+        return False
+    environments = [
+        name
+        for name, identity in original_cloud.items()
+        if isinstance(identity, dict) and identity.get("project_id") == project_id
+    ]
+    if len(environments) != 1:
+        return False
+    stamped = deepcopy(requested)
+    cloud = stamped.setdefault("cloud", {})
+    if not isinstance(cloud, dict):
+        return False
+    identity = cloud.setdefault(environments[0], {})
+    if not isinstance(identity, dict):
+        return False
+    identity["project_id"] = project_id
+    return _project_toml_equal(stamped, stored)
+
+
 @dataclass(frozen=True)
 class _ProjectMutation:
     # Include explicitly written paths even when their bytes were already equal.
@@ -4084,6 +4177,9 @@ def _project_upload_landed(
     expected: dict[str, bytes],
     mutation: _ProjectMutation,
     latest: dict[str, bytes],
+    *,
+    project_id: str,
+    manifest_path: str,
 ) -> bool:
     """Check operation postconditions, including complete removed subtrees."""
     written = set(mutation.written) | {
@@ -4102,7 +4198,19 @@ def _project_upload_landed(
 
     remaining = removed_tree(latest)
     if (
-        all(latest.get(path) == expected[path] for path in written)
+        all(
+            latest.get(path) == expected[path]
+            or (
+                path == manifest_path
+                and _project_manifest_stamped(
+                    before.get(path),
+                    expected[path],
+                    latest.get(path),
+                    project_id,
+                )
+            )
+            for path in written
+        )
         and not (removed & latest.keys())
         and not remaining
     ):
@@ -4408,26 +4516,26 @@ class ProjectFileSystem:
                     expected_revision=snapshot.metadata["revision"],
                     deleted_paths=sorted(removed - previews),
                 )
-                parts = [("body", (None, json.dumps(body), "application/json"))]
-                parts.extend(
-                    (
-                        "files",
-                        (
-                            path,
-                            content,
-                            mimetypes.guess_type(path)[0] or "application/octet-stream",
-                        ),
-                    )
-                    for path, content in sorted(updated.items())
-                )
+                boundary = uuid4().hex
                 uncertain = False
                 try:
-                    response = await client.put(self.url, files=parts)
+                    response = await client.put(
+                        self.url,
+                        content=_project_multipart(body, updated, boundary),
+                        headers={
+                            "Content-Type": "multipart/form-data; boundary=" + boundary
+                        },
+                    )
                     if response.status_code == 409:
                         snapshot = await self._snapshot(client)
                         # A previously timed-out request may have committed while
                         # this replacement was in flight, causing this conflict.
-                        if pending and _project_upload_landed(*pending, snapshot.files):
+                        if pending and _project_upload_landed(
+                            *pending,
+                            snapshot.files,
+                            project_id=self.id,
+                            manifest_path=snapshot.metadata["project_toml_path"],
+                        ):
                             return snapshot.metadata
                         continue
                     if response.status_code >= 500:
@@ -4449,7 +4557,12 @@ class ProjectFileSystem:
                             "to reconcile it. Inspect the latest project before retrying."
                         ) from exc
                     pending = (snapshot.files, updated, mutation)
-                    if _project_upload_landed(*pending, latest.files):
+                    if _project_upload_landed(
+                        *pending,
+                        latest.files,
+                        project_id=self.id,
+                        manifest_path=snapshot.metadata["project_toml_path"],
+                    ):
                         return latest.metadata
                     snapshot = latest
             raise ZooMCPException(
