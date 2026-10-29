@@ -1618,11 +1618,17 @@ async def lookup_kcl_docs(
         raise ToolError(f"Could not look up KCL documentation: {error}") from error
 
 
-@mcp.tool()
+@mcp.tool(
+    meta={
+        "zoo.dev/deprecated": True,
+        "zoo.dev/replacements": ["lookup_kcl_docs"],
+    }
+)
 async def search_kcl_docs(query: str, max_results: int = 5) -> list[dict] | str:
-    """Search KCL documentation by keyword.
+    """Deprecated: use lookup_kcl_docs for documentation discovery.
 
-    Prefer lookup_kcl_docs for compact reference sections and examples.
+    Retained for compatibility with existing keyword-search clients. Its
+    arguments and excerpt/match_count response remain unchanged.
     Searches across all KCL language and standard library documentation
     for the given query. Returns relevant excerpts with surrounding context.
 
@@ -1655,7 +1661,7 @@ async def get_kcl_doc(doc_path: str) -> str:
 
     Prefer lookup_kcl_docs first; fetch a full page when more detail is needed.
     Use list_kcl_docs() to see available documentation paths, or
-    search_kcl_docs() to find relevant documentation by keyword.
+    lookup_kcl_docs() to find relevant documentation by symbol or topic.
 
     Args:
         doc_path (str): The path to the documentation file

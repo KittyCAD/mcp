@@ -547,7 +547,7 @@ def get_doc_content(doc_path: str) -> str | None:
     """Get the full content of a specific KCL documentation file.
 
     Use list_kcl_docs() to see available documentation paths, or
-    search_kcl_docs() to find relevant documentation by keyword.
+    lookup_kcl_docs() to find relevant documentation by symbol or topic.
 
     Args:
         doc_path (str): The path to the documentation file
