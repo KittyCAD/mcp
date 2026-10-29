@@ -639,3 +639,47 @@ async def test_project_download_follows_no_redirects(api, monkeypatch):
     with pytest.raises(httpx.HTTPStatusError):
         await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
     assert not api.uploads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "contents,options,expected",
+    [
+        (b"\xff\x00\x80", {}, b"\xff\x00\x80"),
+        (b"", {}, b""),
+        ("text \u00e9", {}, "text \u00e9".encode()),
+        ("text \u00e9", {"encoding": "utf-8"}, "text \u00e9".encode()),
+        ("/wCA", {"encoding": "base64"}, b"\xff\x00\x80"),
+    ],
+)
+async def test_write_tool_accepts_bytes_without_encoding(
+    api, contents, options, expected
+):
+    result = await mcp.call_tool(
+        "project_write_file",
+        {
+            "project_id": PROJECT_ID,
+            "path": "written.bin",
+            "contents": contents,
+            **options,
+        },
+    )
+    assert isinstance(result, CallToolResult)
+    assert not result.is_error
+    assert api.files["written.bin"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["utf-8", "base64"])
+async def test_raw_bytes_require_omitted_encoding(api, encoding):
+    with pytest.raises(ToolError, match="Omit encoding"):
+        await mcp.call_tool(
+            "project_write_file",
+            {
+                "project_id": PROJECT_ID,
+                "path": "written.bin",
+                "contents": b"\xff",
+                "encoding": encoding,
+            },
+        )
+    assert not api.uploads
