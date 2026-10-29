@@ -118,10 +118,8 @@ from zoo_mcp.zoo_tools import (
     ResultZooExecuteKcl,
     _abort_all_modeling_sessions,
     zoo_calculate_bounding_box_cad,
-    zoo_calculate_bounding_box_kcl,
     zoo_calculate_cad_physical_properties,
     zoo_calculate_center_of_mass,
-    zoo_calculate_kcl_physical_properties,
     zoo_calculate_mass,
     zoo_calculate_surface_area,
     zoo_calculate_volume,
@@ -375,88 +373,6 @@ async def calculate_cad_physical_properties(
         )
     except Exception as e:
         return f"There was an error calculating physical properties of the file: {e}"
-
-
-@mcp.tool()
-async def calculate_kcl_physical_properties(
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    unit_length: str = "mm",
-    unit_mass: str = "g",
-    unit_density: str = "kg:m3",
-    density: float = 1000.0,
-    unit_area: str = "mm2",
-    unit_volume: str = "cm3",
-) -> dict | str:
-    """Calculate physical properties (volume, mass, surface area, center of mass, bounding box) of a KCL model.
-
-    Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point
-    to a .kcl file or a directory containing a main.kcl file.
-
-    Args:
-        kcl_code (str | None): The KCL code to evaluate.
-        kcl_path (str | None): Path to a .kcl file or a directory containing a main.kcl file.
-        unit_length (str): The unit of length for center of mass. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
-        unit_mass (str): The unit of mass for the mass result. One of 'g', 'kg', 'lb'.
-        unit_density (str): The unit of density for the material. One of 'lb:ft3', 'kg:m3'.
-        density (float): The density of the material.
-        unit_area (str): The unit of area for surface area. One of 'cm2', 'dm2', 'ft2', 'in2', 'km2', 'm2', 'mm2', 'yd2'.
-        unit_volume (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
-
-    Returns:
-        dict | str: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass', and 'bounding_box', or an error message if the operation fails.
-    """
-
-    logger.info("calculate_kcl_physical_properties tool called")
-
-    try:
-        return await zoo_calculate_kcl_physical_properties(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            unit_length=unit_length,
-            unit_mass=unit_mass,
-            unit_density=unit_density,
-            density=density,
-            unit_area=unit_area,
-            unit_vol=unit_volume,
-        )
-    except Exception as e:
-        return (
-            f"There was an error calculating physical properties of the KCL model: {e}"
-        )
-
-
-@mcp.tool()
-async def calculate_bounding_box_kcl(
-    unit_length: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-) -> dict | str:
-    """Calculate the bounding box of a KCL model.
-
-    Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point
-    to a .kcl file or a directory containing a main.kcl file.
-
-    Args:
-        unit_length (str): The unit of length to return the result in. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'
-        kcl_code (str | None): The KCL code to evaluate.
-        kcl_path (str | None): Path to a .kcl file or a directory containing a main.kcl file.
-
-    Returns:
-        dict | str: A dictionary with 'center' (dict with x,y,z) and 'dimensions' (dict with x,y,z),
-                    or an error message if the operation fails.
-    """
-
-    logger.info("calculate_bounding_box_kcl tool called")
-
-    try:
-        return await zoo_calculate_bounding_box_kcl(
-            unit_length=unit_length,
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-        )
-    except Exception as e:
-        return f"There was an error calculating bounding box of the KCL model: {e}"
 
 
 @mcp.tool()

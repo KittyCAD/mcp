@@ -17,6 +17,17 @@ from zoo_mcp.server import mcp
 from zoo_mcp.zoo_tools import zoo_evaluate_kcl
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "removed", ["calculate_kcl_physical_properties", "calculate_bounding_box_kcl"]
+)
+async def test_measurements_use_evaluate_kcl(removed):
+    names = {tool.name for tool in await mcp.list_tools()}
+    assert "evaluate_kcl" in names and removed not in names
+    with pytest.raises(ToolError, match=f"Unknown tool: {removed}"):
+        await mcp.call_tool(removed, {})
+
+
 @pytest.fixture
 def bindings(monkeypatch):
     buffer = io.BytesIO()
@@ -140,6 +151,12 @@ async def test_cancellation_closes_session(bindings, tmp_path, stage):
         {"snapshot_request": {"views": [{"up": [1, 2]}]}},
         {"snapshot_request": {"padding": -1}},
         {"physical_properties_request": {"properties": ["mass"]}},
+        {
+            "physical_properties_request": {
+                "properties": ["surface_area"],
+                "unit_area": "wrong",
+            }
+        },
         {
             "physical_properties_request": {
                 "properties": ["volume"],
