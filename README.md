@@ -158,7 +158,9 @@ Tools are defined in `src/zoo_mcp/*.py`, where they are then imported into
 For initial documentation lookup, use `lookup_kcl_docs` with a symbol or topic.
 It ranks symbol/title matches before heading/body keyword matches and returns
 source sections within a shared Markdown budget (6,000 characters by default;
-metadata is additional). Code examples are included whole or omitted, with
+metadata is additional). Code examples are included whole or omitted. Long
+tables retain complete rows, prioritizing query matches; empty sections are
+omitted and repeated introductory paragraphs are collapsed. Results indicate
 `truncated: true` when content is omitted. Use `get_kcl_doc` for a full page when
 needed; existing search and listing tools remain available.
 

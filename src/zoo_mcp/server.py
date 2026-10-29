@@ -1604,8 +1604,9 @@ async def lookup_kcl_docs(
     """Look up compact KCL reference sections. Prefer this for initial docs lookup.
 
     Matches symbols, titles, headings, and keywords. Returns source paths and
-    sections with complete examples when they fit. max_chars is a shared budget
-    for Markdown content across all results (metadata is additional). Truncated
+    nonempty sections with complete examples and table rows when they fit.
+    max_chars is a shared budget for Markdown content across all results
+    (metadata is additional). Tables may omit rows within this budget. Truncated
     results can be expanded with get_kcl_doc(path). Both limits must be positive.
     """
     if max_results < 1 or max_chars < 1:

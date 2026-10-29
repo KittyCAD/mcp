@@ -261,6 +261,7 @@ def search_docs(query: str, max_results: int = 5) -> list[dict]:
 
 _HEADING_RE = re.compile(r"^ {0,3}#{1,6}\s+(.+?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_TABLE_DELIMITER_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
 
 
 def _markdown_sections(content: str) -> list[tuple[str, list[str]]]:
@@ -313,6 +314,35 @@ def _lookup_tokens(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
+def _compact_block(block: str, budget: int, tokens: set[str]) -> str:
+    """Keep whole blocks, or a table header with complete, relevant data rows."""
+    if len(block) <= budget:
+        return block
+    lines = block.splitlines()
+    if (
+        _FENCE_RE.match(lines[0])
+        or len(lines) < 3
+        or not _TABLE_DELIMITER_RE.fullmatch(lines[1])
+        or any("|" not in line for line in lines)
+    ):
+        return ""
+
+    header = "\n".join(lines[:2])
+    used = len(header)
+    kept: dict[int, str] = {}
+    rows = sorted(
+        enumerate(lines[2:]),
+        key=lambda item: (-len(tokens & _lookup_tokens(item[1])), item[0]),
+    )
+    for index, row in rows:
+        if used + len(row) + 1 <= budget:
+            kept[index] = row
+            used += len(row) + 1
+    if not kept:
+        return ""
+    return "\n".join([header, *(kept[index] for index in sorted(kept))])
+
+
 def lookup_docs(query: str, max_results: int = 3, max_chars: int = 6000) -> dict:
     """Return ranked source sections within one Markdown-content budget."""
     if max_results < 1 or max_chars < 1:
@@ -355,16 +385,36 @@ def lookup_docs(query: str, max_results: int = 3, max_chars: int = 6000) -> dict
         used = 0
         omitted = False
         for index, (heading, blocks) in ranked:
-            kept: list[str] = []
-            for block in blocks:
-                cost = len(block) + (2 if kept else 0)
-                if used + cost <= budget:
-                    kept.append(block)
-                    used += cost
-                else:
+            # A heading is only useful when some of its content fits too. Reserve
+            # its cost without charging the page for sections we cannot include.
+            has_heading = bool(_HEADING_RE.fullmatch(blocks[0]))
+            kept = blocks[:1] if has_heading else []
+            section_used = len(kept[0]) if kept else 0
+            body = blocks[1:] if has_heading else blocks
+            for block_index, block in enumerate(body):
+                # Generated pages can repeat their introductory paragraph. Keep
+                # one copy without treating the duplicate as lost information.
+                if (
+                    index == 0
+                    and block_index > 0
+                    and block == body[block_index - 1]
+                    and not _FENCE_RE.match(block.splitlines()[0])
+                ):
+                    continue
+                separator_cost = 2 if kept else 0
+                excerpt = _compact_block(
+                    block, budget - used - section_used - separator_cost, tokens
+                )
+                if excerpt != block:
                     omitted = True
-            if kept:
+                if excerpt:
+                    kept.append(excerpt)
+                    section_used += len(excerpt) + separator_cost
+            if len(kept) > int(has_heading):
+                used += section_used
                 excerpts[index] = {"heading": heading, "content": "\n\n".join(kept)}
+            else:
+                omitted = True
         remaining -= used
         # Also flag malformed source fences omitted by the parser.
         source_lines = " ".join(content.split())
