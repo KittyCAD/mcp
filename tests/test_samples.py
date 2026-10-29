@@ -304,7 +304,11 @@ def test_archive_rejects_duplicate_paths():
         )
 
 
-@pytest.mark.parametrize("content", [b"not a zip", _archive([("main.kcl", b"\xff")])])
+@pytest.mark.parametrize(
+    "content",
+    [b"not a zip", _archive([("main.kcl", b"\xff")])],
+    ids=["invalid-zip", "invalid-utf8"],
+)
 def test_archive_rejects_invalid_zip_or_source(content: bytes):
     with pytest.raises((zipfile.BadZipFile, UnicodeDecodeError)):
         kcl_samples._parse_project_archive(content)
