@@ -149,6 +149,22 @@ def api(monkeypatch, httpx_mock):
     return remote
 
 
+@pytest.fixture
+def project_transport(monkeypatch):
+    def install(handler):
+        monkeypatch.setattr(
+            ProjectFileSystem,
+            "_client",
+            lambda _: httpx.AsyncClient(
+                transport=httpx.MockTransport(handler),
+                headers={"Authorization": "Bearer test-token"},
+                follow_redirects=False,
+            ),
+        )
+
+    return install
+
+
 @pytest.mark.asyncio
 async def test_write_preserves_binary_metadata_and_arbitrary_field_names(api):
     fs = ProjectFileSystem(PROJECT_ID)
@@ -319,7 +335,7 @@ async def test_upload_timeout_leaves_concurrent_edit_for_caller(api):
     ],
 )
 async def test_upload_response_errors_propagate_without_retry_or_reload(
-    api, monkeypatch, failure, error
+    api, project_transport, failure, error
 ):
     def handle(request):
         response = api.handle(request)
@@ -331,14 +347,7 @@ async def test_upload_response_errors_propagate_without_retry_or_reload(
             return httpx.Response(503)
         return httpx.Response(200, content=b"invalid json")
 
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
+    project_transport(handle)
     with pytest.raises(error):
         await ProjectFileSystem(PROJECT_ID).write_file("parts/a.bin", b"changed")
     assert len(api.uploads) == 1
@@ -476,7 +485,7 @@ async def test_manifest_cannot_be_removed_or_moved(api, operation, args):
 
 
 @pytest.mark.asyncio
-async def test_retry_budget(api, monkeypatch):
+async def test_retry_budget(api, project_transport):
     original = api.handle
     attempts = 0
 
@@ -487,21 +496,14 @@ async def test_retry_budget(api, monkeypatch):
             return httpx.Response(409)
         return original(request)
 
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(conflict_forever),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
+    project_transport(conflict_forever)
     with pytest.raises(ZooMCPException, match="three attempts"):
         await ProjectFileSystem(PROJECT_ID).rm("parts")
     assert attempts == 3
 
 
 @pytest.mark.asyncio
-async def test_conflicting_remove_includes_new_descendants(api, monkeypatch):
+async def test_conflicting_remove_includes_new_descendants(api, project_transport):
     original = api.handle
     conflict = True
 
@@ -514,14 +516,7 @@ async def test_conflicting_remove_includes_new_descendants(api, monkeypatch):
             return httpx.Response(409)
         return original(request)
 
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
+    project_transport(handle)
     await ProjectFileSystem(PROJECT_ID).rm("parts")
     assert "parts/new.bin" in api.uploads[-1][0]["deleted_paths"]
     assert all(not name.startswith("parts/") for name in api.files)
@@ -619,7 +614,7 @@ def test_invalid_limits(api, limit):
 
 
 @pytest.mark.asyncio
-async def test_project_download_follows_no_redirects(api, monkeypatch):
+async def test_project_download_follows_no_redirects(api, project_transport):
     original = api.handle
 
     def handle(request):
@@ -629,15 +624,7 @@ async def test_project_download_follows_no_redirects(api, monkeypatch):
             )
         return original(request)
 
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-            follow_redirects=False,
-        ),
-    )
+    project_transport(handle)
     with pytest.raises(httpx.HTTPStatusError):
         await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
     assert not api.uploads
