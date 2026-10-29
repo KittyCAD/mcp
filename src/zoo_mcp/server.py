@@ -115,6 +115,7 @@ from zoo_mcp.utils.image_utils import (
 from zoo_mcp.zoo_tools import (
     CameraView,
     FaceInfo,
+    KclExportRequest,
     KclPhysicalPropertiesRequest,
     KclPhysicalProperty,
     KclSnapshotRequest,
@@ -131,7 +132,6 @@ from zoo_mcp.zoo_tools import (
     zoo_exec_kcl_project,
     zoo_execute_kcl,
     zoo_execute_modeling_command,
-    zoo_export_kcl,
     zoo_face_info,
     zoo_format_kcl,
     zoo_get_modeling_sessions,
@@ -436,7 +436,7 @@ async def execute_kcl(
 ) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
-    Prefer evaluate_kcl when execution, measurements, and snapshots are
+    Prefer evaluate_kcl when execution, measurements, snapshots, or exports are
     needed together; it collects them from one execution.
 
     Executing kcl_code does not save a .kcl source file. For model creation,
@@ -685,10 +685,11 @@ async def evaluate_kcl(
             ],
         ),
     ] = None,
+    exports: list[KclExportRequest] | None = None,
 ) -> CallToolResult:
-    """Execute KCL once and collect requested measurements and snapshots.
+    """Execute KCL once and collect requested measurements, snapshots and exports.
 
-    Prefer this when several checks are known in advance.
+    Prefer this when several checks or final export formats are known in advance.
     Provide exactly one source: self-contained kcl_code or a saved kcl_path project.
     Save editable source separately; inline code does not create a source file.
     Mock errors prevent hosted execution. The isolated session closes after the
@@ -700,10 +701,14 @@ async def evaluate_kcl(
     physical_properties_request: Optional properties list (volume, mass,
         surface_area, center_of_mass, bounding_box) and units. Mass additionally
         requires density and unit_density. Only requested properties are measured.
+    exports: Optional format/destination_dir pairs. Each format needs a separate,
+        non-overlapping directory, created if missing. Returned bundle filenames
+        are preserved; existing files are not overwritten. Request final formats
+        together rather than executing separately for each export.
 
-    Returns structured execution/inspection outcomes, plus an inline image when
-    requested and available. ok describes execution only: inspect output statuses
-    for partial failures. Output failures
+    Returns structured execution/inspection outcomes and per-export statuses and
+    file paths, plus an inline image when requested and available. ok describes
+    execution only: inspect output statuses for partial failures. Output failures
     never rerun geometry; successful outputs remain available.
     """
     if (kcl_code is None) == (kcl_path is None):
@@ -717,6 +722,7 @@ async def evaluate_kcl(
             if physical_properties_request is not None
             else None
         ),
+        exports=exports,
     )
     data = asdict(result)
     image_bytes = data["inspection"].pop("rendered_snapshot")
@@ -830,43 +836,6 @@ async def stop_modeling_session(session_id: str) -> None:
     """
     logger.info("stop_modeling_session tool called")
     await zoo_stop_modeling_session(session_id)
-
-
-@mcp.tool()
-async def export_kcl(
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    export_path: str | None = None,
-    export_format: str | None = None,
-) -> str:
-    """Export KCL code to a CAD file. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
-
-    This tool does not save editable KCL source. For model creation, include
-    the saved KCL project alongside any requested CAD exports unless the user
-    explicitly requests export-only output.
-
-    Args:
-        kcl_code (str | None): The KCL code to export to a CAD file.
-        kcl_path (str | None): The path to a KCL file to export to a CAD file. The path should point to a .kcl file or a directory containing a main.kcl file.
-        export_path (str | None): The path to export the CAD file. If no path is provided, a temporary file will be created.
-        export_format (str | None): The format to export the file as. This should be one of 'fbx', 'glb', 'gltf', 'obj', 'ply', 'step', 'stl'. If no format is provided, the default is 'step'.
-
-    Returns:
-        str: The path to the converted CAD file, or an error message if the operation fails.
-    """
-
-    logger.info("convert_kcl_to_step tool called")
-
-    try:
-        cad_path = await zoo_export_kcl(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            export_path=export_path,
-            export_format=export_format,
-        )
-        return str(cad_path)
-    except Exception as e:
-        return f"There was an error exporting the CAD file: {e}"
 
 
 @mcp.tool()

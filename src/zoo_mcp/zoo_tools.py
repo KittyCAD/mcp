@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
@@ -1697,6 +1697,26 @@ class ResultZooExecuteKclRemote(ResultZooExecuteKclLocal):
 ResultZooExecuteKcl: TypeAlias = ResultZooExecuteKclLocal | ResultZooExecuteKclRemote
 
 
+@dataclass(frozen=True)
+class KclExportRequest:
+    format: Literal["fbx", "glb", "gltf", "obj", "ply", "step", "stl"]
+    destination_dir: str
+
+
+@dataclass
+class KclExportResult:
+    format: str
+    destination_dir: str
+    status: Literal["not_run", "succeeded", "failed"] = "not_run"
+    files: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass
+class ResultZooEvaluateKcl(ResultZooExecuteKclLocal):
+    exports: list[KclExportResult] = field(default_factory=list)
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionStageEvent:
     """Stage timing and outcome, without source code or diagnostic details."""
@@ -2167,6 +2187,111 @@ async def _collect_session_physical_properties(
         inspection.physical_analysis_status = "failed"
 
 
+def _prepare_evaluation_exports(
+    requests: list[KclExportRequest],
+) -> list[KclExportResult]:
+    """Check every request before creating output directories or using the engine."""
+    results: list[KclExportResult] = []
+    destinations: set[Path] = set()
+    for request in requests:
+        if request.format not in KCLExportFormat.formats.value:
+            raise ValueError(f"Unsupported export format: {request.format}")
+        if not request.destination_dir.strip():
+            raise ValueError("Export destination_dir must not be empty")
+        destination = Path(request.destination_dir).expanduser().resolve()
+        # Formats can emit identically named companion files. Keep each bundle
+        # isolated instead of silently overwriting another requested output.
+        if any(
+            destination == prior
+            or destination in prior.parents
+            or prior in destination.parents
+            for prior in destinations
+        ):
+            raise ValueError("Exports require separate, non-overlapping directories")
+        destinations.add(destination)
+        results.append(KclExportResult(request.format, str(destination)))
+    for result in results:
+        destination = Path(result.destination_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        # Actually check writability, including ACLs, before paying for execution.
+        with NamedTemporaryFile(dir=destination, prefix=".zoo-export-"):
+            pass
+    return results
+
+
+def _write_evaluation_export(files: list[kcl.RawFile], destination: Path) -> list[str]:
+    """Preserve bundle filenames; reject unsafe or colliding paths before writing."""
+    if not files:
+        raise ValueError("Export returned no files")
+    targets: list[Path] = []
+    for file in files:
+        name = file.name
+        relative = PurePosixPath(name)
+        if (
+            not name
+            or "\\" in name
+            or "\x00" in name
+            or relative.is_absolute()
+            or PureWindowsPath(name).drive
+            or any(part in {"", ".", ".."} for part in name.split("/"))
+        ):
+            raise ValueError(f"Unsafe export filename: {name!r}")
+        target = destination.joinpath(*relative.parts)
+        # Reject symlinks even when they currently resolve inside the destination.
+        # This also prevents two returned names from aliasing the same file.
+        if any(path.is_symlink() for path in (target, *target.parents)):
+            raise ValueError(f"Export path contains a symlink: {name!r}")
+        if not target.resolve().is_relative_to(destination):
+            raise ValueError(f"Export path escapes destination: {name!r}")
+        if target.exists():
+            raise ValueError(f"Export file already exists: {target}")
+        if any(
+            target == prior or target in prior.parents or prior in target.parents
+            for prior in targets
+        ):
+            raise ValueError(f"Conflicting export filename: {name!r}")
+        targets.append(target)
+    written: list[Path] = []
+    try:
+        for target, file in zip(targets, files, strict=True):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as output:
+                written.append(target)
+                output.write(bytes(file.contents))
+    except BaseException:
+        # Do not leave a partial bundle that appears usable on a subsequent call.
+        for target in written:
+            target.unlink(missing_ok=True)
+        raise
+    return [str(target) for target in targets]
+
+
+async def _collect_session_exports(
+    session: kcl.KclSession, exports: list[KclExportResult]
+) -> None:
+    for result in exports:
+        try:
+            files = await session.export(KCLExportFormat.formats.value[result.format])
+            # A cancelled thread must finish before the caller closes its scope;
+            # otherwise it could still be writing after cancellation is reported.
+            pending = asyncio.create_task(
+                asyncio.to_thread(
+                    _write_evaluation_export, files, Path(result.destination_dir)
+                )
+            )
+            try:
+                result.files = await asyncio.shield(pending)
+            except asyncio.CancelledError as cancellation:
+                try:
+                    await pending
+                finally:
+                    raise cancellation
+            result.status = "succeeded"
+        except Exception as error:
+            result.status = "failed"
+            result.error = str(error)
+
+
 async def _execute_kcl_with_preflight(
     kcl_code: str | None,
     kcl_path: Path | str | None,
@@ -2175,9 +2300,12 @@ async def _execute_kcl_with_preflight(
     operation: str,
     snapshot_request: KclSnapshotRequest | None = None,
     physical_properties_request: KclPhysicalPropertiesRequest | None = None,
+    exports: list[KclExportResult] | None = None,
 ) -> ResultZooExecuteKcl:
     if session_id is not None and (
-        snapshot_request is not None or physical_properties_request is not None
+        snapshot_request is not None
+        or physical_properties_request is not None
+        or exports
     ):
         raise ValueError(
             "snapshot and physical-property outputs are only available for local execution"
@@ -2292,6 +2420,8 @@ async def _execute_kcl_with_preflight(
                             await _collect_session_physical_properties(
                                 session, physical_properties_request, inspection
                             )
+                        if exports:
+                            await _collect_session_exports(session, exports)
                 finally:
                     await session.close()
 
@@ -2403,21 +2533,47 @@ async def zoo_evaluate_kcl(
     *,
     snapshot_request: KclSnapshotRequest | None = None,
     physical_properties_request: KclPhysicalPropertiesRequest | None = None,
-) -> ResultZooExecuteKcl:
-    """Execute once, inspect requested outputs, then close the session.
+    exports: list[KclExportRequest] | None = None,
+) -> ResultZooEvaluateKcl:
+    """Execute once, inspect and export requested outputs, then close the session.
 
-    ok describes execution; each requested output has its own status.
-    Inspection failures never trigger a new execution.
+    ok describes execution; each requested output has its own status. Output
+    failures never trigger a new execution. Export directories are created when
+    needed; existing files are never overwritten.
     """
     if (kcl_code is None) == (kcl_path is None):
         raise ValueError("Provide exactly one of kcl_code or kcl_path")
-    return await _execute_kcl_with_preflight(
+    _validate_execution_inspection_requests(
+        snapshot_request, physical_properties_request
+    )
+    export_results: list[KclExportResult] = []
+    if exports:
+        pending = asyncio.create_task(
+            asyncio.to_thread(_prepare_evaluation_exports, exports)
+        )
+        try:
+            export_results = await asyncio.shield(pending)
+        except asyncio.CancelledError as cancellation:
+            try:
+                await pending
+            finally:
+                raise cancellation
+    result = await _execute_kcl_with_preflight(
         kcl_code,
         kcl_path,
         None,
         operation="evaluate_kcl",
         snapshot_request=snapshot_request,
         physical_properties_request=physical_properties_request,
+        exports=export_results,
+    )
+    return ResultZooEvaluateKcl(
+        result.ok,
+        result.message,
+        result.mock_preflight,
+        result.real_execution,
+        inspection=result.inspection,
+        exports=export_results,
     )
 
 

@@ -4,10 +4,12 @@ import io
 from pathlib import Path
 
 import pytest
+import trimesh
 from mcp.types import CallToolResult, ImageContent
 from PIL import Image
 
 from zoo_mcp.server import mcp
+from zoo_mcp.zoo_tools import zoo_export_kcl
 
 pytestmark = [
     pytest.mark.live,
@@ -62,16 +64,24 @@ async def test_all_physical_properties_match_cube(cube_kcl, inline_code):
     )
 
 
-async def test_combined_inspection_matches_cube(cube_kcl, tmp_path):
+@pytest.mark.parametrize("inline_code", [False, True], ids=["path", "code"])
+async def test_combined_outputs_match_standalone_export(
+    cube_kcl, tmp_path, inline_code
+):
     async with asyncio.timeout(120):
         response = await mcp.call_tool(
             "evaluate_kcl",
             {
-                "kcl_path": cube_kcl,
+                "kcl_code": Path(cube_kcl).read_text() if inline_code else None,
+                "kcl_path": None if inline_code else cube_kcl,
                 "snapshot_request": {"views": ["front", "isometric"]},
                 "physical_properties_request": {
                     "properties": ["volume", "bounding_box"]
                 },
+                "exports": [
+                    {"format": fmt, "destination_dir": str(tmp_path / fmt)}
+                    for fmt in ("step", "stl")
+                ],
             },
         )
         assert isinstance(response, CallToolResult)
@@ -87,3 +97,16 @@ async def test_combined_inspection_matches_cube(cube_kcl, tmp_path):
         assert inspection["rendered_snapshots_status"] == "succeeded", inspection
         image = next(c for c in response.content if isinstance(c, ImageContent))
         Image.open(io.BytesIO(base64.b64decode(image.data))).verify()
+        step, stl = result["exports"]
+        assert step["status"] == stl["status"] == "succeeded", result["exports"]
+        assert Path(step["files"][0]).read_bytes().startswith(b"ISO-10303-21;")
+        combined = trimesh.load_mesh(stl["files"][0])
+        standalone_path = await zoo_export_kcl(
+            kcl_path=cube_kcl,
+            export_format="stl",
+            export_path=tmp_path / "standalone.stl",
+        )
+        standalone = trimesh.load_mesh(standalone_path)
+        assert combined.is_watertight
+        assert combined.volume == pytest.approx(standalone.volume)
+        assert combined.bounds == pytest.approx(standalone.bounds)

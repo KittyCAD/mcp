@@ -1141,39 +1141,6 @@ async def test_execute_with_retries_preserves_inner_timeout_error():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("inline_code", [False, True], ids=["path", "code"])
-async def test_export_kcl(cube_kcl: str, inline_code: bool, tmp_path: Path):
-    response = await mcp.call_tool(
-        "export_kcl",
-        arguments={
-            "kcl_code": Path(cube_kcl).read_text() if inline_code else None,
-            "kcl_path": None if inline_code else cube_kcl,
-            "export_path": str(tmp_path / "cube.step"),
-            "export_format": "step",
-        },
-    )
-    result = _meta_result(response)
-    assert Path(result).exists()
-    assert Path(result).stat().st_size != 0
-    assert Path(result).read_bytes().startswith(b"ISO-10303-21;")
-
-
-@pytest.mark.asyncio
-async def test_export_kcl_error():
-    response = await mcp.call_tool(
-        "export_kcl",
-        arguments={
-            "kcl_code": "asdf",
-            "kcl_path": None,
-            "export_path": None,
-            "export_format": "step",
-        },
-    )
-    result = _meta_result(response)
-    assert "error exporting the CAD" in result
-
-
-@pytest.mark.asyncio
 async def test_format_kcl_path_success(cube_kcl: str):
     response = await mcp.call_tool(
         "format_kcl",
