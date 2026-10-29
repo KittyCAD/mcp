@@ -144,7 +144,9 @@ async def test_live_lookup_all_kcl_functions(real_docs):
         full_budget = max(6000, 4 * len(source))
         arguments = [
             {"query": path.rsplit("/", 1)[-1], "max_results": 1, "max_chars": budget}
-            for budget in sorted({1, 15, 80, 400, 1000, 2000, 6000, 10000, full_budget})
+            for budget in sorted(
+                {1, 15, 80, 400, 1000, 2000, 3000, 6000, 10000, full_budget}
+            )
         ]
         arguments.append({"query": source.splitlines()[0].removeprefix("# ")})
         for args in arguments:
@@ -161,7 +163,7 @@ async def test_live_lookup_all_kcl_functions(real_docs):
                 len(section["content"])
                 for page in pages
                 for section in page["sections"]
-            ) <= args.get("max_chars", 6000), (path, args)
+            ) <= args.get("max_chars", 3000), (path, args)
             for page in pages:
                 original = real_docs.docs[page["path"]]
                 original_lines = original.splitlines()
@@ -170,7 +172,7 @@ async def test_live_lookup_all_kcl_functions(real_docs):
                     for token in markdown.parse(original)
                     if token.map and token.type in {"fence", "code_block"}
                 }
-                if args.get("max_chars", 6000) >= 2000:
+                if args.get("max_chars", 3000) >= 2000:
                     assert page["sections"], (path, args, page)
                 if not page["sections"]:
                     assert page["truncated"], (path, args, page)

@@ -381,7 +381,7 @@ def _compact_block(block: _MarkdownBlock, budget: int, tokens: set[str]) -> str:
     return "\n".join([header, *(kept[index] for index in sorted(kept))])
 
 
-def lookup_docs(query: str, max_results: int = 3, max_chars: int = 6000) -> dict:
+def lookup_docs(query: str, max_results: int = 3, max_chars: int = 3000) -> dict:
     """Return ranked source sections within one Markdown-content budget."""
     if max_results < 1 or max_chars < 1:
         raise ValueError("max_results and max_chars must be positive")

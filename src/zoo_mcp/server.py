@@ -1598,7 +1598,7 @@ async def list_kcl_docs() -> dict | str:
 
 @mcp.tool()
 async def lookup_kcl_docs(
-    query: str, max_results: int = 3, max_chars: int = 6000
+    query: str, max_results: int = 3, max_chars: int = 3000
 ) -> dict[str, object]:
     """Look up compact KCL reference sections. Prefer this for initial docs lookup.
 
