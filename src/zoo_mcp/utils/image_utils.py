@@ -1,4 +1,3 @@
-import base64
 import io
 import tempfile
 from pathlib import Path
@@ -159,28 +158,3 @@ def save_image_bytes_to_disk(
     path.write_bytes(img_bytes)
 
     return str(path.resolve())
-
-
-def save_image_to_disk(image: ImageContent, output_path: str | None = None) -> str:
-    """
-    Saves an ImageContent object to disk.
-
-    Args:
-        image: The ImageContent object containing base64-encoded image data.
-        output_path: The path where the image should be saved. If a directory is
-            provided, a filename matching the image media type will be created
-            there. If None, a temporary file will be created.
-
-    Returns:
-        str: The absolute path to the saved image file.
-    """
-    image_formats: dict[str, ImageFormat] = {
-        "image/jpeg": "jpeg",
-        "image/png": "png",
-    }
-    image_format = image_formats.get(image.mime_type)
-    if image_format is None:
-        raise ValueError(f"Unsupported image media type: {image.mime_type}")
-    return save_image_bytes_to_disk(
-        base64.b64decode(image.data), output_path, image_format
-    )

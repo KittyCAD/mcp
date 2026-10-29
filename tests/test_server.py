@@ -1943,6 +1943,29 @@ async def test_snapshot_output_path(populated_modeling_session: str, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_image_files_are_saved_by_the_generating_tools():
+    names = {tool.name for tool in await mcp.list_tools()}
+    assert {"snapshot", "visualize_sketch"} <= names
+    assert "save_image" not in names
+    with pytest.raises(ToolError, match="Unknown tool: save_image"):
+        await mcp.call_tool("save_image", {})
+
+
+@pytest.mark.asyncio
+async def test_snapshot_creates_output_parent_directories(
+    populated_modeling_session: str, tmp_path
+):
+    output = tmp_path / "nested" / "images" / "snapshot.jpg"
+    response = await mcp.call_tool(
+        "snapshot",
+        {"session_id": populated_modeling_session, "output_path": str(output)},
+    )
+    assert Path(_meta_result(response)) == output.resolve()
+    with PILImage.open(output) as image:
+        assert image.format == "JPEG"
+
+
+@pytest.mark.asyncio
 async def test_snapshot_output_path_directory(
     populated_modeling_session: str, tmp_path
 ):
@@ -2349,139 +2372,6 @@ async def test_get_kcl_sample_path_traversal(live_samples_index):
     result = inner_list[0].text
     assert isinstance(result, str)
     assert "Sample not found" in result
-
-
-@pytest.mark.asyncio
-async def test_save_image(populated_modeling_session: str, tmp_path):
-    """Test saving an image to disk."""
-    # First get an image from snapshot
-    snapshot_response = await mcp.call_tool(
-        "snapshot",
-        arguments={
-            "session_id": populated_modeling_session,
-            "camera_view": "isometric",
-        },
-    )
-    image = _content_list(snapshot_response)[0]
-    assert isinstance(image, ImageContent)
-
-    # Now save the image to disk
-    output_path = tmp_path / "test_image.png"
-    response = await mcp.call_tool(
-        "save_image",
-        arguments={
-            "image": image.model_dump(),
-            "output_path": str(output_path),
-        },
-    )
-    result = _meta_result(response)
-    assert Path(result).exists()
-    assert Path(result).stat().st_size > 0
-
-
-@pytest.mark.asyncio
-async def test_save_image_to_directory(populated_modeling_session: str, tmp_path):
-    """Test saving an image to a directory creates image.jpg."""
-    # First get an image from snapshot
-    snapshot_response = await mcp.call_tool(
-        "snapshot",
-        arguments={
-            "session_id": populated_modeling_session,
-            "camera_view": "isometric",
-        },
-    )
-    image = _content_list(snapshot_response)[0]
-    assert isinstance(image, ImageContent)
-
-    # Save to directory
-    response = await mcp.call_tool(
-        "save_image",
-        arguments={
-            "image": image.model_dump(),
-            "output_path": str(tmp_path),
-        },
-    )
-    result = _meta_result(response)
-    assert Path(result).exists()
-    assert Path(result).name == "image.jpg"
-    assert Path(result).stat().st_size > 0
-
-
-@pytest.mark.asyncio
-async def test_save_png_image_to_directory(tmp_path: Path):
-    png_buffer = io.BytesIO()
-    PILImage.new("RGB", (2, 2)).save(png_buffer, format="PNG")
-    image = ImageContent(
-        type="image",
-        data=base64.b64encode(png_buffer.getvalue()).decode(),
-        mime_type="image/png",
-    )
-
-    response = await mcp.call_tool(
-        "save_image",
-        arguments={"image": image.model_dump(), "output_path": str(tmp_path)},
-    )
-
-    result = Path(_meta_result(response))
-    assert result == tmp_path / "image.png"
-    assert result.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
-
-
-@pytest.mark.asyncio
-async def test_save_image_creates_parent_dirs(
-    populated_modeling_session: str, tmp_path
-):
-    """Test that save_image creates parent directories if they don't exist."""
-    # First get an image from snapshot
-    snapshot_response = await mcp.call_tool(
-        "snapshot",
-        arguments={
-            "session_id": populated_modeling_session,
-            "camera_view": "isometric",
-        },
-    )
-    image = _content_list(snapshot_response)[0]
-    assert isinstance(image, ImageContent)
-
-    # Save to a nested path that doesn't exist
-    output_path = tmp_path / "nested" / "dirs" / "test_image.png"
-    response = await mcp.call_tool(
-        "save_image",
-        arguments={
-            "image": image.model_dump(),
-            "output_path": str(output_path),
-        },
-    )
-    result = _meta_result(response)
-    assert Path(result).exists()
-    assert Path(result).stat().st_size > 0
-
-
-@pytest.mark.asyncio
-async def test_save_image_to_temp_file(populated_modeling_session: str):
-    """Test that save_image creates a temp file when no path is provided."""
-    # First get an image from snapshot
-    snapshot_response = await mcp.call_tool(
-        "snapshot",
-        arguments={
-            "session_id": populated_modeling_session,
-            "camera_view": "isometric",
-        },
-    )
-    image = _content_list(snapshot_response)[0]
-    assert isinstance(image, ImageContent)
-
-    # Save without specifying a path
-    response = await mcp.call_tool(
-        "save_image",
-        arguments={
-            "image": image.model_dump(),
-        },
-    )
-    result = _meta_result(response)
-    assert Path(result).exists()
-    assert Path(result).suffix == ".jpg"
-    assert Path(result).stat().st_size > 0
 
 
 @pytest.mark.asyncio
