@@ -4106,59 +4106,10 @@ async def _project_multipart(
     yield delimiter + b"--\r\n"
 
 
-@dataclass(frozen=True)
-class _ProjectMutation:
-    # Include explicitly written paths even when their bytes were already equal.
-    written: tuple[str, ...] = ()
-    # These paths and all their descendants must be absent after the operation.
-    removed: tuple[str, ...] = ()
-
-
 @dataclass
 class _ProjectSnapshot:
     metadata: dict
     files: dict[str, bytes]
-
-
-@dataclass
-class _ProjectUpload:
-    before: _ProjectSnapshot
-    files: dict[str, bytes]
-    mutation: _ProjectMutation
-
-    def landed(self, latest: _ProjectSnapshot) -> bool:
-        """Confirm the effects, allow a safe retry, or raise on ambiguous changes."""
-        before, expected, current = self.before.files, self.files, latest.files
-        written = set(self.mutation.written) | {
-            path for path, content in expected.items() if before.get(path) != content
-        }
-        removed = before.keys() - expected.keys()
-
-        def removed_tree(files: dict[str, bytes]) -> dict[str, bytes]:
-            # New descendants also matter when checking a recursive removal.
-            return {
-                path: content
-                for path, content in files.items()
-                if any(
-                    path == root or path.startswith(root + "/")
-                    for root in self.mutation.removed
-                )
-            }
-
-        remaining = removed_tree(current)
-        writes_match = all(current.get(path) == expected[path] for path in written)
-        removals_match = not (removed & current.keys()) and not remaining
-        if writes_match and removals_match:
-            return True
-        if any(
-            current.get(path) != before.get(path) for path in written | removed
-        ) or remaining != removed_tree(before):
-            raise ZooMCPException(
-                "Upload outcome is uncertain and affected paths changed; "
-                "inspect the project before retrying"
-            )
-        # The affected paths still match the original snapshot, so reapply safely.
-        return False
 
 
 class ProjectFileSystem:
@@ -4400,11 +4351,14 @@ class ProjectFileSystem:
         return content.decode("utf-8") if encoding else content
 
     async def _put(
-        self, client: httpx.AsyncClient, upload: _ProjectUpload
+        self,
+        client: httpx.AsyncClient,
+        before: _ProjectSnapshot,
+        files: dict[str, bytes],
     ) -> httpx.Response:
         """Build and send one complete project replacement."""
-        metadata = upload.before.metadata
-        removed = upload.before.files.keys() - upload.files.keys()
+        metadata = before.metadata
+        removed = before.files.keys() - files.keys()
         previews = {
             entry["relative_path"]
             for entry in metadata["files"]
@@ -4422,19 +4376,18 @@ class ProjectFileSystem:
         boundary = uuid4().hex
         return await client.put(
             self.url,
-            content=_project_multipart(body, upload.files, boundary),
+            content=_project_multipart(body, files, boundary),
             headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
         )
 
     async def _mutate(
         self,
-        transform: Callable[[dict[str, bytes]], _ProjectMutation],
+        transform: Callable[[dict[str, bytes]], None],
     ) -> dict:
         lock = self._lock()
         async with self._operation() as client, lock:
-            snapshot = await self._snapshot(client)
-            pending: _ProjectUpload | None = None
             for _ in range(_PROJECT_ATTEMPTS):
+                snapshot = await self._snapshot(client)
                 if not snapshot.metadata["access"]["can_edit"]:
                     raise ZooMCPException("The caller cannot edit this project")
                 if snapshot.metadata["entrypoint_path"] != "main.kcl":
@@ -4443,7 +4396,7 @@ class ProjectFileSystem:
                     )
                 # Reapply the requested operation to every refreshed snapshot.
                 updated = snapshot.files.copy()
-                mutation = transform(updated)
+                transform(updated)
                 _validate_project_paths(updated)
                 _project_size(updated, self.limit)
                 if "main.kcl" not in updated:
@@ -4453,38 +4406,13 @@ class ProjectFileSystem:
                         "Cannot remove or move project.toml; the Project API requires "
                         "it and regenerates it when omitted"
                     )
-                upload = _ProjectUpload(snapshot, updated, mutation)
-                try:
-                    response = await self._put(client, upload)
-                except httpx.TransportError:
-                    response = None
-
-                conflict = response is not None and response.status_code == 409
-                if response is not None and response.status_code < 500 and not conflict:
+                response = await self._put(client, snapshot, updated)
+                # Only a 409 explicitly rejects the write and permits a fresh attempt.
+                if response.status_code != 409:
                     response.raise_for_status()
-                    try:
-                        return response.json()
-                    except ValueError:
-                        pass
-
-                # A 409 rejects this attempt; retain any earlier unconfirmed upload.
-                # Lost responses, 5xx, and unreadable success bodies are uncertain.
-                if not conflict:
-                    pending = upload
-                try:
-                    snapshot = await self._snapshot(client)
-                except (httpx.HTTPError, ZooMCPException) as exc:
-                    if pending is None:
-                        raise
-                    raise ZooMCPException(
-                        "Upload outcome is uncertain; could not reload the project "
-                        "to reconcile it. Inspect the latest project before retrying."
-                    ) from exc
-                # A rejected retry may reveal that an earlier timed-out write landed.
-                if pending and pending.landed(snapshot):
-                    return snapshot.metadata
+                    return response.json()
             raise ZooMCPException(
-                "Project write could not be confirmed after three attempts; refresh and try again"
+                "Project write conflicted after three attempts; refresh and try again"
             )
 
     @api_operation
@@ -4492,12 +4420,11 @@ class ProjectFileSystem:
         path = _project_path(path)
         content = contents.encode("utf-8") if isinstance(contents, str) else contents
 
-        def transform(files: dict[str, bytes]) -> _ProjectMutation:
+        def transform(files: dict[str, bytes]) -> None:
             if _project_kind(files, path) == "directory":
                 raise ZooMCPException(f"Cannot overwrite a directory: {path}")
             _project_parent(files, path)
             files[path] = content
-            return _ProjectMutation(written=(path,))
 
         return await self._mutate(transform)
 
@@ -4505,13 +4432,12 @@ class ProjectFileSystem:
     async def mkdir(self, path: str) -> dict:
         path = _project_path(path)
 
-        def transform(files: dict[str, bytes]) -> _ProjectMutation:
+        def transform(files: dict[str, bytes]) -> None:
             if _project_kind(files, path) is not None:
                 raise ZooMCPException(f"Path already exists: {path}")
             _project_parent(files, path)
             # A zero-byte .empty file persists the directory in the file-only Project API.
             files[path + "/.empty"] = b""
-            return _ProjectMutation(written=(path + "/.empty",))
 
         return await self._mutate(transform)
 
@@ -4521,7 +4447,7 @@ class ProjectFileSystem:
         if not path or path == "main.kcl":
             raise ZooMCPException("Cannot remove the project root or main.kcl")
 
-        def transform(files: dict[str, bytes]) -> _ProjectMutation:
+        def transform(files: dict[str, bytes]) -> None:
             targets = [
                 name for name in files if name == path or name.startswith(path + "/")
             ]
@@ -4530,7 +4456,6 @@ class ProjectFileSystem:
             for name in targets:
                 del files[name]
             _preserve_project_parent(files, path)
-            return _ProjectMutation(removed=(path,))
 
         return await self._mutate(transform)
 
@@ -4539,7 +4464,7 @@ class ProjectFileSystem:
         if not source or (move and source == "main.kcl"):
             raise ZooMCPException("Cannot copy the project root or move main.kcl")
 
-        def transform(files: dict[str, bytes]) -> _ProjectMutation:
+        def transform(files: dict[str, bytes]) -> None:
             kind = _project_kind(files, source)
             if kind is None:
                 raise ZooMCPException(f"Path does not exist: {source}")
@@ -4569,10 +4494,6 @@ class ProjectFileSystem:
                 for name in selected:
                     del files[name]
                 _preserve_project_parent(files, source)
-            return _ProjectMutation(
-                written=tuple(target + name[len(source) :] for name in selected),
-                removed=(source,) if move else (),
-            )
 
         return await self._mutate(transform)
 

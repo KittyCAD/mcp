@@ -272,11 +272,11 @@ async def test_conflict_reapplies_without_losing_unrelated_edit(api):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure,uploads", [("timeout_before", 2), ("timeout_after", 1)]
-)
+@pytest.mark.parametrize("failure", ["timeout_before", "timeout_after"])
 @pytest.mark.parametrize("operation", ["mkdir", "mv", "rm", "write_file"])
-async def test_uncertain_upload_is_reconciled(api, failure, uploads, operation):
+async def test_upload_timeout_propagates_without_retry_or_reload(
+    api, failure, operation
+):
     api.failure = failure
     fs = ProjectFileSystem(PROJECT_ID)
     args = {
@@ -285,17 +285,68 @@ async def test_uncertain_upload_is_reconciled(api, failure, uploads, operation):
         "rm": ["parts/a.bin"],
         "write_file": ["parts/a.bin", b"changed"],
     }[operation]
-    await getattr(fs, operation)(*args)
-    assert len(api.uploads) == uploads
+    original = api.files.copy()
+    with pytest.raises(httpx.ReadTimeout, match="response lost"):
+        await getattr(fs, operation)(*args)
+    assert len(api.uploads) == 1
+    assert api.requests[-1].method == "PUT"
+    assert (api.files == original) == (failure == "timeout_before")
 
 
 @pytest.mark.asyncio
-async def test_uncertain_upload_does_not_clobber_ambiguous_edit(api):
+async def test_upload_timeout_leaves_concurrent_edit_for_caller(api):
     api.failure = "ambiguous"
-    with pytest.raises(ZooMCPException, match="uncertain"):
+    with pytest.raises(httpx.ReadTimeout, match="response lost"):
         await ProjectFileSystem(PROJECT_ID).write_file("parts/a.bin", b"mine")
     assert len(api.uploads) == 1
+    assert api.requests[-1].method == "PUT"
     assert api.files["parts/a.bin"] == b"someone else's edit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure,error",
+    [
+        ("disconnect", httpx.RemoteProtocolError),
+        ("server_error", httpx.HTTPStatusError),
+        ("invalid_json", ValueError),
+    ],
+)
+async def test_upload_response_errors_propagate_without_retry_or_reload(
+    api, monkeypatch, failure, error
+):
+    def handle(request):
+        response = api.handle(request)
+        if request.method != "PUT":
+            return response
+        if failure == "disconnect":
+            raise httpx.RemoteProtocolError("connection closed", request=request)
+        if failure == "server_error":
+            return httpx.Response(503)
+        return httpx.Response(200, content=b"invalid json")
+
+    monkeypatch.setattr(
+        ProjectFileSystem,
+        "_client",
+        lambda _: httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            headers={"Authorization": "Bearer test-token"},
+        ),
+    )
+    with pytest.raises(error):
+        await ProjectFileSystem(PROJECT_ID).write_file("parts/a.bin", b"changed")
+    assert len(api.uploads) == 1
+    assert api.requests[-1].method == "PUT"
+    assert api.files["parts/a.bin"] == b"changed"
+
+
+@pytest.mark.asyncio
+async def test_mcp_upload_timeout_surfaces_as_tool_error(api):
+    api.failure = "timeout_before"
+    with pytest.raises(ToolError, match="response lost"):
+        await mcp.call_tool("project_mkdir", {"project_id": PROJECT_ID, "path": "new"})
+    assert len(api.uploads) == 1
+    assert api.requests[-1].method == "PUT"
 
 
 @pytest.mark.asyncio
@@ -562,64 +613,6 @@ def test_invalid_limits(api, limit):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "operation,args", [("mkdir", ["new"]), ("mv", ["parts/a.bin", "moved.bin"])]
-)
-async def test_timed_out_upload_commits_while_retry_is_in_flight(
-    api, monkeypatch, operation, args
-):
-    original = api.handle
-    attempts = 0
-    api.failure = "timeout_before"
-
-    def handle(request):
-        nonlocal attempts
-        if request.method == "PUT":
-            attempts += 1
-            if attempts == 2:
-                # The first request finished after reconciliation fetched the old
-                # revision, but before the second request checked its revision.
-                api.files = api.uploads[0][1]
-                api.revision += 1
-                return httpx.Response(409)
-        return original(request)
-
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
-    await getattr(ProjectFileSystem(PROJECT_ID), operation)(*args)
-    assert attempts == 2
-
-
-@pytest.mark.asyncio
-async def test_unreconcilable_upload_has_explicit_uncertain_error(api, monkeypatch):
-    original = api.handle
-    api.failure = "timeout_after"
-
-    def handle(request):
-        if api.uploads and request.method == "GET":
-            return httpx.Response(503)
-        return original(request)
-
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
-    with pytest.raises(ZooMCPException, match="uncertain; could not reload"):
-        await ProjectFileSystem(PROJECT_ID).mkdir("new")
-    assert len(api.uploads) == 1
-
-
-@pytest.mark.asyncio
 async def test_project_download_follows_no_redirects(api, monkeypatch):
     original = api.handle
 
@@ -689,63 +682,6 @@ async def test_raw_bytes_require_omitted_encoding(api, encoding):
 
 
 @pytest.mark.asyncio
-async def test_uncertain_recursive_remove_cannot_succeed_with_new_children(
-    api, monkeypatch
-):
-    original = api.handle
-
-    def handle(request):
-        if request.method == "PUT":
-            # The upload never committed. A concurrent writer replaced the old
-            # child with a new one before we reconciled the lost response.
-            del api.files["parts/a.bin"]
-            api.files["parts/new.bin"] = b"concurrent child"
-            api.revision += 1
-            raise httpx.ReadTimeout("response lost", request=request)
-        return original(request)
-
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
-    with pytest.raises(ZooMCPException, match="uncertain"):
-        await ProjectFileSystem(PROJECT_ID).rm("parts")
-    assert api.files["parts/new.bin"] == b"concurrent child"
-
-
-@pytest.mark.asyncio
-async def test_uncertain_move_checks_destination_even_if_it_was_already_identical(
-    api, monkeypatch
-):
-    api.files.update({"source.bin": b"same", "destination.bin": b"same"})
-    original = api.handle
-
-    def handle(request):
-        if request.method == "PUT":
-            del api.files["source.bin"]
-            api.files["destination.bin"] = b"concurrent destination edit"
-            api.revision += 1
-            raise httpx.ReadTimeout("response lost", request=request)
-        return original(request)
-
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
-    with pytest.raises(ZooMCPException, match="uncertain"):
-        await ProjectFileSystem(PROJECT_ID).mv("source.bin", "destination.bin")
-    assert api.files["destination.bin"] == b"concurrent destination edit"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "path",
     ["part:v1.kcl", "/".join(["long-name" * 20] * 8) + "/model.kcl"],
@@ -803,115 +739,6 @@ async def test_write_path_normalization_matches_api(api):
 
 
 @pytest.mark.asyncio
-async def test_late_conflict_reconciles_complete_removed_subtree(api, monkeypatch):
-    original = api.handle
-    api.failure = "timeout_before"
-    attempts = 0
-
-    def handle(request):
-        nonlocal attempts
-        if request.method == "PUT":
-            attempts += 1
-            if attempts == 2:
-                del api.files["parts/a.bin"]
-                api.files["parts/new.bin"] = b"concurrent child"
-                api.revision += 1
-                return httpx.Response(409)
-        return original(request)
-
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
-    with pytest.raises(ZooMCPException, match="uncertain"):
-        await ProjectFileSystem(PROJECT_ID).rm("parts")
-    assert attempts == 2
-    assert api.files["parts/new.bin"] == b"concurrent child"
-
-
-@pytest.mark.asyncio
-async def test_uncertain_directory_move_checks_source_subtree(api, monkeypatch):
-    original = api.handle
-    api.failure = "timeout_after"
-
-    def handle(request):
-        try:
-            return original(request)
-        except httpx.ReadTimeout:
-            api.files["parts/new.bin"] = b"concurrent source recreation"
-            api.revision += 1
-            raise
-
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
-    with pytest.raises(ZooMCPException, match="uncertain"):
-        await ProjectFileSystem(PROJECT_ID).mv("parts", "moved")
-    assert len(api.uploads) == 1
-    assert api.files["parts/new.bin"] == b"concurrent source recreation"
-    assert api.files["moved/a.bin"] == b"\xff\x00"
-
-
-@pytest.mark.asyncio
-async def test_uncertain_mkdir_preserves_unrelated_new_children(api, monkeypatch):
-    original = api.handle
-    api.failure = "timeout_after"
-
-    def handle(request):
-        try:
-            return original(request)
-        except httpx.ReadTimeout:
-            api.files["new/child"] = b"added after creation"
-            api.revision += 1
-            raise
-
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
-    await ProjectFileSystem(PROJECT_ID).mkdir("new")
-    assert len(api.uploads) == 1
-    assert api.files["new/child"] == b"added after creation"
-
-
-@pytest.mark.asyncio
-async def test_uncertain_noop_write_checks_requested_contents(api, monkeypatch):
-    original = api.handle
-
-    def handle(request):
-        if request.method == "PUT":
-            api.files["main.kcl"] = b"// concurrent edit"
-            api.revision += 1
-            raise httpx.ReadTimeout("response lost", request=request)
-        return original(request)
-
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
-    with pytest.raises(ZooMCPException, match="uncertain"):
-        await ProjectFileSystem(PROJECT_ID).write_file("main.kcl", b"// main")
-    assert api.files["main.kcl"] == b"// concurrent edit"
-
-
-@pytest.mark.asyncio
 async def test_quoted_and_literal_percent_filenames_remain_distinct(api):
     api.files["part%22v1.kcl"] = b"// literal percent name"
     fs = ProjectFileSystem(PROJECT_ID)
@@ -961,43 +788,3 @@ async def test_control_characters_are_rejected_before_any_request(api, path):
     with pytest.raises(ZooMCPException, match="control characters"):
         await ProjectFileSystem(PROJECT_ID).write_file(path, b"data")
     assert not api.requests
-
-
-@pytest.mark.asyncio
-async def test_lost_manifest_response_reconciles_exact_bytes(api):
-    requested = api.files["project.toml"] + b"\n"
-    api.failure = "timeout_after"
-    await ProjectFileSystem(PROJECT_ID).write_file("project.toml", requested)
-    assert len(api.uploads) == 1
-    assert api.files["project.toml"] == requested
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["main.kcl", "project.toml"])
-async def test_reconciliation_does_not_ignore_formatting_changes(
-    api, monkeypatch, path
-):
-    requested = api.files[path] + b"\n"
-    api.failure = "timeout_after"
-    original = api.handle
-
-    def handle(request):
-        try:
-            return original(request)
-        except httpx.ReadTimeout:
-            api.files[path] += b"\n"
-            api.revision += 1
-            raise
-
-    monkeypatch.setattr(
-        ProjectFileSystem,
-        "_client",
-        lambda _: httpx.AsyncClient(
-            transport=httpx.MockTransport(handle),
-            headers={"Authorization": "Bearer test-token"},
-        ),
-    )
-    with pytest.raises(ZooMCPException, match="uncertain"):
-        await ProjectFileSystem(PROJECT_ID).write_file(path, requested)
-    assert len(api.uploads) == 1
-    assert api.files[path] == requested + b"\n"
