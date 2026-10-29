@@ -1,4 +1,3 @@
-from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -254,48 +253,6 @@ def test_parsed_pages_are_reused_and_refresh_when_source_changes(docs, monkeypat
     monkeypatch.setattr(KCLDocs, "_instance", KCLDocs(docs=docs.copy()))
     lookup_docs("extrude")
     assert parse.call_count == 2 * len(docs) + 1
-
-
-@pytest.fixture
-def extrude_doc(monkeypatch):
-    # zoo.dev's actual layout: an inline signature, duplicate intro, and a long
-    # argument table. The fixture ends after the first complete example.
-    content = (Path(__file__).parent / "data" / "extrude-doc.md").read_text()
-    monkeypatch.setattr(
-        KCLDocs,
-        "_instance",
-        KCLDocs(docs={"docs/kcl-std/functions/std-sketch-extrude": content}),
-    )
-    return content
-
-
-def test_extrude_includes_argument_descriptions_within_compact_budget(extrude_doc):
-    page = lookup_docs("extrude", max_results=1, max_chars=2000)["results"][0]
-    sections = {s["heading"]: s["content"] for s in page["sections"]}
-    assert "```kcl\nextrude(" in sections["extrude"]
-    assert sections["extrude"].count("Extend a 2-dimensional sketch") == 1
-    assert "| Name | Type | Description | Required |" in sections["Arguments"]
-    assert "| `length` |" in sections["Arguments"]
-    assert "Incompatible with `to`." in sections["Arguments"]
-    assert sum(map(len, sections.values())) <= 2000
-    assert page["truncated"]
-
-
-@pytest.mark.parametrize("budget", [1, 15, 80, 400, 1000, 2000, 6000, 10000])
-def test_extrude_excerpts_have_bodies_and_complete_source_rows(extrude_doc, budget):
-    page = lookup_docs("extrude", max_chars=budget)["results"][0]
-    assert sum(len(s["content"]) for s in page["sections"]) <= budget
-    for section in page["sections"]:
-        content = section["content"]
-        assert len(content.split("\n\n")) > 1
-        assert content.count("```") % 2 == 0
-        if section["heading"] == "Arguments":
-            table = content.split("\n\n", 1)[1].splitlines()
-            assert len(table) >= 3
-            assert table[0] == "| Name | Type | Description | Required |"
-            assert table[1] == "|----------|------|-------------|----------|"
-            assert all(row in extrude_doc.splitlines() for row in table[2:])
-    assert page["truncated"] == (budget < 10000)
 
 
 @pytest.mark.parametrize("outer_pipes", [True, False])

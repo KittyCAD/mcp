@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from markdown_it import MarkdownIt
 from mcp.types import CallToolResult, InputRequiredResult, TextContent
 
 from zoo_mcp.kcl_docs import KCLDocs
@@ -124,8 +125,31 @@ async def test_live_get_kcl_doc_from_listing(real_docs):
 
 
 @pytest.mark.xdist_group(name="live-docs")
+async def test_live_lookup_extrude_includes_argument_descriptions(real_docs):
+    response = await mcp.call_tool(
+        "lookup_kcl_docs", {"query": "extrude", "max_results": 1, "max_chars": 2000}
+    )
+    assert isinstance(response, CallToolResult)
+    assert response.structured_content is not None
+    page = response.structured_content["results"][0]
+    assert page["path"].endswith("/std-sketch-extrude")
+    sections = {section["heading"]: section["content"] for section in page["sections"]}
+    assert "extrude(" in sections["extrude"]
+    # Compare the complete argument description with today's published docs.
+    length_row = next(
+        line
+        for line in real_docs.docs[page["path"]].splitlines()
+        if line.startswith("| `length` |")
+    )
+    assert length_row in sections["Arguments"]
+    assert sum(map(len, sections.values())) <= 2000
+    assert page["truncated"]
+
+
+@pytest.mark.xdist_group(name="live-docs")
 async def test_live_lookup_all_kcl_functions(real_docs):
     """Exercise each published function through the MCP get and lookup tools."""
+    markdown = MarkdownIt("commonmark").enable("table")
     for path in real_docs.index["kcl-std-functions"]:
         fetched = await mcp.call_tool("get_kcl_doc", {"doc_path": path})
         source = _meta_result(fetched)
@@ -134,7 +158,7 @@ async def test_live_lookup_all_kcl_functions(real_docs):
         full_budget = max(6000, 4 * len(source))
         arguments = [
             {"query": path.rsplit("/", 1)[-1], "max_results": 1, "max_chars": budget}
-            for budget in sorted({2000, 6000, full_budget})
+            for budget in sorted({1, 15, 80, 400, 1000, 2000, 6000, 10000, full_budget})
         ]
         arguments.append({"query": source.splitlines()[0].removeprefix("# ")})
         for args in arguments:
@@ -154,7 +178,16 @@ async def test_live_lookup_all_kcl_functions(real_docs):
             ) <= args.get("max_chars", 6000), (path, args)
             for page in pages:
                 original = real_docs.docs[page["path"]]
-                assert page["sections"], (path, args, page)
+                original_lines = original.splitlines()
+                code_blocks = {
+                    "\n".join(original_lines[token.map[0] : token.map[1]])
+                    for token in markdown.parse(original)
+                    if token.map and token.type in {"fence", "code_block"}
+                }
+                if args.get("max_chars", 6000) >= 2000:
+                    assert page["sections"], (path, args, page)
+                if not page["sections"]:
+                    assert page["truncated"], (path, args, page)
                 for section in page["sections"]:
                     heading, separator, body = section["content"].partition("\n\n")
                     assert separator and body.strip(), (path, args, section)
@@ -164,6 +197,29 @@ async def test_live_lookup_all_kcl_functions(real_docs):
                         args,
                         section,
                     )
+                    lines = section["content"].splitlines()
+                    for token in markdown.parse(section["content"]):
+                        if token.map is None:
+                            continue
+                        block = lines[token.map[0] : token.map[1]]
+                        if token.type in {"fence", "code_block"}:
+                            assert "\n".join(block) in code_blocks, (
+                                path,
+                                args,
+                                section,
+                            )
+                        elif token.type == "table_open":
+                            assert len(block) >= 3, (path, args, section)
+                            assert "\n".join(block[:2]) in original, (
+                                path,
+                                args,
+                                section,
+                            )
+                            assert all(row in original_lines for row in block[2:]), (
+                                path,
+                                args,
+                                section,
+                            )
             if args.get("max_chars") == full_budget:
                 page = pages[0]
                 assert not page["truncated"], (path, args)
