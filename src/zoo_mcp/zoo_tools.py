@@ -4067,8 +4067,8 @@ def _validate_project_paths(files: dict) -> None:
             parent = parent.parent
 
 
-def _project_size(files: dict[str, bytes], limit: int) -> None:
-    if sum(map(len, files.values())) > limit:
+def _check_project_size(total: int, limit: int) -> None:
+    if total > limit:
         raise ZooMCPException(
             f"Project exceeds the {limit}-byte uncompressed size limit"
         )
@@ -4197,10 +4197,7 @@ class ProjectFileSystem:
                 raise ZooMCPException("Invalid project file metadata")
             paths[path] = entry
             total += size
-        if total > self.limit:
-            raise ZooMCPException(
-                f"Project exceeds the {self.limit}-byte uncompressed size limit"
-            )
+        _check_project_size(total, self.limit)
         _validate_project_paths(paths)
         return data
 
@@ -4245,10 +4242,7 @@ class ProjectFileSystem:
                                 "Invalid or duplicate project archive path"
                             )
                         total += entry.file_size
-                        if total > self.limit:
-                            raise ZooMCPException(
-                                f"Project exceeds the {self.limit}-byte uncompressed size limit"
-                            )
+                        _check_project_size(total, self.limit)
                         with zip_file.open(entry) as source:
                             content = source.read(
                                 self.limit - (total - entry.file_size) + 1
@@ -4338,12 +4332,9 @@ class ProjectFileSystem:
         entries = self._entries(metadata)
         if self._stat(entries, path)["kind"] != "directory":
             raise ZooMCPException(f"Not a directory: {path}")
-        prefix = path + "/" if path else ""
-        children = {
-            prefix + name[len(prefix) :].split("/")[0]
-            for name in entries
-            if name != path and name.startswith(prefix)
-        }
+        children = (
+            name for name in entries if name and name.rpartition("/")[0] == path
+        )
         return {"files": [entries[name] for name in sorted(children)]}
 
     @api_operation
@@ -4408,7 +4399,7 @@ class ProjectFileSystem:
                 updated = snapshot.files.copy()
                 transform(updated)
                 _validate_project_paths(updated)
-                _project_size(updated, self.limit)
+                _check_project_size(sum(map(len, updated.values())), self.limit)
                 if "main.kcl" not in updated:
                     raise ZooMCPException("main.kcl must remain the entrypoint")
                 if snapshot.metadata["project_toml_path"] not in updated:
