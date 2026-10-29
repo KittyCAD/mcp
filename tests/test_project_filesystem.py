@@ -649,6 +649,8 @@ async def test_project_download_follows_no_redirects(api, monkeypatch):
     [
         (b"\xff\x00\x80", {}, b"\xff\x00\x80"),
         (b"", {}, b""),
+        ("", {}, b""),
+        ("", {"encoding": "base64"}, b""),
         ("text \u00e9", {}, "text \u00e9".encode()),
         ("text \u00e9", {"encoding": "utf-8"}, "text \u00e9".encode()),
         ("/wCA", {"encoding": "base64"}, b"\xff\x00\x80"),
@@ -678,6 +680,21 @@ async def test_write_tool_accepts_bytes_without_encoding(
         if binary
         else expected.decode("utf-8"),
         "encoding": "base64" if binary else "utf-8",
+    }
+    read = await mcp.call_tool(
+        "project_read_file",
+        {
+            "project_id": PROJECT_ID,
+            "path": "written.bin",
+            "encoding": "base64" if binary else "utf-8",
+        },
+    )
+    assert isinstance(read, CallToolResult)
+    assert isinstance(read.content[0], TextContent)
+    assert json.loads(read.content[0].text) == {
+        key: value
+        for key, value in json.loads(result.content[0].text).items()
+        if key in ("contents", "encoding")
     }
 
 

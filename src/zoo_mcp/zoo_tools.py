@@ -4113,6 +4113,15 @@ class _ProjectSnapshot:
     files: dict[str, bytes]
 
 
+def project_file_contents(contents: bytes | str) -> dict[str, str]:
+    if isinstance(contents, str):
+        return {"contents": contents, "encoding": "utf-8"}
+    return {
+        "contents": base64.b64encode(contents).decode("ascii"),
+        "encoding": "base64",
+    }
+
+
 class ProjectFileSystem:
     """Authenticated filesystem operations on one existing cloud project.
 
@@ -4431,10 +4440,7 @@ class ProjectFileSystem:
         return {
             **project,
             "path": path,
-            "contents": contents
-            if isinstance(contents, str)
-            else base64.b64encode(content).decode("ascii"),
-            "encoding": "utf-8" if isinstance(contents, str) else "base64",
+            **project_file_contents(contents),
         }
 
     @api_operation

@@ -117,6 +117,7 @@ from zoo_mcp.zoo_tools import (
     ProjectFileSystem,
     ResultZooExecuteKcl,
     _abort_all_modeling_sessions,
+    project_file_contents,
     zoo_calculate_bounding_box_cad,
     zoo_calculate_bounding_box_kcl,
     zoo_calculate_cad_physical_properties,
@@ -1804,15 +1805,13 @@ async def project_write_file(
     Returns acknowledged project metadata plus the normalized path, contents,
     and encoding. Text uses UTF-8; raw bytes and base64 inputs return base64.
     """
-    if isinstance(contents, bytes):
-        if encoding is not None:
-            raise ValueError("Omit encoding when contents are raw bytes")
-        data = contents
-    elif encoding == "base64":
-        data = base64.b64decode(contents, validate=True)
-    else:
-        data = contents
-    return await ProjectFileSystem(project_id, max_project_bytes).write_file(path, data)
+    if isinstance(contents, bytes) and encoding is not None:
+        raise ValueError("Omit encoding when contents are raw bytes")
+    if encoding == "base64":
+        contents = base64.b64decode(contents, validate=True)
+    return await ProjectFileSystem(project_id, max_project_bytes).write_file(
+        path, contents
+    )
 
 
 @mcp.tool()
@@ -1942,14 +1941,10 @@ async def project_read_file(
     Returns {contents: str, encoding: str}. Downloads a consistent project
     snapshot. Default total uncompressed project limit: 256 MiB.
     """
-    content = await ProjectFileSystem(project_id, max_project_bytes).read_file(path)
-    assert isinstance(content, bytes)
-    return {
-        "contents": content.decode("utf-8")
-        if encoding == "utf-8"
-        else base64.b64encode(content).decode("ascii"),
-        "encoding": encoding,
-    }
+    content = await ProjectFileSystem(project_id, max_project_bytes).read_file(
+        path, encoding="utf-8" if encoding == "utf-8" else None
+    )
+    return project_file_contents(content)
 
 
 def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:
