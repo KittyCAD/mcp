@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 import zipfile
-from collections.abc import Callable
 from email import policy
 from email.parser import BytesParser
 
@@ -41,7 +40,6 @@ class ProjectAPI:
         self.editable = True
         self.download_hook = None
         self.archive_files: dict[str, bytes] | None = None
-        self.manifest_transform: Callable[[bytes], bytes] | None = None
 
     def metadata(self):
         return {
@@ -132,10 +130,6 @@ class ProjectAPI:
         if self.failure == "forbidden":
             return httpx.Response(403)
         self.files = files
-        if self.manifest_transform:
-            self.files["project.toml"] = self.manifest_transform(
-                self.files["project.toml"]
-            )
         self.revision += 1
         if self.failure == "timeout_after":
             self.failure = None
@@ -970,93 +964,30 @@ async def test_control_characters_are_rejected_before_any_request(api, path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "requested",
-    [
-        b'[settings]\nunits = "mm"\n',
-        b'[settings]\nunits = "mm"\n[cloud."example.test"]\nproject_id = "old-id"\n',
-        b'[settings]\nunits = "mm"\n[cloud."other.test"]\nproject_id = "other-id"\n',
-    ],
-)
-async def test_lost_manifest_response_reconciles_server_stamp(api, requested):
-    # Model the API's stamp while leaving requested settings and other hosts intact.
-    stored = requested.replace(
-        b'project_id = "old-id"', ('project_id = "' + PROJECT_ID[6:] + '"').encode()
-    )
-    if b'[cloud."example.test"]' not in stored:
-        stored += CLOUD_STAMP
-
-    def stamp(content):
-        assert content == requested
-        return stored
-
-    api.manifest_transform = stamp
+async def test_lost_manifest_response_reconciles_exact_bytes(api):
+    requested = api.files["project.toml"] + b"\n"
     api.failure = "timeout_after"
-    result = await ProjectFileSystem(PROJECT_ID).write_file("project.toml", requested)
-    assert result["revision"] == "2"
+    await ProjectFileSystem(PROJECT_ID).write_file("project.toml", requested)
     assert len(api.uploads) == 1
-    assert api.files["project.toml"] == stored
+    assert api.files["project.toml"] == requested
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "requested,stored",
-    [
-        (b'[settings]\nunits = "mm"\n', b'[settings]\nunits = "cm"\n' + CLOUD_STAMP),
-        (b"[settings]\nvalue = 1\n", b"[settings]\nvalue = true\n" + CLOUD_STAMP),
-        (b"[settings]\nvalue = 1\n", b"[settings]\nvalue = 1.0\n" + CLOUD_STAMP),
-        (
-            b'[cloud."other.test"]\nproject_id = "other-id"\n',
-            b'[cloud."other.test"]\nproject_id = "changed-id"\n' + CLOUD_STAMP,
-        ),
-        (
-            b"[settings]\n",
-            b'[settings]\n[cloud."example.test"]\nproject_id = "wrong-project"\n',
-        ),
-    ],
-)
-async def test_manifest_reconciliation_does_not_ignore_unrelated_changes(
-    api, requested, stored
+@pytest.mark.parametrize("path", ["main.kcl", "project.toml"])
+async def test_reconciliation_does_not_ignore_formatting_changes(
+    api, monkeypatch, path
 ):
-    api.manifest_transform = lambda _: stored
+    requested = api.files[path] + b"\n"
     api.failure = "timeout_after"
-    with pytest.raises(ZooMCPException, match="uncertain"):
-        await ProjectFileSystem(PROJECT_ID).write_file("project.toml", requested)
-    assert len(api.uploads) == 1
-    assert api.files["project.toml"] == stored
-
-
-@pytest.mark.asyncio
-async def test_manifest_reconciliation_requires_known_server_identity(api):
-    api.files["project.toml"] = b"[settings]\n"
-    api.manifest_transform = lambda contents: contents + CLOUD_STAMP
-    api.failure = "timeout_after"
-    with pytest.raises(ZooMCPException, match="uncertain"):
-        await ProjectFileSystem(PROJECT_ID).write_file(
-            "project.toml", b'[settings]\nunits = "mm"\n'
-        )
-    assert len(api.uploads) == 1
-
-
-@pytest.mark.asyncio
-async def test_late_manifest_commit_reconciles_stamp_after_retry_conflict(
-    api, monkeypatch
-):
-    requested = b'[settings]\nunits = "mm"\n'
-    api.failure = "timeout_before"
     original = api.handle
-    attempts = 0
 
     def handle(request):
-        nonlocal attempts
-        if request.method == "PUT":
-            attempts += 1
-            if attempts == 2:
-                api.files = api.uploads[0][1].copy()
-                api.files["project.toml"] += CLOUD_STAMP
-                api.revision += 1
-                return httpx.Response(409)
-        return original(request)
+        try:
+            return original(request)
+        except httpx.ReadTimeout:
+            api.files[path] += b"\n"
+            api.revision += 1
+            raise
 
     monkeypatch.setattr(
         ProjectFileSystem,
@@ -1066,7 +997,7 @@ async def test_late_manifest_commit_reconciles_stamp_after_retry_conflict(
             headers={"Authorization": "Bearer test-token"},
         ),
     )
-    result = await ProjectFileSystem(PROJECT_ID).write_file("project.toml", requested)
-    assert result["revision"] == "2"
-    assert attempts == 2
-    assert api.files["project.toml"] == requested + CLOUD_STAMP
+    with pytest.raises(ZooMCPException, match="uncertain"):
+        await ProjectFileSystem(PROJECT_ID).write_file(path, requested)
+    assert len(api.uploads) == 1
+    assert api.files[path] == requested + b"\n"
