@@ -1801,6 +1801,8 @@ async def project_write_file(
     data over JSON MCP transports. Replaces the file if present, including
     main.kcl. Conflicts refresh and reapply this write. max_project_bytes bounds
     total uncompressed project bytes (default 256 MiB).
+    Returns acknowledged project metadata plus the normalized path, contents,
+    and encoding. Text uses UTF-8; raw bytes and base64 inputs return base64.
     """
     if isinstance(contents, bytes):
         if encoding is not None:
@@ -1809,7 +1811,7 @@ async def project_write_file(
     elif encoding == "base64":
         data = base64.b64decode(contents, validate=True)
     else:
-        data = contents.encode("utf-8")
+        data = contents
     return await ProjectFileSystem(project_id, max_project_bytes).write_file(path, data)
 
 

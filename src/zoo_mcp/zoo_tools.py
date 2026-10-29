@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import mimetypes
@@ -4426,7 +4427,15 @@ class ProjectFileSystem:
             _project_parent(files, path)
             files[path] = content
 
-        return await self._mutate(transform)
+        project = await self._mutate(transform)
+        return {
+            **project,
+            "path": path,
+            "contents": contents
+            if isinstance(contents, str)
+            else base64.b64encode(content).decode("ascii"),
+            "encoding": "utf-8" if isinstance(contents, str) else "base64",
+        }
 
     @api_operation
     async def mkdir(self, path: str) -> dict:

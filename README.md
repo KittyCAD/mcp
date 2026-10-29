@@ -114,7 +114,10 @@ There is no persistent content cache.
 - `project_write_file` accepts raw Python bytes when encoding is omitted;
   strings default to UTF-8. Explicit `encoding="utf-8"` or `encoding="base64"`
   applies to strings. Use base64 for binary contents over JSON MCP transports.
-  Its parent directory must exist.
+  Its parent directory must exist. A successful result includes the acknowledged
+  project metadata plus `path` (normalized and project-relative), `contents`, and
+  `encoding`. Text returns with `encoding="utf-8"`; raw bytes and base64 inputs
+  return base64-encoded contents with `encoding="base64"`.
 - `project_mkdir` requires an existing parent and a nonexistent target. It
   persists the directory using a visible, zero-byte `.empty` file. That marker
   can stay after files are added. Removing or moving a directory's last child

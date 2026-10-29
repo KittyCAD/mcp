@@ -262,13 +262,19 @@ def test_requires_cloud_uuid(project_id):
 @pytest.mark.asyncio
 async def test_conflict_reapplies_without_losing_unrelated_edit(api):
     api.failure = "conflict"
-    await ProjectFileSystem(PROJECT_ID).write_file(
+    result = await ProjectFileSystem(PROJECT_ID).write_file(
         "parts/a.bin", b"latest requested write"
     )
     assert len(api.uploads) == 2
     assert api.files["concurrent.txt"] == b"preserve concurrent edit"
     assert api.files["parts/a.bin"] == b"latest requested write"
     assert api.uploads[1][0]["expected_revision"] == "2"
+    assert result == {
+        **api.metadata(),
+        "path": "parts/a.bin",
+        "contents": base64.b64encode(b"latest requested write").decode(),
+        "encoding": "base64",
+    }
 
 
 @pytest.mark.asyncio
@@ -663,6 +669,36 @@ async def test_write_tool_accepts_bytes_without_encoding(
     assert isinstance(result, CallToolResult)
     assert not result.is_error
     assert api.files["written.bin"] == expected
+    assert isinstance(result.content[0], TextContent)
+    binary = isinstance(contents, bytes) or options.get("encoding") == "base64"
+    assert json.loads(result.content[0].text) == {
+        **api.metadata(),
+        "path": "written.bin",
+        "contents": base64.b64encode(expected).decode()
+        if binary
+        else expected.decode("utf-8"),
+        "encoding": "base64" if binary else "utf-8",
+    }
+
+
+@pytest.mark.asyncio
+async def test_write_result_returns_normalized_path(api):
+    result = await mcp.call_tool(
+        "project_write_file",
+        {
+            "project_id": PROJECT_ID,
+            "path": "  .\\parts\\new.kcl  ",
+            "contents": "// committed contents\n",
+        },
+    )
+    assert isinstance(result, CallToolResult)
+    assert isinstance(result.content[0], TextContent)
+    assert json.loads(result.content[0].text) == {
+        **api.metadata(),
+        "path": "parts/new.kcl",
+        "contents": "// committed contents\n",
+        "encoding": "utf-8",
+    }
 
 
 @pytest.mark.asyncio
