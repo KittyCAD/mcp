@@ -1,9 +1,12 @@
 import argparse
 import asyncio
 import atexit
+import json
+import math
 import signal
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass
 from types import FrameType
 from typing import TypeVar
 
@@ -86,7 +89,7 @@ from kittycad.models.ok_modeling_cmd_response import (
 from kittycad.models.uuid import Uuid
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ImageContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from zoo_mcp import ZooMCPException, logger
 from zoo_mcp.kcl_docs import (
@@ -110,6 +113,8 @@ from zoo_mcp.utils.image_utils import (
 from zoo_mcp.zoo_tools import (
     CameraView,
     FaceInfo,
+    KclPhysicalPropertiesRequest,
+    KclSnapshotRequest,
     ResultZooExecuteKcl,
     _abort_all_modeling_sessions,
     zoo_calculate_bounding_box_cad,
@@ -121,6 +126,7 @@ from zoo_mcp.zoo_tools import (
     zoo_calculate_surface_area,
     zoo_calculate_volume,
     zoo_convert_cad_file,
+    zoo_evaluate_kcl,
     zoo_exec_kcl_project,
     zoo_execute_kcl,
     zoo_execute_modeling_command,
@@ -511,6 +517,9 @@ async def execute_kcl(
 ) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
+    Prefer evaluate_kcl when execution, measurements, and snapshots are
+    needed together; it collects them from one execution.
+
     Executing kcl_code does not save a .kcl source file. For model creation,
     save the source and required project files with the client's authorized
     file-editing tools, then validate the saved project using kcl_path and
@@ -543,6 +552,98 @@ async def execute_kcl(
         kcl_path=kcl_path,
         session_id=session_id,
     )
+
+
+@dataclass(frozen=True)
+class EvaluationSnapshotRequest:
+    """JSON camera options adapted to the native execution inspection request."""
+
+    views: tuple[str | dict[str, list[float]], ...] = ("isometric",)
+    padding: float = 0.1
+    zoom: bool | None = None
+    highlight_edges: bool = False
+    max_image_dimension: int = 512
+
+    def to_native(self) -> KclSnapshotRequest:
+        if not math.isfinite(self.padding) or self.padding < 0:
+            raise ValueError("Snapshot padding must be finite and nonnegative")
+        for view in self.views:
+            if isinstance(view, dict):
+                if set(view) != {"up", "vantage", "center"} or any(
+                    len(vector) != 3 or not all(math.isfinite(n) for n in vector)
+                    for vector in view.values()
+                ):
+                    raise ValueError(
+                        "Camera up, vantage, and center require three finite numbers"
+                    )
+                direction = [
+                    v - c for v, c in zip(view["vantage"], view["center"], strict=True)
+                ]
+                up = view["up"]
+                cross = [
+                    direction[1] * up[2] - direction[2] * up[1],
+                    direction[2] * up[0] - direction[0] * up[2],
+                    direction[0] * up[1] - direction[1] * up[0],
+                ]
+                if not any(cross):
+                    raise ValueError(
+                        "Camera direction and up must be nonzero and nonparallel"
+                    )
+        return KclSnapshotRequest(
+            tuple(
+                CameraView.to_kcl_camera(view) if isinstance(view, dict) else view
+                for view in self.views
+            ),
+            padding=self.padding,
+            zoom=self.zoom,
+            highlight_edges=self.highlight_edges,
+            max_image_dimension=self.max_image_dimension,
+        )
+
+
+@mcp.tool()
+async def evaluate_kcl(
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    snapshot_request: EvaluationSnapshotRequest | None = None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None = None,
+) -> CallToolResult:
+    """Execute KCL once and collect requested measurements and snapshots.
+
+    Prefer this when several checks are known in advance.
+    Provide exactly one source: self-contained kcl_code or a saved kcl_path project.
+    Save editable source separately; inline code does not create a source file.
+    Mock errors prevent hosted execution. The isolated session closes after the
+    operation; no persistent session ID is needed or returned.
+
+    snapshot_request: Optional views (1–4 named views or camera dicts with up,
+        vantage, center). An empty object requests one isometric image. Named
+        views use zoom-to-fit; custom views default to their explicit framing.
+    physical_properties_request: Optional properties list (volume, mass,
+        surface_area, center_of_mass, bounding_box) and units. Mass additionally
+        requires density and unit_density. Only requested properties are measured.
+
+    Returns structured execution/inspection outcomes, plus an inline image when
+    requested and available. ok describes execution only: inspect output statuses
+    for partial failures. Output failures
+    never rerun geometry; successful outputs remain available.
+    """
+    result = await zoo_evaluate_kcl(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        snapshot_request=snapshot_request.to_native() if snapshot_request else None,
+        physical_properties_request=physical_properties_request,
+    )
+    data = asdict(result)
+    image_bytes = data["inspection"].pop("rendered_snapshot")
+    response = CallToolResult(
+        structured_content=data,
+        content=[TextContent(type="text", text=json.dumps(data))],
+        is_error=not result.ok,
+    )
+    if image_bytes is not None:
+        response.content.append(encode_image(image_bytes))
+    return response
 
 
 @mcp.tool()
