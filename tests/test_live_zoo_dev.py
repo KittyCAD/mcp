@@ -123,6 +123,62 @@ async def test_live_get_kcl_doc_from_listing(real_docs):
     assert "Documentation not found" not in text
 
 
+@pytest.mark.xdist_group(name="live-docs")
+async def test_live_lookup_all_kcl_functions(real_docs):
+    """Exercise each published function through the MCP get and lookup tools."""
+    for path in real_docs.index["kcl-std-functions"]:
+        fetched = await mcp.call_tool("get_kcl_doc", {"doc_path": path})
+        source = _meta_result(fetched)
+        assert source == real_docs.docs[path], path
+        assert _content_list(fetched)[0].text == source, path
+        full_budget = max(6000, 4 * len(source))
+        arguments = [
+            {"query": path.rsplit("/", 1)[-1], "max_results": 1, "max_chars": budget}
+            for budget in sorted({2000, 6000, full_budget})
+        ]
+        arguments.append({"query": source.splitlines()[0].removeprefix("# ")})
+        for args in arguments:
+            response = await mcp.call_tool("lookup_kcl_docs", args)
+            assert isinstance(response, CallToolResult)
+            payload = response.structured_content
+            assert payload is not None, (path, args)
+            assert json.loads(_content_list(response)[0].text) == payload, (path, args)
+            pages = payload["results"]
+            assert pages, (path, args)
+            if args.get("max_results") == 1:
+                assert len(pages) == 1 and pages[0]["path"] == path, (path, args)
+            assert sum(
+                len(section["content"])
+                for page in pages
+                for section in page["sections"]
+            ) <= args.get("max_chars", 6000), (path, args)
+            for page in pages:
+                original = real_docs.docs[page["path"]]
+                assert page["sections"], (path, args, page)
+                for section in page["sections"]:
+                    heading, separator, body = section["content"].partition("\n\n")
+                    assert separator and body.strip(), (path, args, section)
+                    assert heading in original.splitlines(), (path, args, section)
+                    assert heading.lstrip("# ").rstrip(" #") == section["heading"], (
+                        path,
+                        args,
+                        section,
+                    )
+            if args.get("max_chars") == full_budget:
+                page = pages[0]
+                assert not page["truncated"], (path, args)
+                # All source lines must survive a sufficient budget. Comparing
+                # sets allows duplicate intro paragraphs to collapse.
+                expected = {line for line in source.splitlines() if line.strip()}
+                actual = {
+                    line
+                    for section in page["sections"]
+                    for line in section["content"].splitlines()
+                    if line.strip()
+                }
+                assert actual == expected, (path, args, expected - actual)
+
+
 # ---------------------------------------------------------------------------
 # Samples: list / search / get
 # ---------------------------------------------------------------------------

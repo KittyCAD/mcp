@@ -274,7 +274,9 @@ def _markdown_sections(content: str) -> list[tuple[str, list[str]]]:
 
     def flush() -> None:
         if lines:
-            blocks.append("\n".join(lines).strip())
+            # Fence indentation controls how Markdown dedents the code inside.
+            # Keep it along with list indentation when excerpting source blocks.
+            blocks.append("\n".join(lines))
             lines.clear()
 
     for line in content.splitlines():
@@ -359,7 +361,11 @@ def lookup_docs(query: str, max_results: int = 3, max_chars: int = 6000) -> dict
         headings = " ".join(heading for heading, _ in sections)
         # A qualified std symbol and its unqualified name both count as exact.
         symbol = title.strip("` ").lower()
-        exact = query in {symbol, symbol.rsplit("::", 1)[-1], path.rsplit("/", 1)[-1]}
+        exact = query in {
+            symbol,
+            symbol.rsplit("::", 1)[-1],
+            path.rsplit("/", 1)[-1].lower(),
+        }
         title_matches = len(tokens & _lookup_tokens(title))
         heading_matches = len(tokens & _lookup_tokens(headings))
         body_matches = len(tokens & _lookup_tokens(content))
@@ -391,6 +397,7 @@ def lookup_docs(query: str, max_results: int = 3, max_chars: int = 6000) -> dict
             kept = blocks[:1] if has_heading else []
             section_used = len(kept[0]) if kept else 0
             body = blocks[1:] if has_heading else blocks
+            example_included = False
             for block_index, block in enumerate(body):
                 # Generated pages can repeat their introductory paragraph. Keep
                 # one copy without treating the duplicate as lost information.
@@ -401,10 +408,17 @@ def lookup_docs(query: str, max_results: int = 3, max_chars: int = 6000) -> dict
                     and not _FENCE_RE.match(block.splitlines()[0])
                 ):
                     continue
+                # The viewer belongs to the preceding code example. Returning
+                # just its HTML would make an omitted example look populated.
+                if block.lstrip().startswith("<model-viewer") and not example_included:
+                    omitted = True
+                    continue
                 separator_cost = 2 if kept else 0
                 excerpt = _compact_block(
                     block, budget - used - section_used - separator_cost, tokens
                 )
+                if _FENCE_RE.match(block.splitlines()[0]):
+                    example_included = bool(excerpt)
                 if excerpt != block:
                     omitted = True
                 if excerpt:

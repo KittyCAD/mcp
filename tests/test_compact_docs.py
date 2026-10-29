@@ -38,6 +38,67 @@ def test_multiword_query_and_deterministic_order(docs, monkeypatch):
     assert lookup_docs("extrude sketch") == first
 
 
+@pytest.mark.parametrize(
+    "query", ["std-math-legAngX", "std-math-legangx", "STD-MATH-LEGANGX"]
+)
+def test_mixed_case_path_beats_module_mentions(monkeypatch, query):
+    path = "docs/kcl-std/functions/std-math-legAngX"
+    monkeypatch.setattr(
+        KCLDocs,
+        "_instance",
+        KCLDocs(
+            docs={
+                path: "# legAngX\n\nCompute the angle of a triangle's leg.",
+                "docs/kcl-std/modules/std-math": "# std::math\n\n## legAngX\n\n"
+                "See [legAngX](/docs/kcl-std/functions/std-math-legAngX).",
+            }
+        ),
+    )
+    assert lookup_docs(query, max_results=1)["results"][0]["path"] == path
+
+
+@pytest.mark.parametrize("indent", [" ", "  ", "   "])
+def test_indented_fence_keeps_source_indentation(monkeypatch, indent):
+    example = f"{indent}```kcl\n{indent}x = 1\n{indent}  + 2\n{indent}```"
+    content = f"# Example\n\n1. Evaluate the expression.\n{example}"
+    monkeypatch.setattr(
+        KCLDocs, "_instance", KCLDocs(docs={"docs/kcl-lang/example": content})
+    )
+    page = lookup_docs("example")["results"][0]
+    assert example in page["sections"][0]["content"]
+    assert not page["truncated"]
+
+
+def test_omitted_example_does_not_leave_viewer_only_section(monkeypatch):
+    viewer = '<model-viewer src="/model.glb">\n</model-viewer>'
+    content = "# Example\n\nIntro.\n\n## Examples\n\n```kcl\n" + "x" * 500
+    content += f"\n```\n\n{viewer}"
+    monkeypatch.setattr(
+        KCLDocs, "_instance", KCLDocs(docs={"docs/kcl-lang/example": content})
+    )
+    compact = lookup_docs("example", max_chars=200)["results"][0]
+    assert compact["sections"] == [
+        {"heading": "Example", "content": "# Example\n\nIntro."}
+    ]
+    assert compact["truncated"]
+    full = lookup_docs("example")["results"][0]
+    assert viewer in full["sections"][1]["content"]
+    assert not full["truncated"]
+
+
+def test_viewer_tracks_its_own_example(monkeypatch):
+    first = "```kcl\nx = 1\n```"
+    second = "```kcl\n" + "x" * 500 + "\n```"
+    viewer = '<model-viewer src="/second.glb">\n</model-viewer>'
+    content = f"# Example\n\n{first}\n\n{second}\n\n{viewer}"
+    monkeypatch.setattr(
+        KCLDocs, "_instance", KCLDocs(docs={"docs/kcl-lang/example": content})
+    )
+    page = lookup_docs("example", max_chars=200)["results"][0]
+    assert page["sections"][0]["content"] == "# Example\n\n" + first
+    assert page["truncated"]
+
+
 @pytest.mark.parametrize("budget", [1, 45, 120, 6000])
 def test_one_budget_preserves_fences(docs, budget):
     result = lookup_docs("extrude hole fillet", max_chars=budget)
