@@ -84,6 +84,78 @@ credential context.
 Credential contexts configure downstream calls. Applications serving different
 owners must also isolate their process-wide modeling sessions and workspaces.
 
+### Cloud project filesystem
+
+The `project_write_file`, `project_mkdir`, `project_rm`, `project_cp`,
+`project_mv`, `project_access`, `project_stat`, `project_readdir`, and
+`project_read_file` tools operate on an existing `cloud:<uuid>` project using
+its caller's Zoo credentials. Paths use project-relative POSIX syntax; `.`
+selects the root for metadata and directory reads. Quoted filenames are preserved;
+control characters in paths are rejected. Operations stay within one
+project.
+
+Every mutation fetches current metadata and complete file contents, applies its
+changes in memory, then uploads the whole project with `expected_revision` and
+explicit `deleted_paths`. Copies and moves use one upload, including recursive
+directory operations. A revision conflict reloads the latest project and
+reapplies the operation, up to three upload attempts. Thus a write replaces the
+target's latest contents, and recursive removal includes files added before a
+retry. Unrelated files and project metadata are preserved. Connection failures,
+timeouts, other HTTP errors, and unreadable responses surface to the caller
+without an automatic retry. After an upload error, the caller can inspect the
+project before deciding whether to retry.
+
+The default limit is **256 MiB of total uncompressed project contents**, based on
+four times text-to-CAD's 64 MiB DFM capture limit. Callers can override
+`max_project_bytes`. The limit applies before downloading, while reading the
+archive, and after mutations. A complete operation has a 300-second deadline.
+There is no persistent content cache.
+
+- `project_write_file` accepts raw Python bytes when encoding is omitted;
+  strings default to UTF-8. Explicit `encoding="utf-8"` or `encoding="base64"`
+  applies to strings. Use base64 for binary contents over JSON MCP transports.
+  Its parent directory must exist. A successful result includes the acknowledged
+  project metadata plus `path` (normalized and project-relative), `contents`, and
+  `encoding`. Text returns with `encoding="utf-8"`; raw bytes and base64 inputs
+  return base64-encoded contents with `encoding="base64"`.
+- `project_mkdir` requires an existing parent and a nonexistent target. It
+  persists the directory using a visible, zero-byte `.empty` file. That marker
+  can stay after files are added. Removing or moving a directory's last child
+  also creates a marker to preserve the parent directory. Explicitly removing
+  the `.empty` marker allows an otherwise empty directory to disappear.
+- `project_rm` removes a file or directory recursively. Paths are literal; there
+  is no glob expansion.
+- `project_cp` and `project_mv` append the source basename when the destination
+  is a directory. Existing files can be replaced; directory collisions are
+  errors. Moves remove the source in the same upload that creates the target.
+- `main.kcl` must remain the entrypoint. It can be edited but cannot be removed,
+  moved, or overwritten through copy/move. The project root cannot be removed,
+  copied, or moved. The API also requires `project.toml`, so removing or moving
+  that manifest is rejected.
+- `project_access` returns the API's current project capabilities for an existing
+  path. `project_stat` returns file metadata or an inferred directory record;
+  directory IDs, timestamps, sizes, and hashes are null.
+- `project_readdir` returns `{ "files": [...] }` for immediate children.
+- `project_read_file` returns `{ "contents": "...", "encoding": "utf-8" }`.
+  Set `encoding="base64"` for binary files.
+
+Python callers can use the implementation directly:
+
+```python
+from zoo_mcp.credentials import ZooCredentials, use_credentials
+from zoo_mcp.zoo_tools import ProjectFileSystem
+
+with use_credentials(ZooCredentials(token=api_token)):
+    project = ProjectFileSystem("cloud:00000000-0000-4000-8000-000000000001")
+    await project.mkdir("parts")
+    await project.write_file("parts/bracket.kcl", "// KCL contents")
+    contents = await project.read_file("parts/bracket.kcl", encoding="utf-8")
+```
+
+`read_file` returns bytes when no encoding is supplied. A `ProjectFileSystem`
+instance retains the credentials supplied when it was constructed; construct a
+new instance when changing the token or API host.
+
 ### Prebuilt binaries
 
 Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:
