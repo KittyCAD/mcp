@@ -1373,12 +1373,13 @@ wheels = [
 
 [[package]]
 name = "zoo-mcp"
-version = "0.28.16"
+version = "0.29.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
     { name = "httpx" },
     { name = "kittycad" },
+    { name = "markdown-it-py" },
     { name = "mcp", extra = ["cli"] },
     { name = "pillow" },
     { name = "pymongo" },
@@ -1405,6 +1406,7 @@ requires-dist = [
     { name = "aiofiles", specifier = "<26.0" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "kittycad", specifier = ">=1.8.0,<2.0" },
+    { name = "markdown-it-py", specifier = ">=4.2,<5" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.2.0,<3" },
     { name = "pillow", specifier = ">=13.0.0,<14.0" },
     { name = "pymongo", specifier = ">=4.6.0,<5.0" },
