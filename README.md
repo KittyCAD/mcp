@@ -162,8 +162,8 @@ engine facilities. This source file houses other utilities like `parse_unit` or
 Modeling scenes use explicit persistent sessions, with at most one session open
 per server process. Call `get_modeling_sessions` to recover its ID after a client
 reconnect, or call `start_modeling_session` when none exists. Populate the
-session with `execute_kcl`, `exec_kcl_project`, or `import_cad_file`; pass the
-same `session_id` to `snapshot` and modeling tools; then call
+session with `execute_kcl` or `import_cad_file`, passing `session_id` to either
+tool. Reuse the same `session_id` with `snapshot` and modeling tools; then call
 `stop_modeling_session` when finished.
 
 KCL execution and persistent modeling sessions use the CPU engine pool. Isolated
@@ -178,8 +178,8 @@ KCL sources. Filenames preserve project-relative paths, including subdirectories
 These public tools do not require an API token. The `multipleFiles` field in
 list/search results is a hint until the project has been downloaded.
 
-As of 0.28.0, `execute_kcl` and `exec_kcl_project` run mock execution before real
-execution and return separate `mock_preflight` and `real_execution` objects.
+`execute_kcl` runs mock execution before real execution and returns separate
+`mock_preflight` and `real_execution` objects.
 Each contains `status` (`succeeded`, `failed`, or `not_run`), `message`, and
 `diagnostics` grouped by severity. Stage messages are short summaries; the
 top-level `message` retains the full report for existing callers. Failed stages
@@ -201,8 +201,7 @@ retain their bounded retries using the same copy without repeating mock executio
 Diagnostics refer to the original source paths. Inline `kcl_code` accepts
 self-contained code and standard-library imports; filesystem imports require
 `kcl_path` so their dependencies can be captured within an explicit directory.
-`exec_kcl_project` now returns
-this structured result instead of a path string: check `ok`, then read
+When calling `execute_kcl` with `session_id`, check `ok`, then read
 `path_artifact_graph` on session success. The standalone `mock_execute_kcl` tool
 continues to return its existing boolean/message pair.
 
