@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import kcl
 import pytest
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
 
@@ -166,10 +166,75 @@ async def test_cancellation_closes_session(bindings, tmp_path, stage):
     ],
 )
 async def test_invalid_requests_do_not_execute(bindings, extra):
-    with pytest.raises(ToolError):
+    with pytest.raises(ToolError) as error:
         await call({"kcl_code": "x = 1", **extra})
+    assert type(error.value) is ToolError
     bindings.opened.assert_not_awaited()
     bindings.mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments, message",
+    [
+        ({}, "Provide exactly one of kcl_code or kcl_path"),
+        (
+            {"kcl_code": "x = 1", "kcl_path": "/also.kcl"},
+            "Provide exactly one of kcl_code or kcl_path",
+        ),
+        (
+            {
+                "kcl_code": "x = 1",
+                "physical_properties_request": {"properties": ["mass"]},
+            },
+            "density is required when requesting mass",
+        ),
+        (
+            {
+                "kcl_code": "x = 1",
+                "physical_properties_request": {"properties": ["mass"], "density": 1},
+            },
+            "unit_density is required when requesting mass",
+        ),
+        (
+            {
+                "kcl_code": "x = 1",
+                "snapshot_request": {"views": ["front"], "zoom": False},
+            },
+            "Named snapshot views require zoom-to-fit",
+        ),
+        (
+            {
+                "kcl_code": "x = 1",
+                "snapshot_request": {
+                    "views": [
+                        {"up": [0, 0, 1], "vantage": [0, 0, 1], "center": [0, 0, 0]}
+                    ]
+                },
+            },
+            "Camera direction and up must be nonzero and nonparallel",
+        ),
+    ],
+)
+async def test_invalid_requests_expose_corrective_messages(
+    bindings, arguments, message
+):
+    with pytest.raises(ToolError, match=message) as error:
+        await mcp.call_tool("evaluate_kcl", arguments)
+    assert type(error.value) is ToolError
+    bindings.mock.assert_not_awaited()
+    bindings.opened.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_errors_remain_masked(monkeypatch):
+    monkeypatch.setattr(
+        "zoo_mcp.server.zoo_evaluate_kcl",
+        AsyncMock(side_effect=ValueError("internal failure details")),
+    )
+    with pytest.raises(UnexpectedToolError) as error:
+        await mcp.call_tool("evaluate_kcl", {"kcl_code": "x = 1"})
+    assert str(error.value) == "Error executing tool evaluate_kcl"
 
 
 @pytest.mark.asyncio

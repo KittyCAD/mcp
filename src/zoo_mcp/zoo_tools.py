@@ -13,7 +13,7 @@ from enum import Enum
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -136,7 +136,6 @@ from kittycad.models.ok_web_socket_response_data import OptionModeling
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
-from pydantic import ConfigDict, Field, FiniteFloat, with_config
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
@@ -1653,45 +1652,17 @@ class KclSnapshotRequest:
     max_image_dimension: int = 512
 
 
-@with_config(ConfigDict(extra="forbid"))
 @dataclass(frozen=True)
 class KclPhysicalPropertiesRequest:
     """Requested measurements and their output units. Mass also requires material density."""
 
-    properties: Annotated[
-        tuple[KclPhysicalProperty, ...],
-        Field(
-            min_length=1,
-            description="Measurements to collect; only these properties are computed.",
-        ),
-    ]
-    unit_length: Annotated[
-        Literal["cm", "ft", "in", "m", "mm", "yd"],
-        Field(description="Output unit for center_of_mass and bounding_box."),
-    ] = "mm"
-    unit_mass: Annotated[
-        Literal["g", "kg", "lb"], Field(description="Output unit for mass.")
-    ] = "g"
-    unit_density: Annotated[
-        Literal["lb:ft3", "kg:m3"] | None,
-        Field(
-            description="Unit of the supplied material density. Required together with density when properties includes mass."
-        ),
-    ] = None
-    density: Annotated[
-        FiniteFloat | None,
-        Field(
-            description="Material density in unit_density. Required together with unit_density when properties includes mass."
-        ),
-    ] = None
-    unit_area: Annotated[
-        Literal["cm2", "dm2", "ft2", "in2", "km2", "m2", "mm2", "yd2"],
-        Field(description="Output unit for surface_area."),
-    ] = "mm2"
-    unit_volume: Annotated[
-        Literal["cm3", "mm3", "ft3", "in3", "m3", "yd3", "usfloz", "usgal", "l", "ml"],
-        Field(description="Output unit for volume."),
-    ] = "mm3"
+    properties: tuple[KclPhysicalProperty, ...]
+    unit_length: str = "mm"
+    unit_mass: str = "g"
+    unit_density: str | None = None
+    density: float | None = None
+    unit_area: str = "mm2"
+    unit_volume: str = "mm3"
 
 
 @dataclass

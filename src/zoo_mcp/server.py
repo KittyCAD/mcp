@@ -116,6 +116,7 @@ from zoo_mcp.zoo_tools import (
     CameraView,
     FaceInfo,
     KclPhysicalPropertiesRequest,
+    KclPhysicalProperty,
     KclSnapshotRequest,
     ResultZooExecuteKcl,
     _abort_all_modeling_sessions,
@@ -497,7 +498,7 @@ class EvaluationCamera:
         Field(
             min_length=3,
             max_length=3,
-            description="Up direction [x, y, z]; must be nonzero and not parallel to the viewing direction.",
+            description="Dimensionless up direction [x, y, z]; must be nonzero and not parallel to the viewing direction.",
         ),
     ]
     vantage: Annotated[
@@ -505,7 +506,7 @@ class EvaluationCamera:
         Field(
             min_length=3,
             max_length=3,
-            description="Camera position [x, y, z] in world coordinates; must differ from center.",
+            description="Camera position [x, y, z] in millimeters, regardless of the KCL model's units; must differ from center.",
         ),
     ]
     center: Annotated[
@@ -513,11 +514,11 @@ class EvaluationCamera:
         Field(
             min_length=3,
             max_length=3,
-            description="Look-at target [x, y, z] in world coordinates.",
+            description="Look-at target [x, y, z] in millimeters, regardless of the KCL model's units.",
         ),
     ]
 
-    def to_native(self) -> kcl.CameraLookAt:
+    def __post_init__(self) -> None:
         if any(
             len(vector) != 3 or not all(math.isfinite(n) for n in vector)
             for vector in (self.up, self.vantage, self.center)
@@ -533,6 +534,8 @@ class EvaluationCamera:
         ]
         if not any(cross):
             raise ValueError("Camera direction and up must be nonzero and nonparallel")
+
+    def to_native(self) -> kcl.CameraLookAt:
         return CameraView.to_kcl_camera(asdict(self))
 
 
@@ -571,9 +574,13 @@ class EvaluationSnapshotRequest:
         Field(gt=0, description="Maximum width or height of each image, in pixels."),
     ] = 512
 
-    def to_native(self) -> KclSnapshotRequest:
+    def __post_init__(self) -> None:
         if not math.isfinite(self.padding) or self.padding < 0:
             raise ValueError("Snapshot padding must be finite and nonnegative")
+        if self.zoom is False and any(isinstance(view, str) for view in self.views):
+            raise ValueError("Named snapshot views require zoom-to-fit")
+
+    def to_native(self) -> KclSnapshotRequest:
         return KclSnapshotRequest(
             tuple(
                 view.to_native() if isinstance(view, EvaluationCamera) else view
@@ -584,6 +591,57 @@ class EvaluationSnapshotRequest:
             highlight_edges=self.highlight_edges,
             max_image_dimension=self.max_image_dimension,
         )
+
+
+@with_config(ConfigDict(extra="forbid"))
+@dataclass(frozen=True)
+class EvaluationPhysicalPropertiesRequest:
+    """Requested measurements and their output units. Mass also requires material density."""
+
+    properties: Annotated[
+        tuple[KclPhysicalProperty, ...],
+        Field(
+            min_length=1,
+            description="Measurements to collect; only these properties are computed.",
+        ),
+    ]
+    unit_length: Annotated[
+        Literal["cm", "ft", "in", "m", "mm", "yd"],
+        Field(description="Output unit for center_of_mass and bounding_box."),
+    ] = "mm"
+    unit_mass: Annotated[
+        Literal["g", "kg", "lb"], Field(description="Output unit for mass.")
+    ] = "g"
+    unit_density: Annotated[
+        Literal["lb:ft3", "kg:m3"] | None,
+        Field(
+            description="Unit of the supplied material density. Required together with density when properties includes mass."
+        ),
+    ] = None
+    density: Annotated[
+        FiniteFloat | None,
+        Field(
+            description="Material density in unit_density. Required together with unit_density when properties includes mass."
+        ),
+    ] = None
+    unit_area: Annotated[
+        Literal["cm2", "dm2", "ft2", "in2", "km2", "m2", "mm2", "yd2"],
+        Field(description="Output unit for surface_area."),
+    ] = "mm2"
+    unit_volume: Annotated[
+        Literal["cm3", "mm3", "ft3", "in3", "m3", "yd3", "usfloz", "usgal", "l", "ml"],
+        Field(description="Output unit for volume."),
+    ] = "mm3"
+
+    def __post_init__(self) -> None:
+        if "mass" in self.properties:
+            if self.density is None:
+                raise ValueError("density is required when requesting mass")
+            if self.unit_density is None:
+                raise ValueError("unit_density is required when requesting mass")
+
+    def to_native(self) -> KclPhysicalPropertiesRequest:
+        return KclPhysicalPropertiesRequest(**asdict(self))
 
 
 @mcp.tool()
@@ -609,7 +667,7 @@ async def evaluate_kcl(
         ),
     ] = None,
     physical_properties_request: Annotated[
-        KclPhysicalPropertiesRequest | None,
+        EvaluationPhysicalPropertiesRequest | None,
         Field(
             description="Optional measurements and output units; omit to skip. Mass requires density and unit_density.",
             examples=[
@@ -648,11 +706,17 @@ async def evaluate_kcl(
     for partial failures. Output failures
     never rerun geometry; successful outputs remain available.
     """
+    if (kcl_code is None) == (kcl_path is None):
+        raise ToolError("Provide exactly one of kcl_code or kcl_path")
     result = await zoo_evaluate_kcl(
         kcl_code=kcl_code,
         kcl_path=kcl_path,
         snapshot_request=snapshot_request.to_native() if snapshot_request else None,
-        physical_properties_request=physical_properties_request,
+        physical_properties_request=(
+            physical_properties_request.to_native()
+            if physical_properties_request is not None
+            else None
+        ),
     )
     data = asdict(result)
     image_bytes = data["inspection"].pop("rendered_snapshot")

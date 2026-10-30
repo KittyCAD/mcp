@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -15,6 +16,8 @@ from zoo_mcp.zoo_tools import (
     UNIT_MASS_MAP,
     UNIT_VOLUME_MAP,
     CameraView,
+    KclPhysicalPropertiesRequest,
+    zoo_evaluate_kcl,
 )
 
 
@@ -28,7 +31,7 @@ def test_schema_describes_accepted_camera_and_measurement_inputs(input_schema):
     definitions = input_schema["$defs"]
     snapshot = definitions["EvaluationSnapshotRequest"]
     camera = definitions["EvaluationCamera"]
-    measurements = definitions["KclPhysicalPropertiesRequest"]
+    measurements = definitions["EvaluationPhysicalPropertiesRequest"]
     for request in (snapshot, camera, measurements):
         assert request["description"]
         assert request["additionalProperties"] is False
@@ -44,6 +47,10 @@ def test_schema_describes_accepted_camera_and_measurement_inputs(input_schema):
     for coordinates in camera["properties"].values():
         assert coordinates["minItems"] == coordinates["maxItems"] == 3
         assert coordinates["items"]["type"] == "number"
+    for name in ("vantage", "center"):
+        assert "millimeters" in camera["properties"][name]["description"]
+        assert "regardless of" in camera["properties"][name]["description"]
+    assert "Dimensionless" in camera["properties"]["up"]["description"]
     assert snapshot["properties"]["padding"]["minimum"] == 0
     assert snapshot["properties"]["max_image_dimension"]["exclusiveMinimum"] == 0
 
@@ -101,6 +108,64 @@ async def test_schema_examples_work_through_mcp(bindings, input_schema, request_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["python", "mcp"])
+@pytest.mark.parametrize(
+    "unit_length, unit_mass, unit_density, unit_area, unit_volume",
+    [("in", "lb", "lb:ft3", "ft2", "usgal"), ("cm", "kg", "kg:m3", "m2", "l")],
+)
+async def test_string_units_remain_compatible_for_python_clients(
+    bindings,
+    route: str,
+    unit_length: str,
+    unit_mass: str,
+    unit_density: str,
+    unit_area: str,
+    unit_volume: str,
+):
+    # Zookeeper passes string parameters to the public Python request class.
+    request = KclPhysicalPropertiesRequest(
+        ("volume", "mass", "surface_area", "center_of_mass", "bounding_box"),
+        unit_length=unit_length,
+        unit_mass=unit_mass,
+        unit_density=unit_density,
+        density=1000,
+        unit_area=unit_area,
+        unit_volume=unit_volume,
+    )
+    point = SimpleNamespace(x=1, y=2, z=3)
+    bindings.session.measure.side_effect = None
+    bindings.session.measure.return_value = SimpleNamespace(
+        get_volume=lambda: 12.5,
+        get_mass=lambda: 1,
+        get_surface_area=lambda: 42,
+        get_center_of_mass=lambda: point,
+        get_bounding_box=lambda: SimpleNamespace(
+            get_center=lambda: point, get_dimensions=lambda: point
+        ),
+    )
+    if route == "python":
+        result = asdict(
+            await zoo_evaluate_kcl(
+                kcl_code="x = 1", physical_properties_request=request
+            )
+        )
+    else:
+        _, result = await call(
+            {"kcl_code": "x = 1", "physical_properties_request": asdict(request)}
+        )
+    assert result["inspection"]["physical_analysis_status"] == "succeeded"
+    properties = result["inspection"]["physical_properties"]
+    assert {name: value["unit"] for name, value in properties.items()} == {
+        "volume": unit_volume,
+        "mass": unit_mass,
+        "surface_area": unit_area,
+        "center_of_mass": unit_length,
+        "bounding_box": unit_length,
+    }
+    bindings.session.measure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_custom_camera_preserves_coordinates_and_automatic_framing(
     bindings, monkeypatch
 ):
@@ -151,8 +216,9 @@ async def test_custom_camera_preserves_coordinates_and_automatic_framing(
     ],
 )
 async def test_invalid_snapshot_objects_fail_before_execution(bindings, options):
-    with pytest.raises(ToolError):
+    with pytest.raises(ToolError) as error:
         await call({"kcl_code": "x = 1", "snapshot_request": options})
+    assert type(error.value) is ToolError
     bindings.mock.assert_not_awaited()
     bindings.opened.assert_not_awaited()
 
@@ -179,7 +245,8 @@ async def test_invalid_snapshot_objects_fail_before_execution(bindings, options)
     ],
 )
 async def test_invalid_measurement_objects_fail_before_execution(bindings, options):
-    with pytest.raises(ToolError):
+    with pytest.raises(ToolError) as error:
         await call({"kcl_code": "x = 1", "physical_properties_request": options})
+    assert type(error.value) is ToolError
     bindings.mock.assert_not_awaited()
     bindings.opened.assert_not_awaited()
