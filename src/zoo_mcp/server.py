@@ -1,12 +1,16 @@
 import argparse
 import asyncio
 import atexit
+import json
+import math
 import signal
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass
 from types import FrameType
-from typing import TypeVar
+from typing import Annotated, Literal, TypeAlias, TypeVar
 
+import kcl
 from kittycad.models import (
     CameraMovement,
     CurveGetEndPoints,
@@ -86,7 +90,8 @@ from kittycad.models.ok_modeling_cmd_response import (
 from kittycad.models.uuid import Uuid
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ImageContent
+from mcp.types import CallToolResult, ImageContent, TextContent
+from pydantic import ConfigDict, Field, FiniteFloat, with_config
 
 from zoo_mcp import ZooMCPException, logger
 from zoo_mcp.kcl_docs import (
@@ -110,17 +115,19 @@ from zoo_mcp.utils.image_utils import (
 from zoo_mcp.zoo_tools import (
     CameraView,
     FaceInfo,
+    KclPhysicalPropertiesRequest,
+    KclPhysicalProperty,
+    KclSnapshotRequest,
     ResultZooExecuteKcl,
     _abort_all_modeling_sessions,
     zoo_calculate_bounding_box_cad,
-    zoo_calculate_bounding_box_kcl,
     zoo_calculate_cad_physical_properties,
     zoo_calculate_center_of_mass,
-    zoo_calculate_kcl_physical_properties,
     zoo_calculate_mass,
     zoo_calculate_surface_area,
     zoo_calculate_volume,
     zoo_convert_cad_file,
+    zoo_evaluate_kcl,
     zoo_exec_kcl_project,
     zoo_execute_kcl,
     zoo_execute_modeling_command,
@@ -372,88 +379,6 @@ async def calculate_cad_physical_properties(
 
 
 @mcp.tool()
-async def calculate_kcl_physical_properties(
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-    unit_length: str = "mm",
-    unit_mass: str = "g",
-    unit_density: str = "kg:m3",
-    density: float = 1000.0,
-    unit_area: str = "mm2",
-    unit_volume: str = "cm3",
-) -> dict | str:
-    """Calculate physical properties (volume, mass, surface area, center of mass, bounding box) of a KCL model.
-
-    Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point
-    to a .kcl file or a directory containing a main.kcl file.
-
-    Args:
-        kcl_code (str | None): The KCL code to evaluate.
-        kcl_path (str | None): Path to a .kcl file or a directory containing a main.kcl file.
-        unit_length (str): The unit of length for center of mass. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'.
-        unit_mass (str): The unit of mass for the mass result. One of 'g', 'kg', 'lb'.
-        unit_density (str): The unit of density for the material. One of 'lb:ft3', 'kg:m3'.
-        density (float): The density of the material.
-        unit_area (str): The unit of area for surface area. One of 'cm2', 'dm2', 'ft2', 'in2', 'km2', 'm2', 'mm2', 'yd2'.
-        unit_volume (str): The unit of volume. One of 'cm3', 'ft3', 'in3', 'm3', 'mm3', 'yd3', 'usfloz', 'usgal', 'l', 'ml'.
-
-    Returns:
-        dict | str: A dictionary with keys 'volume', 'mass', 'surface_area', 'center_of_mass', and 'bounding_box', or an error message if the operation fails.
-    """
-
-    logger.info("calculate_kcl_physical_properties tool called")
-
-    try:
-        return await zoo_calculate_kcl_physical_properties(
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-            unit_length=unit_length,
-            unit_mass=unit_mass,
-            unit_density=unit_density,
-            density=density,
-            unit_area=unit_area,
-            unit_vol=unit_volume,
-        )
-    except Exception as e:
-        return (
-            f"There was an error calculating physical properties of the KCL model: {e}"
-        )
-
-
-@mcp.tool()
-async def calculate_bounding_box_kcl(
-    unit_length: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-) -> dict | str:
-    """Calculate the bounding box of a KCL model.
-
-    Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point
-    to a .kcl file or a directory containing a main.kcl file.
-
-    Args:
-        unit_length (str): The unit of length to return the result in. One of 'cm', 'ft', 'in', 'm', 'mm', 'yd'
-        kcl_code (str | None): The KCL code to evaluate.
-        kcl_path (str | None): Path to a .kcl file or a directory containing a main.kcl file.
-
-    Returns:
-        dict | str: A dictionary with 'center' (dict with x,y,z) and 'dimensions' (dict with x,y,z),
-                    or an error message if the operation fails.
-    """
-
-    logger.info("calculate_bounding_box_kcl tool called")
-
-    try:
-        return await zoo_calculate_bounding_box_kcl(
-            unit_length=unit_length,
-            kcl_code=kcl_code,
-            kcl_path=kcl_path,
-        )
-    except Exception as e:
-        return f"There was an error calculating bounding box of the KCL model: {e}"
-
-
-@mcp.tool()
 async def calculate_bounding_box_cad(
     input_file: str,
 ) -> dict | str:
@@ -511,6 +436,9 @@ async def execute_kcl(
 ) -> ResultZooExecuteKcl:
     """Execute KCL code given a string of KCL code or a path to a KCL project. Either kcl_code or kcl_path must be provided. If kcl_path is provided, it should point to a .kcl file or a directory containing a main.kcl file.
 
+    Prefer evaluate_kcl when execution, measurements, and snapshots are
+    needed together; it collects them from one execution.
+
     Executing kcl_code does not save a .kcl source file. For model creation,
     save the source and required project files with the client's authorized
     file-editing tools, then validate the saved project using kcl_path and
@@ -543,6 +471,263 @@ async def execute_kcl(
         kcl_path=kcl_path,
         session_id=session_id,
     )
+
+
+NamedCameraView: TypeAlias = Literal[
+    "front",
+    "back",
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "isometric",
+    "isometric_front_right",
+    "isometric_front_left",
+    "isometric_back_right",
+    "isometric_back_left",
+]
+
+
+@with_config(ConfigDict(extra="forbid"))
+@dataclass(frozen=True)
+class EvaluationCamera:
+    """Custom camera with explicit position, target, and up direction."""
+
+    up: Annotated[
+        list[FiniteFloat],
+        Field(
+            min_length=3,
+            max_length=3,
+            description="Dimensionless up direction [x, y, z]; must be nonzero and not parallel to the viewing direction.",
+        ),
+    ]
+    vantage: Annotated[
+        list[FiniteFloat],
+        Field(
+            min_length=3,
+            max_length=3,
+            description="Camera position [x, y, z] in millimeters, regardless of the KCL model's units; must differ from center.",
+        ),
+    ]
+    center: Annotated[
+        list[FiniteFloat],
+        Field(
+            min_length=3,
+            max_length=3,
+            description="Look-at target [x, y, z] in millimeters, regardless of the KCL model's units.",
+        ),
+    ]
+
+    def __post_init__(self) -> None:
+        if any(
+            len(vector) != 3 or not all(math.isfinite(n) for n in vector)
+            for vector in (self.up, self.vantage, self.center)
+        ):
+            raise ValueError(
+                "Camera up, vantage, and center require three finite numbers"
+            )
+        direction = [v - c for v, c in zip(self.vantage, self.center, strict=True)]
+        cross = [
+            direction[1] * self.up[2] - direction[2] * self.up[1],
+            direction[2] * self.up[0] - direction[0] * self.up[2],
+            direction[0] * self.up[1] - direction[1] * self.up[0],
+        ]
+        if not any(cross):
+            raise ValueError("Camera direction and up must be nonzero and nonparallel")
+
+    def to_native(self) -> kcl.CameraLookAt:
+        return CameraView.to_kcl_camera(asdict(self))
+
+
+@with_config(ConfigDict(extra="forbid"))
+@dataclass(frozen=True)
+class EvaluationSnapshotRequest:
+    """Snapshot options. An empty object requests one isometric image."""
+
+    views: Annotated[
+        tuple[NamedCameraView | EvaluationCamera, ...],
+        Field(
+            min_length=1,
+            max_length=4,
+            description="One to four named views or custom camera objects, in output order.",
+        ),
+    ] = ("isometric",)
+    padding: Annotated[
+        float,
+        Field(
+            ge=0,
+            allow_inf_nan=False,
+            description="Nonnegative zoom-to-fit padding factor.",
+        ),
+    ] = 0.1
+    zoom: Annotated[
+        bool | None,
+        Field(
+            description="Zoom to fit. Omit or use null for automatic fitting of named views and explicit framing of custom cameras. Named views require true or null."
+        ),
+    ] = None
+    highlight_edges: Annotated[
+        bool, Field(description="Draw model edges in the rendered snapshots.")
+    ] = False
+    max_image_dimension: Annotated[
+        int,
+        Field(gt=0, description="Maximum width or height of each image, in pixels."),
+    ] = 512
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.padding) or self.padding < 0:
+            raise ValueError("Snapshot padding must be finite and nonnegative")
+        if self.zoom is False and any(isinstance(view, str) for view in self.views):
+            raise ValueError("Named snapshot views require zoom-to-fit")
+
+    def to_native(self) -> KclSnapshotRequest:
+        return KclSnapshotRequest(
+            tuple(
+                view.to_native() if isinstance(view, EvaluationCamera) else view
+                for view in self.views
+            ),
+            padding=self.padding,
+            zoom=self.zoom,
+            highlight_edges=self.highlight_edges,
+            max_image_dimension=self.max_image_dimension,
+        )
+
+
+@with_config(ConfigDict(extra="forbid"))
+@dataclass(frozen=True)
+class EvaluationPhysicalPropertiesRequest:
+    """Requested measurements and their output units. Mass also requires material density."""
+
+    properties: Annotated[
+        tuple[KclPhysicalProperty, ...],
+        Field(
+            min_length=1,
+            description="Measurements to collect; only these properties are computed.",
+        ),
+    ]
+    unit_length: Annotated[
+        Literal["cm", "ft", "in", "m", "mm", "yd"],
+        Field(description="Output unit for center_of_mass and bounding_box."),
+    ] = "mm"
+    unit_mass: Annotated[
+        Literal["g", "kg", "lb"], Field(description="Output unit for mass.")
+    ] = "g"
+    unit_density: Annotated[
+        Literal["lb:ft3", "kg:m3"] | None,
+        Field(
+            description="Unit of the supplied material density. Required together with density when properties includes mass."
+        ),
+    ] = None
+    density: Annotated[
+        FiniteFloat | None,
+        Field(
+            description="Material density in unit_density. Required together with unit_density when properties includes mass."
+        ),
+    ] = None
+    unit_area: Annotated[
+        Literal["cm2", "dm2", "ft2", "in2", "km2", "m2", "mm2", "yd2"],
+        Field(description="Output unit for surface_area."),
+    ] = "mm2"
+    unit_volume: Annotated[
+        Literal["cm3", "mm3", "ft3", "in3", "m3", "yd3", "usfloz", "usgal", "l", "ml"],
+        Field(description="Output unit for volume."),
+    ] = "mm3"
+
+    def __post_init__(self) -> None:
+        if "mass" in self.properties:
+            if self.density is None:
+                raise ValueError("density is required when requesting mass")
+            if self.unit_density is None:
+                raise ValueError("unit_density is required when requesting mass")
+
+    def to_native(self) -> KclPhysicalPropertiesRequest:
+        return KclPhysicalPropertiesRequest(**asdict(self))
+
+
+@mcp.tool()
+async def evaluate_kcl(
+    kcl_code: str | None = None,
+    kcl_path: str | None = None,
+    snapshot_request: Annotated[
+        EvaluationSnapshotRequest | None,
+        Field(
+            description="Optional snapshots; omit to skip rendering, or pass {} for an isometric image.",
+            examples=[
+                {"views": ["front", "isometric"]},
+                {
+                    "views": [
+                        {
+                            "up": [0, 0, 1],
+                            "vantage": [150, -150, 120],
+                            "center": [0, 0, 0],
+                        }
+                    ]
+                },
+            ],
+        ),
+    ] = None,
+    physical_properties_request: Annotated[
+        EvaluationPhysicalPropertiesRequest | None,
+        Field(
+            description="Optional measurements and output units; omit to skip. Mass requires density and unit_density.",
+            examples=[
+                {
+                    "properties": ["volume", "bounding_box"],
+                    "unit_volume": "mm3",
+                    "unit_length": "mm",
+                },
+                {
+                    "properties": ["mass"],
+                    "density": 1000,
+                    "unit_density": "kg:m3",
+                    "unit_mass": "g",
+                },
+            ],
+        ),
+    ] = None,
+) -> CallToolResult:
+    """Execute KCL once and collect requested measurements and snapshots.
+
+    Prefer this when several checks are known in advance.
+    Provide exactly one source: self-contained kcl_code or a saved kcl_path project.
+    Save editable source separately; inline code does not create a source file.
+    Mock errors prevent hosted execution. The isolated session closes after the
+    operation; no persistent session ID is needed or returned.
+
+    snapshot_request: Optional views (1–4 named views or camera dicts with up,
+        vantage, center). An empty object requests one isometric image. Named
+        views use zoom-to-fit; custom views default to their explicit framing.
+    physical_properties_request: Optional properties list (volume, mass,
+        surface_area, center_of_mass, bounding_box) and units. Mass additionally
+        requires density and unit_density. Only requested properties are measured.
+
+    Returns structured execution/inspection outcomes, plus an inline image when
+    requested and available. ok describes execution only: inspect output statuses
+    for partial failures. Output failures
+    never rerun geometry; successful outputs remain available.
+    """
+    if (kcl_code is None) == (kcl_path is None):
+        raise ToolError("Provide exactly one of kcl_code or kcl_path")
+    result = await zoo_evaluate_kcl(
+        kcl_code=kcl_code,
+        kcl_path=kcl_path,
+        snapshot_request=snapshot_request.to_native() if snapshot_request else None,
+        physical_properties_request=(
+            physical_properties_request.to_native()
+            if physical_properties_request is not None
+            else None
+        ),
+    )
+    data = asdict(result)
+    image_bytes = data["inspection"].pop("rendered_snapshot")
+    response = CallToolResult(
+        structured_content=data,
+        content=[TextContent(type="text", text=json.dumps(data))],
+        is_error=not result.ok,
+    )
+    if image_bytes is not None:
+        response.content.append(encode_image(image_bytes))
+    return response
 
 
 @mcp.tool()

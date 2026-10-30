@@ -1654,6 +1654,8 @@ class KclSnapshotRequest:
 
 @dataclass(frozen=True)
 class KclPhysicalPropertiesRequest:
+    """Requested measurements and their output units. Mass also requires material density."""
+
     properties: tuple[KclPhysicalProperty, ...]
     unit_length: str = "mm"
     unit_mass: str = "g"
@@ -2392,6 +2394,31 @@ async def _execute_kcl_with_preflight(
             real,
             inspection=inspection,
         )
+
+
+@api_operation
+async def zoo_evaluate_kcl(
+    kcl_code: str | None = None,
+    kcl_path: Path | str | None = None,
+    *,
+    snapshot_request: KclSnapshotRequest | None = None,
+    physical_properties_request: KclPhysicalPropertiesRequest | None = None,
+) -> ResultZooExecuteKcl:
+    """Execute once, inspect requested outputs, then close the session.
+
+    ok describes execution; each requested output has its own status.
+    Inspection failures never trigger a new execution.
+    """
+    if (kcl_code is None) == (kcl_path is None):
+        raise ValueError("Provide exactly one of kcl_code or kcl_path")
+    return await _execute_kcl_with_preflight(
+        kcl_code,
+        kcl_path,
+        None,
+        operation="evaluate_kcl",
+        snapshot_request=snapshot_request,
+        physical_properties_request=physical_properties_request,
+    )
 
 
 @api_operation
