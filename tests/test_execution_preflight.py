@@ -794,6 +794,7 @@ async def test_actual_mock_parse_and_semantic_failures_block_real_execution(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("blocking", [False, True])
+@pytest.mark.parametrize("execution_route", ["local", "remote"])
 async def test_mcp_tools_serialize_separate_stage_results(
     monkeypatch,
     execution_route,
@@ -808,7 +809,7 @@ async def test_mcp_tools_serialize_separate_stage_results(
     if execution_route != "local":
         arguments["session_id"] = "session-id"
     response = await mcp.call_tool(
-        "exec_kcl_project" if execution_route == "project" else "execute_kcl",
+        "execute_kcl",
         arguments=arguments,
     )
     assert isinstance(response, CallToolResult)

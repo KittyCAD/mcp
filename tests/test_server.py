@@ -89,7 +89,7 @@ async def populated_modeling_session(cube_kcl: str):
     failure: BaseException | None = None
     try:
         response = await mcp.call_tool(
-            "exec_kcl_project",
+            "execute_kcl",
             arguments={"kcl_path": cube_kcl, "session_id": session_id},
         )
         execution = _meta_result(response)
@@ -719,7 +719,7 @@ async def test_exec_kcl_project_extracts_artifact_graph():
 
 
 @pytest.mark.asyncio
-async def test_exec_kcl_project_tool(monkeypatch, tmp_path):
+async def test_execute_kcl_project_in_session(monkeypatch, tmp_path):
     artifact_graph = {
         "map": {"artifact-id": {"type": "solid2d"}},
         "item_count": 1,
@@ -735,10 +735,10 @@ async def test_exec_kcl_project_tool(monkeypatch, tmp_path):
             path_artifact_graph=artifact_graph_path,
         )
     )
-    monkeypatch.setattr("zoo_mcp.server.zoo_exec_kcl_project", mock)
+    monkeypatch.setattr("zoo_mcp.server.zoo_execute_kcl", mock)
 
     response = await mcp.call_tool(
-        "exec_kcl_project",
+        "execute_kcl",
         arguments={
             "kcl_code": "sketch = startSketchOn(XY)",
             "kcl_path": None,

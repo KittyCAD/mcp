@@ -129,7 +129,6 @@ from zoo_mcp.zoo_tools import (
     zoo_calculate_volume,
     zoo_convert_cad_file,
     zoo_evaluate_kcl,
-    zoo_exec_kcl_project,
     zoo_execute_kcl,
     zoo_execute_modeling_command,
     zoo_face_info,
@@ -737,36 +736,6 @@ async def evaluate_kcl(
 
 
 @mcp.tool()
-async def exec_kcl_project(
-    session_id: str,
-    kcl_code: str | None = None,
-    kcl_path: str | None = None,
-) -> ResultZooExecuteKcl:
-    """Mock preflight a KCL project, then run it in the session and save its artifact graph.
-
-    Both stages use the same captured project. Mock errors return immediately
-    without starting real execution. Mock warnings remain visible and allow it.
-    Known mock-engine limitations are reported as warnings for real execution.
-
-    Args:
-        kcl_code (str | None): Self-contained KCL code to run as a single-file project. Standard-library imports are allowed; filesystem imports require kcl_path.
-        kcl_path (str | None): A .kcl file or project directory containing main.kcl. Dependencies and symlink targets must remain inside the entrypoint's directory.
-        session_id: The modeling session in which to execute the project.
-
-    Returns:
-        ResultZooExecuteKcl: Separate mock_preflight and real_execution outcomes,
-                            each with status, message, and diagnostics. Session
-                            success includes path_artifact_graph. Mock failures
-                            set real_execution.status to not_run.
-    """
-    logger.info("exec_kcl_project tool called")
-
-    return await zoo_exec_kcl_project(
-        kcl_code=kcl_code, kcl_path=kcl_path, session_id=session_id
-    )
-
-
-@mcp.tool()
 async def start_modeling_session() -> str:
     """Open an empty CPU modeling session for subsequent tools.
 
@@ -777,8 +746,8 @@ async def start_modeling_session() -> str:
     The server does not expire sessions after an idle or lifetime timeout.
     Callers are responsible for tracking and enforcing their desired timeout.
 
-    Pass the returned session_id to execute_kcl or exec_kcl_project to populate
-    the scene, then reuse it with modeling query, selection, and highlight tools.
+    Pass the returned session_id to execute_kcl to populate the scene, then
+    reuse it with modeling query, selection, and highlight tools.
     Stop the session explicitly with stop_modeling_session when finished.
 
     Returns:
@@ -952,7 +921,7 @@ async def get_face_info(
 
     Args:
         face_id (str): Usually a user or LLM-selected face id.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
 
     Returns:
         FaceInfo: The face position, gradient, normal, and center. The position is
@@ -977,7 +946,7 @@ async def entity_distance(
     Args:
         entity_id1: The first entity UUID, typically obtained from an artifact graph.
         entity_id2: The second entity UUID.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
         on_axis: Optional global axis for projected distance; omit for Euclidean distance.
 
     Returns:
@@ -1166,7 +1135,7 @@ async def curve_get_end_points(
 
     Args:
         curve_id: Curve UUID, typically obtained from an artifact graph.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
 
     Returns:
         CurveGetEndPoints: The curve's start and end points.
@@ -1229,7 +1198,7 @@ async def engine_util_evaluate_path(
     Args:
         path_json: The serialized JSON representation of the KCL sketch or path.
         t: Normalized path parameter, conventionally between 0 and 1.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
 
     Returns:
         EngineUtilEvaluatePath: The position on the path at parameter t.
@@ -1254,7 +1223,7 @@ async def curve_get_type(
 
     Args:
         curve_id: Curve UUID, typically obtained from an artifact graph.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
 
     Returns:
         CurveGetType: The curve's geometric type.
@@ -1279,7 +1248,7 @@ async def edge_get_length(
 
     Args:
         edge_id: Edge UUID, typically obtained from an artifact graph.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
 
     Returns:
         EdgeGetLength: The edge length in the current scene units.
@@ -1304,7 +1273,7 @@ async def entity_get_all_child_uuids(
 
     Args:
         entity_id: Entity UUID, typically obtained from an artifact graph.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
 
     Returns:
         EntityGetAllChildUuids: All child entity UUIDs.
@@ -1329,7 +1298,7 @@ async def entity_get_index(
 
     Args:
         entity_id: Entity UUID, typically obtained from an artifact graph.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
 
     Returns:
         EntityGetIndex: The entity's index within its parent.
@@ -1354,7 +1323,7 @@ async def entity_get_parent_id(
 
     Args:
         entity_id: Entity UUID, typically obtained from an artifact graph.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
 
     Returns:
         EntityGetParentId: The parent entity's UUID.
@@ -1379,7 +1348,7 @@ async def entity_get_sketch_paths(
 
     Args:
         entity_id: Entity UUID, typically obtained from an artifact graph.
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
 
     Returns:
         EntityGetSketchPaths: The sketch path UUIDs belonging to the entity.
@@ -1484,12 +1453,12 @@ async def snapshot(
 ) -> ImageContent | str:
     """Render an open modeling session as an image.
 
-    Populate the scene first by passing this session_id to execute_kcl or
-    exec_kcl_project. The camera always uses an orthographic projection, so
-    measurements read off the image are not distorted by perspective.
+    Populate the scene first by passing this session_id to execute_kcl. The
+    camera always uses an orthographic projection, so measurements read off
+    the image are not distorted by perspective.
 
     Args:
-        session_id: A modeling session populated by execute_kcl or exec_kcl_project.
+        session_id: A modeling session populated by execute_kcl.
         camera_view: Which view or views to capture. Omit it for a single
                      isometric view. Otherwise one of:
 

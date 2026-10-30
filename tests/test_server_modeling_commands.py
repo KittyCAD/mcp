@@ -278,7 +278,6 @@ async def test_scene_tools_require_a_session():
         ("highlight_set_entities", {"entity_ids": ["entity-1"]}),
         ("center_camera_on_selection", {}),
         ("snapshot", {}),
-        ("exec_kcl_project", {"kcl_code": "code"}),
     ):
         with pytest.raises(ToolError):
             await mcp.call_tool(tool_name, arguments=arguments)
@@ -300,15 +299,13 @@ async def test_scene_tools_require_a_session():
         "entity_get_parent_id",
         "entity_get_sketch_paths",
         "snapshot",
-        "exec_kcl_project",
     ):
         schema = tools[tool_name].input_schema
         assert "session_id" in schema.get("required", []), tool_name
-        if tool_name != "exec_kcl_project":
-            properties = schema.get("properties", {})
-            assert "kcl_code" not in properties, tool_name
-            assert "kcl_path" not in properties, tool_name
-            assert "input_file" not in properties, tool_name
+        properties = schema.get("properties", {})
+        assert "kcl_code" not in properties, tool_name
+        assert "kcl_path" not in properties, tool_name
+        assert "input_file" not in properties, tool_name
 
 
 @pytest.mark.asyncio
@@ -600,7 +597,7 @@ async def test_snapshot_tool_returns_image_when_output_path_omitted(
 
 
 @pytest.mark.asyncio
-async def test_kcl_execution_tools_forward_session_id(
+async def test_execute_kcl_forwards_session_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ):
@@ -614,16 +611,15 @@ async def test_kcl_execution_tools_forward_session_id(
             path_artifact_graph=artifact_graph_path,
         )
     )
-    exec_project = AsyncMock(return_value=execute.return_value)
     monkeypatch.setattr(server, "zoo_execute_kcl", execute)
-    monkeypatch.setattr(server, "zoo_exec_kcl_project", exec_project)
+
+    names = {tool.name for tool in await mcp.list_tools()}
+    assert "execute_kcl" in names and "exec_kcl_project" not in names
+    with pytest.raises(ToolError, match="Unknown tool: exec_kcl_project"):
+        await mcp.call_tool("exec_kcl_project", {"session_id": "session-id"})
 
     execute_response = await mcp.call_tool(
         "execute_kcl",
-        arguments={"kcl_code": "code", "session_id": "session-id"},
-    )
-    project_response = await mcp.call_tool(
-        "exec_kcl_project",
         arguments={"kcl_code": "code", "session_id": "session-id"},
     )
 
@@ -655,13 +651,7 @@ async def test_kcl_execution_tools_forward_session_id(
         },
         "path_artifact_graph": str(artifact_graph_path),
     }
-    assert _result(project_response) == _result(execute_response)
     execute.assert_awaited_once_with(
-        kcl_code="code",
-        kcl_path=None,
-        session_id="session-id",
-    )
-    exec_project.assert_awaited_once_with(
         kcl_code="code",
         kcl_path=None,
         session_id="session-id",
