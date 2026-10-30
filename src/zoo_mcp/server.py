@@ -98,7 +98,7 @@ from zoo_mcp.kcl_docs import (
     KCLDocs,
     get_doc_content,
     list_available_docs,
-    search_docs,
+    lookup_docs,
 )
 from zoo_mcp.kcl_samples import (
     KCLSamples,
@@ -1718,41 +1718,33 @@ async def list_kcl_docs() -> dict | str:
 
 
 @mcp.tool()
-async def search_kcl_docs(query: str, max_results: int = 5) -> list[dict] | str:
-    """Search KCL documentation by keyword.
+async def lookup_kcl_docs(
+    query: str, max_results: int = 3, max_chars: int = 3000
+) -> dict[str, object]:
+    """Look up compact KCL reference sections. Prefer this for initial docs lookup.
 
-    Searches across all KCL language and standard library documentation
-    for the given query. Returns relevant excerpts with surrounding context.
-
-    Args:
-        query (str): The search query (case-insensitive).
-        max_results (int): Maximum number of results to return (default: 5).
-
-    Returns:
-        list[dict]: List of search results, each containing:
-            - path: The documentation file path
-            - title: The document title (from first heading)
-            - excerpt: A relevant excerpt with the match highlighted in context
-            - match_count: Number of times the query appears in the document
-
-    Raises:
-        ToolError: Documentation could not be fetched; the call can be retried.
+    Matches symbols, titles, headings, and keywords. Returns source paths and
+    nonempty sections with complete examples and table rows when they fit.
+    max_chars is a shared budget for Markdown content across all results
+    (metadata is additional). Tables may omit rows within this budget. Truncated
+    results can be expanded with get_kcl_doc(path). Both limits must be positive.
     """
-    logger.info("search_kcl_docs tool called with query: %s", query)
+    if max_results < 1 or max_chars < 1:
+        raise ToolError("max_results and max_chars must be positive")
     try:
         await _ensure_kcl_index(KCLDocs)
-        return search_docs(query, max_results)
-    except Exception as e:
-        logger.error("search_kcl_docs tool called with error: %s", e)
-        raise ToolError(f"There was an error searching KCL documentation: {e}") from e
+        return lookup_docs(query, max_results, max_chars)
+    except Exception as error:
+        raise ToolError(f"Could not look up KCL documentation: {error}") from error
 
 
 @mcp.tool()
 async def get_kcl_doc(doc_path: str) -> str:
     """Get the full content of a specific KCL documentation file.
 
+    Prefer lookup_kcl_docs first; fetch a full page when more detail is needed.
     Use list_kcl_docs() to see available documentation paths, or
-    search_kcl_docs() to find relevant documentation by keyword.
+    lookup_kcl_docs() to find relevant documentation by symbol or topic.
 
     Args:
         doc_path (str): The path to the documentation file
