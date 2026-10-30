@@ -8,8 +8,9 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from types import FrameType
-from typing import TypeVar
+from typing import Annotated, Literal, TypeAlias, TypeVar
 
+import kcl
 from kittycad.models import (
     CameraMovement,
     CurveGetEndPoints,
@@ -90,6 +91,7 @@ from kittycad.models.uuid import Uuid
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent
+from pydantic import ConfigDict, Field, FiniteFloat, with_config
 
 from zoo_mcp import ZooMCPException, logger
 from zoo_mcp.kcl_docs import (
@@ -470,44 +472,111 @@ async def execute_kcl(
     )
 
 
+NamedCameraView: TypeAlias = Literal[
+    "front",
+    "back",
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "isometric",
+    "isometric_front_right",
+    "isometric_front_left",
+    "isometric_back_right",
+    "isometric_back_left",
+]
+
+
+@with_config(ConfigDict(extra="forbid"))
+@dataclass(frozen=True)
+class EvaluationCamera:
+    """Custom camera with explicit position, target, and up direction."""
+
+    up: Annotated[
+        list[FiniteFloat],
+        Field(
+            min_length=3,
+            max_length=3,
+            description="Up direction [x, y, z]; must be nonzero and not parallel to the viewing direction.",
+        ),
+    ]
+    vantage: Annotated[
+        list[FiniteFloat],
+        Field(
+            min_length=3,
+            max_length=3,
+            description="Camera position [x, y, z] in world coordinates; must differ from center.",
+        ),
+    ]
+    center: Annotated[
+        list[FiniteFloat],
+        Field(
+            min_length=3,
+            max_length=3,
+            description="Look-at target [x, y, z] in world coordinates.",
+        ),
+    ]
+
+    def to_native(self) -> kcl.CameraLookAt:
+        if any(
+            len(vector) != 3 or not all(math.isfinite(n) for n in vector)
+            for vector in (self.up, self.vantage, self.center)
+        ):
+            raise ValueError(
+                "Camera up, vantage, and center require three finite numbers"
+            )
+        direction = [v - c for v, c in zip(self.vantage, self.center, strict=True)]
+        cross = [
+            direction[1] * self.up[2] - direction[2] * self.up[1],
+            direction[2] * self.up[0] - direction[0] * self.up[2],
+            direction[0] * self.up[1] - direction[1] * self.up[0],
+        ]
+        if not any(cross):
+            raise ValueError("Camera direction and up must be nonzero and nonparallel")
+        return CameraView.to_kcl_camera(asdict(self))
+
+
+@with_config(ConfigDict(extra="forbid"))
 @dataclass(frozen=True)
 class EvaluationSnapshotRequest:
-    """JSON camera options adapted to the native execution inspection request."""
+    """Snapshot options. An empty object requests one isometric image."""
 
-    views: tuple[str | dict[str, list[float]], ...] = ("isometric",)
-    padding: float = 0.1
-    zoom: bool | None = None
-    highlight_edges: bool = False
-    max_image_dimension: int = 512
+    views: Annotated[
+        tuple[NamedCameraView | EvaluationCamera, ...],
+        Field(
+            min_length=1,
+            max_length=4,
+            description="One to four named views or custom camera objects, in output order.",
+        ),
+    ] = ("isometric",)
+    padding: Annotated[
+        float,
+        Field(
+            ge=0,
+            allow_inf_nan=False,
+            description="Nonnegative zoom-to-fit padding factor.",
+        ),
+    ] = 0.1
+    zoom: Annotated[
+        bool | None,
+        Field(
+            description="Zoom to fit. Omit or use null for automatic fitting of named views and explicit framing of custom cameras. Named views require true or null."
+        ),
+    ] = None
+    highlight_edges: Annotated[
+        bool, Field(description="Draw model edges in the rendered snapshots.")
+    ] = False
+    max_image_dimension: Annotated[
+        int,
+        Field(gt=0, description="Maximum width or height of each image, in pixels."),
+    ] = 512
 
     def to_native(self) -> KclSnapshotRequest:
         if not math.isfinite(self.padding) or self.padding < 0:
             raise ValueError("Snapshot padding must be finite and nonnegative")
-        for view in self.views:
-            if isinstance(view, dict):
-                if set(view) != {"up", "vantage", "center"} or any(
-                    len(vector) != 3 or not all(math.isfinite(n) for n in vector)
-                    for vector in view.values()
-                ):
-                    raise ValueError(
-                        "Camera up, vantage, and center require three finite numbers"
-                    )
-                direction = [
-                    v - c for v, c in zip(view["vantage"], view["center"], strict=True)
-                ]
-                up = view["up"]
-                cross = [
-                    direction[1] * up[2] - direction[2] * up[1],
-                    direction[2] * up[0] - direction[0] * up[2],
-                    direction[0] * up[1] - direction[1] * up[0],
-                ]
-                if not any(cross):
-                    raise ValueError(
-                        "Camera direction and up must be nonzero and nonparallel"
-                    )
         return KclSnapshotRequest(
             tuple(
-                CameraView.to_kcl_camera(view) if isinstance(view, dict) else view
+                view.to_native() if isinstance(view, EvaluationCamera) else view
                 for view in self.views
             ),
             padding=self.padding,
@@ -521,8 +590,43 @@ class EvaluationSnapshotRequest:
 async def evaluate_kcl(
     kcl_code: str | None = None,
     kcl_path: str | None = None,
-    snapshot_request: EvaluationSnapshotRequest | None = None,
-    physical_properties_request: KclPhysicalPropertiesRequest | None = None,
+    snapshot_request: Annotated[
+        EvaluationSnapshotRequest | None,
+        Field(
+            description="Optional snapshots; omit to skip rendering, or pass {} for an isometric image.",
+            examples=[
+                {"views": ["front", "isometric"]},
+                {
+                    "views": [
+                        {
+                            "up": [0, 0, 1],
+                            "vantage": [150, -150, 120],
+                            "center": [0, 0, 0],
+                        }
+                    ]
+                },
+            ],
+        ),
+    ] = None,
+    physical_properties_request: Annotated[
+        KclPhysicalPropertiesRequest | None,
+        Field(
+            description="Optional measurements and output units; omit to skip. Mass requires density and unit_density.",
+            examples=[
+                {
+                    "properties": ["volume", "bounding_box"],
+                    "unit_volume": "mm3",
+                    "unit_length": "mm",
+                },
+                {
+                    "properties": ["mass"],
+                    "density": 1000,
+                    "unit_density": "kg:m3",
+                    "unit_mass": "g",
+                },
+            ],
+        ),
+    ] = None,
 ) -> CallToolResult:
     """Execute KCL once and collect requested measurements and snapshots.
 
