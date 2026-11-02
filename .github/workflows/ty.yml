@@ -19,7 +19,7 @@ jobs:
         uses: astral-sh/setup-uv@v10.3.0
 
       - name: Set up Python
-        uses: actions/setup-python@v7.0.0
+        uses: actions/setup-python@v7.1.0
         with:
           python-version-file: "pyproject.toml"
 
