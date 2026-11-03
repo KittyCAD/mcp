@@ -17,8 +17,8 @@
       },
       "environmentVariables": [
         {
-          "description": "Your Zoo API key to access the Zoo services. Get one from https://zoo.dev/account/developer",
-          "isRequired": true,
+          "description": "Optional Zoo API key. If unset, Zoo MCP reuses a saved login or opens device login in your browser. Get an API key from https://zoo.dev/account/developer",
+          "isRequired": false,
           "format": "string",
           "isSecret": true,
           "name": "ZOO_TOKEN"

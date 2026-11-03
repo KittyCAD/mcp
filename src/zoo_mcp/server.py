@@ -202,17 +202,19 @@ async def _lifespan(_server: MCPServer) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
-        await zoo_stop_all_modeling_sessions()
         tasks = [startup_task, *_kcl_index_tasks.values()]
         if login_task is not None:
             tasks.append(login_task)
         for task in tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        _kcl_index_tasks.clear()
-        KCLDocs._instance = None
-        KCLSamples._instance = None
+        try:
+            await zoo_stop_all_modeling_sessions()
+        finally:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            _kcl_index_tasks.clear()
+            KCLDocs._instance = None
+            KCLSamples._instance = None
 
 
 mcp = MCPServer(

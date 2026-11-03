@@ -213,7 +213,8 @@ async def test_lifespan_initializes_while_login_pending_and_cancels_on_shutdown(
 
     monkeypatch.setattr(auth, "_maintain_login", wait)
     monkeypatch.setattr(server, "_init_kcl_indexes", AsyncMock())
-    monkeypatch.setattr(server, "zoo_stop_all_modeling_sessions", AsyncMock())
+    # Login cancellation must proceed even while modeling shutdown is waiting.
+    monkeypatch.setattr(server, "zoo_stop_all_modeling_sessions", cancelled.wait)
     async with asyncio.timeout(2), server._lifespan(server.mcp):
         await started.wait()
         with pytest.raises(ValueError, match="login pending"):
