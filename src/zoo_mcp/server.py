@@ -94,6 +94,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import ConfigDict, Field, FiniteFloat, with_config
 
 from zoo_mcp import ZooMCPException, logger
+from zoo_mcp.auth import LoginError, auth_command, start_local_login
 from zoo_mcp.kcl_docs import (
     KCLDocs,
     get_doc_content,
@@ -197,11 +198,14 @@ async def _lifespan(_server: MCPServer) -> AsyncGenerator[None, None]:
     Each tool waits only for its own index if its background fetch is unfinished.
     """
     startup_task = asyncio.create_task(_init_kcl_indexes())
+    login_task = start_local_login()
     try:
         yield
     finally:
         await zoo_stop_all_modeling_sessions()
         tasks = [startup_task, *_kcl_index_tasks.values()]
+        if login_task is not None:
+            tasks.append(login_task)
         for task in tasks:
             if not task.done():
                 task.cancel()
@@ -1877,6 +1881,14 @@ def install_shutdown_handlers() -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Zoo MCP server")
+    commands = parser.add_subparsers(dest="command")
+    auth_parser = commands.add_parser("auth", help="Manage local Zoo device login")
+    auth_parser.add_argument("action", choices=("login", "status", "logout"))
+    auth_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Print the verification URL without opening it",
+    )
     parser.add_argument(
         "--transport",
         choices=("stdio", "streamable-http"),
@@ -1890,6 +1902,22 @@ def main():
         "--port", type=int, default=8000, help="HTTP port (default: 8000)"
     )
     args = parser.parse_args()
+    if args.command == "auth":
+        try:
+            code = asyncio.run(auth_command(args.action, browser=not args.no_browser))
+        except (LoginError, OSError) as error:
+            import sys
+
+            print(
+                str(error)
+                if isinstance(error, LoginError)
+                else "Could not update saved Zoo MCP login.",
+                file=sys.stderr,
+            )
+            code = 1
+        except KeyboardInterrupt:
+            code = 130
+        raise SystemExit(code)
 
     logger.info("Starting MCP server with %s transport...", args.transport)
     install_shutdown_handlers()

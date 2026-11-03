@@ -6,11 +6,14 @@ An [MCP server](https://modelcontextprotocol.io/docs/getting-started/intro) hous
 
 ## Prerequisites
 
-1. An API key for Zoo, get one [here](https://zoo.dev/account)
-2. An environment variable `ZOO_API_TOKEN` set to your API key
-    ```bash
-    export ZOO_API_TOKEN="your_api_key_here"
-    ```
+A Zoo account. On first startup, Zoo MCP opens a browser for device login and
+prints the verification URL and code to stderr. MCP initializes immediately;
+public tools remain available while authenticated tools ask you to finish login.
+
+You can also use an [API key](https://zoo.dev/account):
+```bash
+export ZOO_API_TOKEN="your_api_key_here"
+```
 
 ## Installation
 
@@ -40,6 +43,23 @@ The server can be started locally by using uv and the zoo_mcp module
 uv run -m zoo_mcp
 ```
 
+Manage device login explicitly:
+```bash
+uvx zoo-mcp auth login
+uvx zoo-mcp auth login --no-browser
+uvx zoo-mcp auth status
+uvx zoo-mcp auth logout
+```
+
+Logins are saved per API origin under `$XDG_CONFIG_HOME/zoo-mcp/logins`
+(default `~/.config/zoo-mcp/logins`) with user-only permissions and atomic writes.
+Status never displays tokens. Logout removes only the saved login for the current
+origin; restart running servers afterward. An expired or revoked saved login
+starts a new device login at startup. An expired running login prompts again.
+After denial, cancellation or an authentication outage, run `auth login` and
+restart the server. Device login requires the API's dedicated Zoo MCP device
+client registration.
+
 The server can also be run with the [mcp package](https://github.com/modelcontextprotocol/python-sdk)
 ```bash
 uv run mcp run src/zoo_mcp/server.py
@@ -62,8 +82,10 @@ listener; their defaults are `127.0.0.1` and `8000`.
 ### Supplying credentials from Python
 
 Local entry points capture credentials when Zoo MCP is imported at startup.
-They accept `ZOO_API_TOKEN`, `KITTYCAD_API_TOKEN`, or the registry's `ZOO_TOKEN`
-alias, and `ZOO_HOST` or `KITTYCAD_HOST` for the API origin.
+Token precedence is `KITTYCAD_API_TOKEN`, `ZOO_API_TOKEN`, then the registry's
+`ZOO_TOKEN` alias. Any explicit environment token bypasses saved/device login.
+API origin precedence is `ZOO_HOST`, `KITTYCAD_HOST`, then `https://api.zoo.dev`.
+Saved logins never cross API origins.
 
 Applications can supply credentials explicitly without changing the process
 environment or adding authentication arguments to MCP tools:
@@ -80,6 +102,8 @@ The context supplies the same token and origin to the KittyCAD SDK and KCL
 session constructors and restores the previous configuration on exit. New
 calls can use refreshed credentials. Finish child tasks before leaving their
 credential context.
+An explicit credential context also prevents the server lifespan from initiating
+local login. Hosted workers and embeddings should always use this interface.
 
 Credential contexts configure downstream calls. Applications serving different
 owners must also isolate their process-wide modeling sessions and workspaces.
