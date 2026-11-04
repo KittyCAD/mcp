@@ -58,9 +58,9 @@ def clock(monkeypatch):
     return sleeps
 
 
-def device_response(requests_mock, **changes):
+def device_response(requests_mock, *, origin=ORIGIN, **changes):
     requests_mock.post(
-        ORIGIN + "/oauth2/device/auth",
+        origin + "/oauth2/device/auth",
         json={
             "device_code": "device",
             "user_code": "ABCD-EFGH",
@@ -72,8 +72,7 @@ def device_response(requests_mock, **changes):
     )
 
 
-@pytest.mark.asyncio
-async def test_login_uses_device_grant_and_saves_in_keyring(
+def test_login_uses_device_grant_and_saves_in_keyring(
     requests_mock, clock, capsys, browser
 ):
     device_response(requests_mock, interval=2)
@@ -91,7 +90,7 @@ async def test_login_uses_device_grant_and_saves_in_keyring(
             },
         ],
     )
-    await auth.auth_command("login")
+    auth.auth_command("login")
     assert clock == [2, 2, 7]
     saved = auth.LoginStore().load(ORIGIN)
     assert saved is not None and saved.token == "secret-token"
@@ -171,6 +170,48 @@ def test_invalid_verification_url_never_opens_browser(requests_mock, url, browse
     browser.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "origin", ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"]
+)
+@pytest.mark.parametrize("open_browser", [True, False])
+def test_device_login_allows_same_origin_loopback_http(
+    requests_mock, clock, browser, origin, open_browser
+):
+    url = origin + "/verify?user_code=ABCD-EFGH"
+    device_response(requests_mock, origin=origin, verification_uri_complete=url)
+    requests_mock.post(
+        origin + "/oauth2/device/token",
+        json={"access_token": "token", "token_type": "Bearer"},
+    )
+    assert auth.device_login(origin, browser=open_browser) == ZooCredentials(
+        "token", origin
+    )
+    if open_browser:
+        browser.assert_called_once_with(url)
+    else:
+        browser.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "origin,url",
+    [
+        (ORIGIN, "http://localhost:8080/verify"),
+        ("http://localhost:8080", "http://api.example/verify"),
+        ("http://localhost:8080", "http://127.0.0.1:8080/verify"),
+        ("http://localhost:8080", "http://localhost:8081/verify"),
+        ("http://localhost:8080", "http://user:password@localhost:8080/verify"),
+        ("http://localhost:8080", "http://localhost:8080/verify#fragment"),
+    ],
+)
+def test_device_login_rejects_unsafe_http_verification_urls(
+    requests_mock, browser, origin, url
+):
+    device_response(requests_mock, origin=origin, verification_uri_complete=url)
+    with pytest.raises(auth.LoginError):
+        auth.device_login(origin)
+    browser.assert_not_called()
+
+
 @pytest.mark.parametrize("browser_failure", [False, True])
 def test_browser_failure_and_no_browser_allow_manual_login(
     requests_mock, clock, browser, browser_failure
@@ -233,7 +274,7 @@ async def test_saved_token_validity_comes_from_api_not_reported_lifetime(
             "expires_in": reported_lifetime,
         },
     )
-    await auth.auth_command("login")
+    auth.auth_command("login")
     tomorrow = time.time() + 86400
     monkeypatch.setattr(auth.time, "time", lambda: tomorrow)
     validate = AsyncMock(return_value=True)
@@ -400,17 +441,16 @@ async def test_saved_login_reports_pending_until_validation_finishes(
         await asyncio.gather(task, return_exceptions=True)
 
 
-@pytest.mark.asyncio
-async def test_status_and_logout_never_print_tokens(monkeypatch, capsys):
+def test_status_and_logout_never_print_tokens(monkeypatch, capsys):
     store = auth.LoginStore()
     store.save(ZooCredentials("secret-token", ORIGIN))
     other = ZooCredentials("other-secret", "https://other.example")
     store.save(other)
     monkeypatch.setattr(auth, "validate_login", AsyncMock(return_value=True))
-    await auth.auth_command("status")
-    await auth.auth_command("logout")
+    auth.auth_command("status")
+    auth.auth_command("logout")
     with pytest.raises(auth.LoginError, match="no valid saved login"):
-        await auth.auth_command("status")
+        auth.auth_command("status")
     assert store.load(other.base_url) == other
     output = capsys.readouterr()
     assert output.out == "" and "secret" not in output.err
@@ -418,18 +458,15 @@ async def test_status_and_logout_never_print_tokens(monkeypatch, capsys):
 
 @pytest.mark.parametrize("command", ["login", "status"])
 @pytest.mark.parametrize("valid", [True, False])
-@pytest.mark.asyncio
-async def test_auth_command_with_environment_credentials(
-    monkeypatch, capsys, command, valid
-):
+def test_auth_command_with_environment_credentials(monkeypatch, capsys, command, valid):
     monkeypatch.setenv("ZOO_API_TOKEN", "secret-token")
     monkeypatch.setattr(auth, "validate_login", AsyncMock(return_value=valid))
     if valid:
-        await auth.auth_command(command)
+        auth.auth_command(command)
         assert "environment credentials valid" in capsys.readouterr().err
     else:
         with pytest.raises(auth.LoginError, match="environment credentials invalid"):
-            await auth.auth_command(command)
+            auth.auth_command(command)
         assert capsys.readouterr().err == ""
 
 
@@ -449,7 +486,7 @@ def test_auth_cli_exit_status_and_error_output(outcome, exit_code, stderr):
             "-c",
             """
 import sys
-from unittest.mock import AsyncMock
+from unittest.mock import Mock
 from zoo_mcp import server
 from zoo_mcp.auth import LoginError
 
@@ -459,7 +496,7 @@ error = {
     "os_error": OSError("sensitive-details"),
     "interrupt": KeyboardInterrupt(),
 }[sys.argv.pop()]
-server.auth_command = AsyncMock(side_effect=error)
+server.auth_command = Mock(side_effect=error)
 server.main()
 """,
             "auth",
@@ -474,3 +511,44 @@ server.main()
     assert result.returncode == exit_code
     assert result.stdout == ""
     assert result.stderr == stderr
+
+
+def test_first_sigint_stops_device_polling_before_saving_credentials():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import signal
+import requests_mock
+from zoo_mcp import auth, server
+
+auth.keyring.set_password = lambda *args: print("CREDENTIALS SAVED", flush=True)
+auth.time.sleep = lambda seconds: signal.raise_signal(signal.SIGINT)
+with requests_mock.Mocker() as transport:
+    transport.post("https://api.example/oauth2/device/auth", json={
+        "device_code": "device",
+        "user_code": "ABCD-EFGH",
+        "verification_uri": "https://api.example/verify",
+        "expires_in": 300,
+        "interval": 1,
+    })
+    transport.post("https://api.example/oauth2/device/token", json={
+        "access_token": "secret-token",
+        "token_type": "Bearer",
+    })
+    server.main()
+""",
+            "auth",
+            "login",
+            "--no-browser",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 130, result.stderr
+    assert result.stdout == ""
+    assert "logged in" not in result.stderr
+    assert "secret-token" not in result.stderr

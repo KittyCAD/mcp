@@ -122,8 +122,18 @@ def device_login(origin: str, *, browser: bool = True) -> ZooCredentials:
                 testing=origin.startswith("http://"),
             )
             info = client.authorize_device(requests_kwargs=request_options)
+            verification_url = info.verification_uri_complete or info.verification_uri
+            verification_origin = api_origin(
+                urlsplit(verification_url)
+                ._replace(path="", query="", fragment="")
+                .geturl()
+            )
             url = validate_endpoint_uri(
-                info.verification_uri_complete or info.verification_uri, path=False
+                verification_url,
+                https=not (
+                    origin.startswith("http://") and verification_origin == origin
+                ),
+                path=False,
             )
             if info.expires_at is None:
                 raise LoginError("Zoo returned an invalid device login lifetime.")
@@ -241,7 +251,8 @@ def start_saved_login() -> asyncio.Task[None] | None:
     return asyncio.create_task(_load_saved_login(), name="zoo-saved-login")
 
 
-async def auth_command(command: str, *, browser: bool = True) -> None:
+def auth_command(command: str, *, browser: bool = True) -> None:
+    """Keep synchronous device polling outside asyncio's SIGINT handler."""
     config = ZooCredentials.from_environment()
     origin = api_origin(config.base_url)
     store = LoginStore()
@@ -253,7 +264,7 @@ async def auth_command(command: str, *, browser: bool = True) -> None:
         )
         return
     if config.token:
-        if not await validate_login(config):
+        if not asyncio.run(validate_login(config)):
             raise LoginError(f"Zoo MCP {origin}: environment credentials invalid.")
         print(f"Zoo MCP {origin}: environment credentials valid.", file=sys.stderr)
         return
@@ -263,7 +274,7 @@ async def auth_command(command: str, *, browser: bool = True) -> None:
         print(f"Zoo MCP {origin}: logged in.", file=sys.stderr)
         return
     login = store.load(origin)
-    valid = login is not None and await validate_login(login)
+    valid = login is not None and asyncio.run(validate_login(login))
     if not valid:
         raise LoginError(f"Zoo MCP {origin}: no valid saved login.")
     print(f"Zoo MCP {origin}: logged in.", file=sys.stderr)

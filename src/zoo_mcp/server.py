@@ -1907,7 +1907,7 @@ def main():
     args = parser.parse_args()
     if args.command == "auth":
         try:
-            asyncio.run(auth_command(args.action, browser=not args.no_browser))
+            auth_command(args.action, browser=not args.no_browser)
         except (LoginError, OSError) as error:
             sys.exit(
                 str(error)
