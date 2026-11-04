@@ -1,4 +1,6 @@
 import asyncio
+import subprocess
+import sys
 import threading
 import time
 from unittest.mock import AsyncMock, Mock
@@ -91,7 +93,7 @@ async def test_login_uses_device_grant_and_saves_in_keyring(
             },
         ],
     )
-    assert await auth.auth_command("login") == 0
+    await auth.auth_command("login")
     assert clock == [2, 2, 7]
     saved = auth.LoginStore().load(ORIGIN)
     assert saved is not None and saved.token == "secret-token"
@@ -233,7 +235,7 @@ async def test_saved_token_validity_comes_from_api_not_reported_lifetime(
             "expires_in": reported_lifetime,
         },
     )
-    assert await auth.auth_command("login") == 0
+    await auth.auth_command("login")
     tomorrow = time.time() + 86400
     monkeypatch.setattr(auth.time, "time", lambda: tomorrow)
     validate = AsyncMock(return_value=True)
@@ -344,9 +346,70 @@ async def test_status_and_logout_never_print_tokens(monkeypatch, capsys):
     other = ZooCredentials("other-secret", "https://other.example")
     store.save(other)
     monkeypatch.setattr(auth, "validate_login", AsyncMock(return_value=True))
-    assert await auth.auth_command("status") == 0
-    assert await auth.auth_command("logout") == 0
-    assert await auth.auth_command("status") == 1
+    await auth.auth_command("status")
+    await auth.auth_command("logout")
+    with pytest.raises(auth.LoginError, match="no valid saved login"):
+        await auth.auth_command("status")
     assert store.load(other.base_url) == other
     output = capsys.readouterr()
     assert output.out == "" and "secret" not in output.err
+
+
+@pytest.mark.parametrize("command", ["login", "status"])
+@pytest.mark.parametrize("valid", [True, False])
+@pytest.mark.asyncio
+async def test_auth_command_with_environment_credentials(
+    monkeypatch, capsys, command, valid
+):
+    monkeypatch.setenv("ZOO_API_TOKEN", "secret-token")
+    monkeypatch.setattr(auth, "validate_login", AsyncMock(return_value=valid))
+    if valid:
+        await auth.auth_command(command)
+        assert "environment credentials valid" in capsys.readouterr().err
+    else:
+        with pytest.raises(auth.LoginError, match="environment credentials invalid"):
+            await auth.auth_command(command)
+        assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    "outcome,exit_code,stderr",
+    [
+        ("success", 0, ""),
+        ("login_error", 1, "Login failed.\n"),
+        ("os_error", 1, "Could not update saved Zoo MCP login.\n"),
+        ("interrupt", 130, ""),
+    ],
+)
+def test_auth_cli_exit_status_and_error_output(outcome, exit_code, stderr):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from unittest.mock import AsyncMock
+from zoo_mcp import server
+from zoo_mcp.auth import LoginError
+
+error = {
+    "success": None,
+    "login_error": LoginError("Login failed."),
+    "os_error": OSError("sensitive-details"),
+    "interrupt": KeyboardInterrupt(),
+}[sys.argv.pop()]
+server.auth_command = AsyncMock(side_effect=error)
+server.main()
+""",
+            "auth",
+            "status",
+            outcome,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == exit_code
+    assert result.stdout == ""
+    assert result.stderr == stderr

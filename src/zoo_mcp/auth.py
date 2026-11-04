@@ -226,7 +226,7 @@ def start_saved_login() -> asyncio.Task[None] | None:
     return asyncio.create_task(_load_saved_login(), name="zoo-saved-login")
 
 
-async def auth_command(command: str, *, browser: bool = True) -> int:
+async def auth_command(command: str, *, browser: bool = True) -> None:
     config = ZooCredentials.from_environment()
     origin = api_origin(config.base_url)
     store = LoginStore()
@@ -236,23 +236,19 @@ async def auth_command(command: str, *, browser: bool = True) -> int:
             f"Removed saved Zoo MCP login for {origin}. Environment credentials still take precedence.",
             file=sys.stderr,
         )
-        return 0
+        return
     if config.token:
-        valid = await validate_login(config)
-        print(
-            f"Zoo MCP {origin}: environment credentials {'valid' if valid else 'invalid'}.",
-            file=sys.stderr,
-        )
-        return 0 if valid else 1
+        if not await validate_login(config):
+            raise LoginError(f"Zoo MCP {origin}: environment credentials invalid.")
+        print(f"Zoo MCP {origin}: environment credentials valid.", file=sys.stderr)
+        return
     if command == "login":
         login = device_login(origin, browser=browser)
         store.save(login)
         print(f"Zoo MCP {origin}: logged in.", file=sys.stderr)
-        return 0
+        return
     login = store.load(origin)
     valid = login is not None and await validate_login(login)
-    print(
-        f"Zoo MCP {origin}: {'logged in' if valid else 'no valid saved login'}.",
-        file=sys.stderr,
-    )
-    return 0 if valid else 1
+    if not valid:
+        raise LoginError(f"Zoo MCP {origin}: no valid saved login.")
+    print(f"Zoo MCP {origin}: logged in.", file=sys.stderr)

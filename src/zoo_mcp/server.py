@@ -4,6 +4,7 @@ import atexit
 import json
 import math
 import signal
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -1906,20 +1907,16 @@ def main():
     args = parser.parse_args()
     if args.command == "auth":
         try:
-            code = asyncio.run(auth_command(args.action, browser=not args.no_browser))
+            asyncio.run(auth_command(args.action, browser=not args.no_browser))
         except (LoginError, OSError) as error:
-            import sys
-
-            print(
+            sys.exit(
                 str(error)
                 if isinstance(error, LoginError)
-                else "Could not update saved Zoo MCP login.",
-                file=sys.stderr,
+                else "Could not update saved Zoo MCP login."
             )
-            code = 1
         except KeyboardInterrupt:
-            code = 130
-        raise SystemExit(code)
+            sys.exit(130)
+        sys.exit()
 
     logger.info("Starting MCP server with %s transport...", args.transport)
     install_shutdown_handlers()
