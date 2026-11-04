@@ -1,7 +1,6 @@
 import asyncio
 import subprocess
 import sys
-import threading
 import time
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs
@@ -9,9 +8,8 @@ from urllib.parse import parse_qs
 import pytest
 import requests
 from keyring.errors import NoKeyringError
-from mcp.types import CallToolResult
 
-from zoo_mcp import auth, credentials, server
+from zoo_mcp import auth, credentials
 from zoo_mcp.credentials import ZooCredentials, get_credentials, use_credentials
 
 ORIGIN = "https://api.example"
@@ -316,27 +314,90 @@ async def test_startup_without_saved_login_never_opens_browser(browser):
         get_credentials()
 
 
-@pytest.mark.asyncio
-async def test_lifespan_stays_responsive_and_cancels_blocked_keyring(monkeypatch):
-    started, release = threading.Event(), threading.Event()
+def test_lifespan_exits_process_with_keyring_still_blocked():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import asyncio
+import threading
+from unittest.mock import AsyncMock
 
-    def load(_service, _origin):
-        started.set()
-        release.wait(5)
+from mcp.types import CallToolResult
+from zoo_mcp import auth, credentials, logger, server
+from zoo_mcp.credentials import ZooCredentials
 
-    monkeypatch.setattr(auth.keyring, "get_password", load)
-    monkeypatch.setattr(server, "_init_kcl_indexes", AsyncMock())
-    monkeypatch.setattr(server, "zoo_stop_all_modeling_sessions", AsyncMock())
-    try:
-        async with asyncio.timeout(2), server._lifespan(server.mcp):
-            while not started.is_set():
-                await asyncio.sleep(0.001)
-            result = await server.mcp.call_tool("format_kcl", {"kcl_code": "x=1"})
-            assert isinstance(result, CallToolResult)
-            assert not result.is_error
-    finally:
-        release.set()
+started = threading.Event()
+
+def load(_service, _origin):
+    started.set()
+    threading.Event().wait()  # Never release the keyring lookup.
+
+auth.keyring.get_password = load
+logger.setLevel("WARNING")
+credentials._local_credentials = ZooCredentials("", "https://api.example")
+server._init_kcl_indexes = AsyncMock()
+server.zoo_stop_all_modeling_sessions = AsyncMock()
+
+async def main():
+    async with asyncio.timeout(2), server._lifespan(server.mcp):
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+        result = await server.mcp.call_tool("format_kcl", {"kcl_code": "x=1"})
+        assert isinstance(result, CallToolResult)
+        assert not result.is_error
     assert credentials._saved_login is None
+
+asyncio.run(main())
+print("Shutdown complete", flush=True)
+""",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Shutdown complete\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("valid", [True, False])
+@pytest.mark.asyncio
+async def test_saved_login_reports_pending_until_validation_finishes(
+    monkeypatch, valid
+):
+    saved = ZooCredentials("saved", ORIGIN)
+    auth.LoginStore().save(saved)
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def validate(login):
+        assert login == saved
+        started.set()
+        await finish.wait()
+        return valid
+
+    monkeypatch.setattr(auth, "validate_login", validate)
+    task = auth.start_saved_login()
+    assert task is not None
+    try:
+        with pytest.raises(ValueError, match="Checking saved Zoo login; retry shortly"):
+            get_credentials()
+        async with asyncio.timeout(2):
+            await started.wait()
+        with pytest.raises(ValueError, match="Checking saved Zoo login; retry shortly"):
+            get_credentials()
+        finish.set()
+        await task
+        if valid:
+            assert get_credentials() == saved
+        else:
+            with pytest.raises(ValueError, match="Run zoo-mcp auth login"):
+                get_credentials()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

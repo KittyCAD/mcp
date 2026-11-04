@@ -2,13 +2,14 @@
 
 import asyncio
 import sys
+import threading
 import time
 import webbrowser
+from concurrent.futures import Future
 from contextlib import suppress
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
-import anyio.to_thread
 import keyring
 import requests
 from keyring.errors import KeyringError
@@ -199,18 +200,34 @@ async def validate_login(credentials: ZooCredentials) -> bool:
         ) from None
 
 
+async def _read_saved_login(origin: str) -> ZooCredentials | None:
+    """A keyring unlock prompt must not keep the process alive at shutdown."""
+    result: Future[ZooCredentials | None] = Future()
+
+    def read() -> None:
+        if not result.set_running_or_notify_cancel():
+            return
+        try:
+            result.set_result(LoginStore().load(origin))
+        except Exception as error:
+            result.set_exception(error)
+
+    threading.Thread(target=read, name="zoo-keyring", daemon=True).start()
+    return await asyncio.wrap_future(result)
+
+
 async def _load_saved_login() -> None:
-    store = LoginStore()
+    message = "Run zoo-mcp auth login and restart the server, or set ZOO_API_TOKEN."
     try:
         origin = api_origin(credentials_module._local_credentials.base_url)
-        login = await anyio.to_thread.run_sync(
-            store.load, origin, abandon_on_cancel=True
-        )
+        login = await _read_saved_login(origin)
         if login and await validate_login(login):
             credentials_module._saved_login = login
     except (LoginError, OSError):
-        credentials_module._login_message = "Zoo login unavailable. Run zoo-mcp auth login and restart the server, or set ZOO_API_TOKEN."
-        logger.warning("%s", credentials_module._login_message)
+        message = "Zoo login unavailable. Run zoo-mcp auth login and restart the server, or set ZOO_API_TOKEN."
+        logger.warning("%s", message)
+    finally:
+        credentials_module._login_message = message
 
 
 def start_saved_login() -> asyncio.Task[None] | None:
@@ -220,9 +237,7 @@ def start_saved_login() -> asyncio.Task[None] | None:
     ):
         return None
     credentials_module._saved_login = None
-    credentials_module._login_message = (
-        "Run zoo-mcp auth login and restart the server, or set ZOO_API_TOKEN."
-    )
+    credentials_module._login_message = "Checking saved Zoo login; retry shortly."
     return asyncio.create_task(_load_saved_login(), name="zoo-saved-login")
 
 
