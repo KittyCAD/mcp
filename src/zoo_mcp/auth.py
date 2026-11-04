@@ -24,7 +24,7 @@ from requests_oauth2client import (
 from requests_oauth2client.utils import validate_endpoint_uri
 
 from zoo_mcp import credentials as credentials_module
-from zoo_mcp import ctx
+from zoo_mcp import ctx, logger
 from zoo_mcp.credentials import ZooCredentials
 
 # Dedicated first-party public device client, registered by the API seed migration.
@@ -210,7 +210,7 @@ async def _load_saved_login() -> None:
             credentials_module._saved_login = login
     except (LoginError, OSError):
         credentials_module._login_message = "Zoo login unavailable. Run zoo-mcp auth login and restart the server, or set ZOO_API_TOKEN."
-        print(credentials_module._login_message, file=sys.stderr, flush=True)
+        logger.warning("%s", credentials_module._login_message)
 
 
 def start_saved_login() -> asyncio.Task[None] | None:
