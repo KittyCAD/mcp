@@ -6,9 +6,9 @@ An [MCP server](https://modelcontextprotocol.io/docs/getting-started/intro) hous
 
 ## Prerequisites
 
-A Zoo account. On first startup, Zoo MCP opens a browser for device login and
-prints the verification URL and code to stderr. MCP initializes immediately;
-public tools remain available while authenticated tools ask you to finish login.
+A Zoo account. Run `uvx zoo-mcp auth login` once before starting the server.
+The command opens your browser and prints a verification URL and code.
+The server reuses your saved login; public tools also work without login.
 
 You can also use an [API key](https://zoo.dev/account):
 ```bash
@@ -51,14 +51,15 @@ uvx zoo-mcp auth status
 uvx zoo-mcp auth logout
 ```
 
-Logins are saved per API origin under `$XDG_CONFIG_HOME/zoo-mcp/logins`
-(default `~/.config/zoo-mcp/logins`) with user-only permissions and atomic writes.
-Status never displays tokens. Logout removes only the saved login for the current
-origin; restart running servers afterward. An expired or revoked saved login
-starts a new device login at startup. An expired running login prompts again.
-After denial, cancellation or an authentication outage, run `auth login` and
-restart the server. Device login requires the API's dedicated Zoo MCP device
-client registration.
+Logins are saved per API origin in your system credential store using
+[`keyring`](https://keyring.readthedocs.io/): macOS Keychain, Windows Credential
+Locker, or a supported Linux keyring. On headless systems without an available
+keyring, set `ZOO_API_TOKEN` instead. Status never displays tokens. Logout removes
+only the saved login for the current origin; restart running servers afterward.
+If your login expires or is revoked, run `auth login` again and restart the server.
+Server startup never opens a browser. Device authorization and polling use
+[`requests-oauth2client`](https://github.com/guillp/requests_oauth2client).
+Device login requires the API's dedicated Zoo MCP device client registration.
 
 The server can also be run with the [mcp package](https://github.com/modelcontextprotocol/python-sdk)
 ```bash
@@ -102,8 +103,8 @@ The context supplies the same token and origin to the KittyCAD SDK and KCL
 session constructors and restores the previous configuration on exit. New
 calls can use refreshed credentials. Finish child tasks before leaving their
 credential context.
-An explicit credential context also prevents the server lifespan from initiating
-local login. Hosted workers and embeddings should always use this interface.
+An explicit credential context also prevents the server lifespan from loading a
+saved local login. Hosted workers and embeddings should always use this interface.
 
 Credential contexts configure downstream calls. Applications serving different
 owners must also isolate their process-wide modeling sessions and workspaces.

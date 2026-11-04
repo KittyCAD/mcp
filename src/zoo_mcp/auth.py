@@ -1,20 +1,38 @@
 """Local device login. Hosted callers supply ZooCredentials explicitly."""
 
 import asyncio
-import hashlib
 import json
 import math
-import os
-import stat
 import sys
-import tempfile
 import time
+import webbrowser
+from contextlib import suppress
 from dataclasses import dataclass, field
-from pathlib import Path
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
-import httpx
+import anyio.to_thread
+import keyring
+import requests
+from keyring.errors import KeyringError
 from kittycad import AsyncKittyCAD
+from requests.adapters import HTTPAdapter
+from requests_oauth2client import (
+    AccessDenied,
+    DeviceAuthorizationPollingJob,
+    ExpiredToken,
+    OAuth2Client,
+    OAuth2Error,
+)
+from requests_oauth2client.utils import validate_endpoint_uri
+from tenacity import (
+    RetryError,
+    Retrying,
+    retry_if_exception,
+    retry_if_result,
+    stop_before_delay,
+    wait_exponential,
+)
 
 from zoo_mcp import credentials as credentials_module
 from zoo_mcp import ctx
@@ -22,7 +40,6 @@ from zoo_mcp.credentials import ZooCredentials
 
 # Dedicated first-party public device client, registered by the API seed migration.
 MCP_CLIENT_ID = "c1bc3f76-8578-4ff1-9f64-0e909c164670"
-DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
 
 class LoginError(ValueError):
@@ -30,7 +47,11 @@ class LoginError(ValueError):
 
 
 def api_origin(value: str) -> str:
-    url = urlsplit(value)
+    try:
+        url = urlsplit(value)
+        port = url.port
+    except ValueError:
+        raise LoginError("Zoo login requires a valid API origin.") from None
     if (
         url.scheme not in ("https", "http")
         or not url.hostname
@@ -47,7 +68,6 @@ def api_origin(value: str) -> str:
         raise LoginError(
             "Zoo login requires an HTTPS API origin (HTTP is allowed on localhost)."
         )
-    port = url.port
     host = f"[{url.hostname}]" if ":" in url.hostname else url.hostname
     if port and port != (443 if url.scheme == "https" else 80):
         host += f":{port}"
@@ -69,205 +89,158 @@ class SavedLogin:
 
 
 class LoginStore:
-    def __init__(self, directory: Path | None = None):
-        self.directory = directory or (
-            Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-            / "zoo-mcp"
-            / "logins"
-        )
+    """Store each API origin's login in the operating system credential store."""
 
-    def path(self, origin: str) -> Path:
-        return self.directory / (
-            hashlib.sha256(api_origin(origin).encode()).hexdigest() + ".json"
-        )
+    service = "zoo-mcp"
 
     def load(self, origin: str) -> SavedLogin | None:
-        path = self.path(origin)
         try:
-            with path.open() as stream:
-                info = os.fstat(stream.fileno())
-                if not stat.S_ISREG(info.st_mode) or (
-                    os.name != "nt" and info.st_mode & 0o077
-                ):
-                    raise LoginError(
-                        "Saved Zoo MCP login must have user-only permissions. Run zoo-mcp auth login again."
-                    )
-                data = json.load(stream)
-            login = SavedLogin(**data)
+            value = keyring.get_password(self.service, api_origin(origin))
+            if value is None:
+                return None
+            login = SavedLogin(**json.loads(value))
             if login.origin != api_origin(origin) or not isinstance(login.token, str):
                 return None
             return login if login.valid() else None
-        except FileNotFoundError:
-            return None
+        except KeyringError:
+            raise LoginError(
+                "Could not access the system credential store. Unlock it or set ZOO_API_TOKEN."
+            ) from None
         except (TypeError, KeyError, json.JSONDecodeError):
             return None
 
     def save(self, login: SavedLogin) -> None:
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.directory, 0o700)
-        descriptor, temporary = tempfile.mkstemp(prefix=".login-", dir=self.directory)
         try:
-            with os.fdopen(descriptor, "w") as stream:
-                json.dump(
+            keyring.set_password(
+                self.service,
+                api_origin(login.origin),
+                json.dumps(
                     {
                         "origin": api_origin(login.origin),
                         "token": login.token,
                         "expires_at": login.expires_at,
-                    },
-                    stream,
-                )
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path(login.origin))
-        finally:
-            Path(temporary).unlink(missing_ok=True)
+                    }
+                ),
+            )
+        except KeyringError:
+            raise LoginError(
+                "Could not save Zoo login in the system credential store. Unlock it or set ZOO_API_TOKEN."
+            ) from None
 
     def delete(self, origin: str) -> None:
-        self.path(origin).unlink(missing_ok=True)
+        try:
+            origin = api_origin(origin)
+            if keyring.get_password(self.service, origin) is not None:
+                keyring.delete_password(self.service, origin)
+        except KeyringError:
+            raise LoginError(
+                "Could not remove Zoo login from the system credential store."
+            ) from None
 
 
-async def open_browser(url: str) -> None:
-    # Isolate browser helper output from the MCP stdio stream, including on Linux.
-    if getattr(sys, "frozen", False):
-        import shutil
-
-        executable = shutil.which("open" if sys.platform == "darwin" else "xdg-open")
-        if not executable:
-            return
-        command = [executable, url]
-    else:
-        command = [sys.executable, "-m", "webbrowser", "-t", url]
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+class _SystemTrustAdapter(HTTPAdapter):
+    def build_connection_pool_key_attributes(self, request, verify, cert=None):
+        host, settings = super().build_connection_pool_key_attributes(
+            request, verify, cert
         )
-        try:
-            async with asyncio.timeout(5):
-                await process.wait()
-        finally:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-    except OSError:
-        pass
+        settings["ssl_context"] = ctx
+        return host, settings
 
 
-def positive_seconds(value: object) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (float, int))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
-        raise LoginError("Zoo returned an invalid login lifetime or polling interval.")
-    return float(value)
+def _transient_http_error(error: BaseException) -> bool:
+    response = getattr(error, "response", None)
+    return isinstance(error, (requests.Timeout, requests.ConnectionError)) or (
+        response is not None
+        and (response.status_code == 429 or response.status_code >= 500)
+    )
 
 
-async def device_login(origin: str, *, browser: bool = True) -> SavedLogin:
+def device_login(origin: str, *, browser: bool = True) -> SavedLogin:
+    """Run interactive login in the CLI; OAuth polling belongs to the library."""
     origin = api_origin(origin)
-    async with httpx.AsyncClient(
-        verify=ctx, follow_redirects=False, timeout=15
-    ) as client:
-        try:
-            response = await client.post(
-                origin + "/oauth2/device/auth", data={"client_id": MCP_CLIENT_ID}
+    request_options = {"timeout": 15, "allow_redirects": False}
+    try:
+        with requests.Session() as session:
+            session.mount("https://", _SystemTrustAdapter())
+            client = OAuth2Client(
+                token_endpoint=origin + "/oauth2/device/token",
+                device_authorization_endpoint=origin + "/oauth2/device/auth",
+                client_id=MCP_CLIENT_ID,
+                session=session,
+                testing=origin.startswith("http://"),
             )
-            if not response.is_success:
-                raise LoginError(
-                    "Zoo could not start device login. Retry with zoo-mcp auth login."
-                )
-            info = response.json()
-            device_code, user_code = info["device_code"], info["user_code"]
-            url = info.get("verification_uri_complete") or info["verification_uri"]
-            if not all(
-                isinstance(item, str) and item for item in (device_code, user_code, url)
-            ):
-                raise LoginError("Zoo returned an invalid device login response.")
-            # Do not launch non-web protocols supplied by a misconfigured endpoint.
-            verification = urlsplit(url)
-            if (
-                verification.scheme != "https"
-                or not verification.hostname
-                or verification.username
-                or verification.password
-            ):
-                raise LoginError("Zoo returned an invalid verification URL.")
-            deadline = time.monotonic() + positive_seconds(info["expires_in"])
-            interval = positive_seconds(info.get("interval", 5))
+            info = client.authorize_device(requests_kwargs=request_options)
+            url = validate_endpoint_uri(
+                info.verification_uri_complete or info.verification_uri, path=False
+            )
+            if info.expires_at is None:
+                raise LoginError("Zoo returned an invalid device login lifetime.")
+            poll = DeviceAuthorizationPollingJob(
+                client, info, requests_kwargs=request_options
+            )
+            if poll.interval <= 0:
+                raise LoginError("Zoo returned an invalid polling interval.")
             print(
-                f"Zoo MCP login: open {url}\nEnter code: {user_code}",
+                f"Zoo MCP login: open {url}\nEnter code: {info.user_code}",
                 file=sys.stderr,
                 flush=True,
             )
             if browser:
-                await open_browser(url)
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= interval:
-                    await asyncio.sleep(max(0, remaining))
-                    raise LoginError(
-                        "Zoo device login expired. Run zoo-mcp auth login to retry."
-                    )
-                await asyncio.sleep(interval)
-                try:
-                    async with asyncio.timeout(deadline - time.monotonic()):
-                        response = await client.post(
-                            origin + "/oauth2/device/token",
-                            data={
-                                "client_id": MCP_CLIENT_ID,
-                                "device_code": device_code,
-                                "grant_type": DEVICE_GRANT,
-                            },
-                        )
-                except (httpx.TransportError, TimeoutError):
-                    interval *= 2
-                    continue
-                if response.status_code == 429 or response.status_code >= 500:
-                    interval += 5
-                    continue
-                data = response.json()
-                if response.is_success:
-                    token = data["access_token"]
-                    if (
-                        not isinstance(token, str)
-                        or not token
-                        or str(data.get("token_type", "")).lower() != "bearer"
-                    ):
-                        raise LoginError("Zoo returned an invalid device token.")
-                    return SavedLogin(
-                        origin,
-                        token,
-                        time.time() + positive_seconds(data["expires_in"]),
-                    )
-                error = data.get("error")
-                if error == "authorization_pending":
-                    continue
-                if error == "slow_down":
-                    interval += 5
-                    continue
-                if error == "access_denied":
-                    raise LoginError(
-                        "Zoo device login was denied. Run zoo-mcp auth login to retry."
-                    )
-                if error == "expired_token":
-                    raise LoginError(
-                        "Zoo device login expired. Run zoo-mcp auth login to retry."
-                    )
+                with suppress(webbrowser.Error, OSError):
+                    webbrowser.open(url)
+            lifetime = (info.expires_at - datetime.now(UTC)).total_seconds()
+            if lifetime <= poll.interval:
                 raise LoginError(
-                    "Zoo device login failed. Run zoo-mcp auth login to retry."
+                    "Zoo device login expired. Run zoo-mcp auth login again."
                 )
-        except (
-            httpx.HTTPError,
-            KeyError,
-            TypeError,
-            json.JSONDecodeError,
-        ) as from_error:
-            raise LoginError(
-                "Zoo device login is unavailable. Run zoo-mcp auth login to retry."
-            ) from from_error
+            # OAuth polling owns its interval. Tenacity limits retries and
+            # adds exponential backoff only for transient HTTP failures.
+            backoff = wait_exponential(multiplier=5, max=60)
+            token = Retrying(
+                retry=(
+                    retry_if_result(lambda result: result is None)
+                    | retry_if_exception(_transient_http_error)
+                ),
+                stop=stop_before_delay(lifetime),
+                wait=lambda attempt: (
+                    poll.interval
+                    + (
+                        backoff(attempt)
+                        if attempt.outcome is not None and attempt.outcome.failed
+                        else 0
+                    )
+                ),
+                sleep=lambda seconds: time.sleep(max(0, seconds - poll.interval)),
+            )(poll)
+            if (
+                token is None
+                or not isinstance(token.access_token, str)
+                or not token.access_token
+                or token.expires_at is None
+                or token.is_expired()
+            ):
+                raise LoginError("Zoo returned an invalid device token.")
+            return SavedLogin(origin, token.access_token, token.expires_at.timestamp())
+    except AccessDenied:
+        raise LoginError(
+            "Zoo device login was denied. Run zoo-mcp auth login again."
+        ) from None
+    except (ExpiredToken, RetryError):
+        raise LoginError(
+            "Zoo device login expired. Run zoo-mcp auth login again."
+        ) from None
+    except (
+        OAuth2Error,
+        requests.RequestException,
+        ValueError,
+        TypeError,
+        KeyError,
+    ) as error:
+        if isinstance(error, LoginError):
+            raise
+        raise LoginError(
+            "Zoo device login failed. Check connectivity and run zoo-mcp auth login again."
+        ) from None
 
 
 async def validate_login(credentials: ZooCredentials) -> bool:
@@ -294,46 +267,31 @@ async def validate_login(credentials: ZooCredentials) -> bool:
         ) from None
 
 
-async def _maintain_login() -> None:
+async def _load_saved_login() -> None:
     store = LoginStore()
     try:
         origin = api_origin(credentials_module._local_credentials.base_url)
-        while True:
-            login = store.load(origin)
-            if login and not await validate_login(ZooCredentials(login.token, origin)):
-                store.delete(origin)
-                login = None
-            if login is None:
-                login = await device_login(origin)
-                store.save(login)
-            credentials_module._saved_login = login
-            credentials_module._login_message = (
-                "Zoo login expired. Run zoo-mcp auth login and restart the server."
-            )
-            await asyncio.sleep(max(0, login.expires_at - time.time()))
-            credentials_module._saved_login = None
-            credentials_module._login_message = (
-                "Zoo login pending. Complete device login in your browser, then retry."
-            )
-    except asyncio.CancelledError:
-        raise
-    except (LoginError, OSError):
-        credentials_module._login_message = (
-            "Zoo login unavailable. Run zoo-mcp auth login, then restart the server."
+        login = await anyio.to_thread.run_sync(
+            store.load, origin, abandon_on_cancel=True
         )
+        if login and await validate_login(ZooCredentials(login.token, origin)):
+            credentials_module._saved_login = login
+    except (LoginError, OSError):
+        credentials_module._login_message = "Zoo login unavailable. Run zoo-mcp auth login and restart the server, or set ZOO_API_TOKEN."
         print(credentials_module._login_message, file=sys.stderr, flush=True)
 
 
-def start_local_login() -> asyncio.Task[None] | None:
+def start_saved_login() -> asyncio.Task[None] | None:
     if (
         credentials_module._credentials.get() is not None
         or credentials_module._local_credentials.token
     ):
         return None
+    credentials_module._saved_login = None
     credentials_module._login_message = (
-        "Zoo login pending. Complete device login in your browser, then retry."
+        "Run zoo-mcp auth login and restart the server, or set ZOO_API_TOKEN."
     )
-    return asyncio.create_task(_maintain_login(), name="zoo-device-login")
+    return asyncio.create_task(_load_saved_login(), name="zoo-saved-login")
 
 
 async def auth_command(command: str, *, browser: bool = True) -> int:
@@ -355,7 +313,7 @@ async def auth_command(command: str, *, browser: bool = True) -> int:
         )
         return 0 if valid else 1
     if command == "login":
-        login = await device_login(origin, browser=browser)
+        login = device_login(origin, browser=browser)
         store.save(login)
         print(f"Zoo MCP {origin}: logged in.", file=sys.stderr)
         return 0

@@ -1,6 +1,6 @@
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -18,6 +18,7 @@ def reset_indexes(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(index, "_init_lock", None)
     monkeypatch.setattr(server, "_kcl_index_tasks", {})
     monkeypatch.setattr(server, "zoo_stop_all_modeling_sessions", AsyncMock())
+    monkeypatch.setattr(server, "start_saved_login", Mock(return_value=None))
 
 
 def _samples() -> KCLSamples:

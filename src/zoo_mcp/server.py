@@ -94,7 +94,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from pydantic import ConfigDict, Field, FiniteFloat, with_config
 
 from zoo_mcp import ZooMCPException, logger
-from zoo_mcp.auth import LoginError, auth_command, start_local_login
+from zoo_mcp.auth import LoginError, auth_command, start_saved_login
 from zoo_mcp.kcl_docs import (
     KCLDocs,
     get_doc_content,
@@ -198,7 +198,7 @@ async def _lifespan(_server: MCPServer) -> AsyncGenerator[None, None]:
     Each tool waits only for its own index if its background fetch is unfinished.
     """
     startup_task = asyncio.create_task(_init_kcl_indexes())
-    login_task = start_local_login()
+    login_task = start_saved_login()
     try:
         yield
     finally:

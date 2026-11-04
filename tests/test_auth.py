@@ -1,11 +1,12 @@
 import asyncio
-import os
+import threading
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs
 
-import httpx
 import pytest
+import requests
+from keyring.errors import NoKeyringError
 from mcp.types import CallToolResult
 
 from zoo_mcp import auth, credentials, server
@@ -15,40 +16,55 @@ ORIGIN = "https://api.example"
 
 
 @pytest.fixture(autouse=True)
-def isolate(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+def isolate(monkeypatch):
+    passwords = {}
+    monkeypatch.setattr(auth.keyring, "get_password", lambda *key: passwords.get(key))
+    monkeypatch.setattr(
+        auth.keyring,
+        "set_password",
+        lambda service, origin, value: passwords.__setitem__((service, origin), value),
+    )
+    monkeypatch.setattr(
+        auth.keyring, "delete_password", lambda *key: passwords.pop(key)
+    )
     monkeypatch.setattr(credentials, "_local_credentials", ZooCredentials("", ORIGIN))
     monkeypatch.setattr(credentials, "_saved_login", None)
     monkeypatch.setattr(credentials, "_login_message", "No API token configured")
-    monkeypatch.setattr(auth, "open_browser", AsyncMock())
     for name in ("KITTYCAD_API_TOKEN", "ZOO_API_TOKEN", "ZOO_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ZOO_HOST", ORIGIN)
+    return passwords
+
+
+@pytest.fixture(autouse=True)
+def browser(monkeypatch) -> Mock:
+    browser = Mock(return_value=True)
+    monkeypatch.setattr(auth.webbrowser, "open", browser)
+    return browser
 
 
 @pytest.fixture
 def clock(monkeypatch):
     now = [0.0]
     sleeps = []
-    real_sleep = asyncio.sleep
 
-    async def sleep(seconds):
-        sleeps.append(seconds)
+    def sleep(seconds):
+        if seconds:
+            sleeps.append(seconds)
         now[0] += seconds
-        await real_sleep(0)
 
     monkeypatch.setattr(auth.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(auth.asyncio, "sleep", sleep)
+    monkeypatch.setattr(auth.time, "sleep", sleep)
     return sleeps
 
 
-def device_response(httpx_mock, **changes):
-    httpx_mock.add_response(
-        method="POST",
-        url=ORIGIN + "/oauth2/device/auth",
+def device_response(requests_mock, **changes):
+    requests_mock.post(
+        ORIGIN + "/oauth2/device/auth",
         json={
             "device_code": "device",
             "user_code": "ABCD-EFGH",
+            "verification_uri": "https://api.example/verify",
             "verification_uri_complete": "https://api.example/verify?user_code=ABCD-EFGH",
             "expires_in": 300,
         }
@@ -57,49 +73,46 @@ def device_response(httpx_mock, **changes):
 
 
 @pytest.mark.asyncio
-async def test_form_requests_polling_and_atomic_host_specific_storage(
-    httpx_mock, clock, capsys
+async def test_login_uses_device_grant_and_saves_in_keyring(
+    requests_mock, clock, capsys, browser
 ):
-    device_response(httpx_mock, interval=2)
-    for status, data in [
-        (400, {"error": "authorization_pending"}),
-        (400, {"error": "slow_down"}),
-        (503, {}),
-        (
-            200,
-            {"access_token": "secret-token", "token_type": "Bearer", "expires_in": 120},
-        ),
-    ]:
-        httpx_mock.add_response(
-            method="POST",
-            url=ORIGIN + "/oauth2/device/token",
-            status_code=status,
-            json=data,
-        )
-    login = await auth.device_login(ORIGIN)
-    assert clock == [2, 2, 7, 12]
-    store = auth.LoginStore()
-    store.save(login)
-    assert store.load(ORIGIN + "/") == login
-    assert store.load("https://other.example") is None
-    if os.name != "nt":
-        assert store.path(ORIGIN).stat().st_mode & 0o777 == 0o600
-        assert store.directory.stat().st_mode & 0o777 == 0o700
-    assert "secret-token" not in repr(login)
-    assert len(list(store.directory.iterdir())) == 1
-    for request in httpx_mock.get_requests():
+    device_response(requests_mock, interval=2)
+    requests_mock.post(
+        ORIGIN + "/oauth2/device/token",
+        [
+            {"status_code": 400, "json": {"error": "authorization_pending"}},
+            {"status_code": 400, "json": {"error": "slow_down"}},
+            {"status_code": 503, "json": {}},
+            {
+                "json": {
+                    "access_token": "secret-token",
+                    "token_type": "Bearer",
+                    "expires_in": 120,
+                }
+            },
+        ],
+    )
+    assert await auth.auth_command("login") == 0
+    assert clock == [2, 2, 7, 20, 7]
+    saved = auth.LoginStore().load(ORIGIN)
+    assert saved is not None and saved.token == "secret-token"
+    assert "secret-token" not in repr(saved)
+    browser.assert_called_once_with("https://api.example/verify?user_code=ABCD-EFGH")
+    for request in requests_mock.request_history:
         assert request.headers["content-type"] == "application/x-www-form-urlencoded"
-        form = parse_qs(request.content.decode())
+        form = parse_qs(request.text)
         assert form["client_id"] == [auth.MCP_CLIENT_ID]
-        if request.url.path.endswith("token"):
-            assert form["grant_type"] == [auth.DEVICE_GRANT]
+        assert request.timeout == 15
+        if request.path.endswith("token"):
+            assert form["grant_type"] == [
+                "urn:ietf:params:oauth:grant-type:device_code"
+            ]
             assert form["device_code"] == ["device"]
-    out = capsys.readouterr()
-    assert out.out == ""
-    assert "ABCD-EFGH" in out.err and "secret-token" not in out.err
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "ABCD-EFGH" in output.err and "secret-token" not in output.err
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error,match",
     [
@@ -108,121 +121,197 @@ async def test_form_requests_polling_and_atomic_host_specific_storage(
         ("invalid_client", "failed"),
     ],
 )
-async def test_terminal_polling_errors(httpx_mock, clock, error, match):
-    device_response(httpx_mock)
-    httpx_mock.add_response(
-        status_code=400, json={"error": error, "error_description": "sensitive-details"}
+def test_terminal_errors_are_safe(requests_mock, clock, error, match):
+    device_response(requests_mock)
+    requests_mock.post(
+        ORIGIN + "/oauth2/device/token",
+        status_code=400,
+        json={"error": error, "error_description": "sensitive-details"},
     )
     with pytest.raises(auth.LoginError, match=match) as raised:
-        await auth.device_login(ORIGIN)
+        auth.device_login(ORIGIN)
     assert "sensitive-details" not in str(raised.value)
     assert auth.LoginStore().load(ORIGIN) is None
+    assert requests_mock.call_count == 2
 
 
-@pytest.mark.asyncio
-async def test_expiry_transport_backoff_and_cancellation(
-    httpx_mock, clock, monkeypatch
-):
-    device_response(httpx_mock, expires_in=20)
-    httpx_mock.add_exception(httpx.ReadTimeout("sensitive-token"))
-    httpx_mock.add_response(status_code=400, json={"error": "authorization_pending"})
+def test_local_expiry_stops_pending_requests(requests_mock, clock, browser):
+    device_response(requests_mock, expires_in=16)
+    requests_mock.post(
+        ORIGIN + "/oauth2/device/token",
+        status_code=400,
+        json={"error": "authorization_pending"},
+    )
     with pytest.raises(auth.LoginError, match="expired"):
-        await auth.device_login(ORIGIN, browser=False)
-    assert clock == [5, 10, 5]
-    assert isinstance(auth.open_browser, AsyncMock)
-    auth.open_browser.assert_not_called()
+        auth.device_login(ORIGIN, browser=False)
+    assert clock == [5, 5, 5]
+    browser.assert_not_called()
+    assert requests_mock.call_count == 4
 
-    async def cancel(_seconds):
-        raise asyncio.CancelledError
 
-    device_response(httpx_mock)
-    monkeypatch.setattr(auth.asyncio, "sleep", cancel)
-    with pytest.raises(asyncio.CancelledError):
-        await auth.device_login(ORIGIN)
+@pytest.mark.parametrize("endpoint", ["auth", "token"])
+def test_device_requests_never_follow_redirects(requests_mock, clock, endpoint):
+    device_response(requests_mock)
+    requests_mock.post(
+        ORIGIN + "/oauth2/device/" + endpoint,
+        status_code=302,
+        headers={"Location": "https://other.example/credentials"},
+    )
+    with pytest.raises(auth.LoginError):
+        auth.device_login(ORIGIN)
+    assert requests_mock.last_request.url == ORIGIN + "/oauth2/device/" + endpoint
+
+
+@pytest.mark.parametrize(
+    "url", ["file:///tmp/login", "https://user:password@api.example/verify"]
+)
+def test_invalid_verification_url_never_opens_browser(requests_mock, url, browser):
+    device_response(requests_mock, verification_uri_complete=url)
+    with pytest.raises(auth.LoginError):
+        auth.device_login(ORIGIN)
+    browser.assert_not_called()
+
+
+@pytest.mark.parametrize("browser_failure", [False, True])
+def test_browser_failure_and_no_browser_allow_manual_login(
+    requests_mock, clock, browser, browser_failure
+):
+    device_response(requests_mock, verification_uri_complete=None)
+    requests_mock.post(
+        ORIGIN + "/oauth2/device/token",
+        json={"access_token": "token", "token_type": "Bearer", "expires_in": 120},
+    )
+    if browser_failure:
+        browser.side_effect = OSError("no browser")
+    assert auth.device_login(ORIGIN, browser=browser_failure).token == "token"
+    assert browser.call_count == int(browser_failure)
+
+
+def test_interrupt_and_network_failure_do_not_save_login(
+    requests_mock, clock, monkeypatch
+):
+    device_response(requests_mock, expires_in=16)
+    requests_mock.post(
+        ORIGIN + "/oauth2/device/token", exc=requests.ReadTimeout("sensitive-details")
+    )
+    with pytest.raises(auth.LoginError, match="expired") as raised:
+        auth.device_login(ORIGIN)
+    assert "sensitive-details" not in str(raised.value)
+    assert clock == [5, 5, 5]
+    monkeypatch.setattr(auth.webbrowser, "open", Mock(side_effect=KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt):
+        auth.device_login(ORIGIN)
     assert auth.LoginStore().load(ORIGIN) is None
 
 
-def test_store_failed_replace_preserves_old_login(tmp_path, monkeypatch):
-    store = auth.LoginStore(tmp_path / "logins")
-    old = auth.SavedLogin(ORIGIN, "saved", time.time() + 120)
-    store.save(old)
-
-    def fail(*_args):
-        raise OSError("failure")
-
-    monkeypatch.setattr(auth.os, "replace", fail)
-    with pytest.raises(OSError):
-        store.save(auth.SavedLogin(ORIGIN, "new", time.time() + 120))
-    assert store.load(ORIGIN) == old
-    assert len(list(store.directory.iterdir())) == 1
-    store.path(ORIGIN).write_text("invalid JSON")
+def test_keyring_origin_isolation_expiry_and_corrupt_data(isolate):
+    store = auth.LoginStore()
+    saved = auth.SavedLogin(ORIGIN, "saved", time.time() + 120)
+    store.save(saved)
+    other = auth.SavedLogin("https://other.example", "other", time.time() + 120)
+    store.save(other)
+    assert store.load(ORIGIN + "/") == saved
+    assert store.load("https://api.example:443") == saved
+    assert store.load("https://api.example:8443") is None
+    store.delete(ORIGIN)
+    store.delete(ORIGIN)
+    assert store.load(ORIGIN) is None
+    assert store.load(other.origin) == other
+    store.save(auth.SavedLogin(ORIGIN, "expired", time.time() - 1))
+    assert store.load(ORIGIN) is None
+    isolate[(store.service, ORIGIN)] = "invalid JSON"
     assert store.load(ORIGIN) is None
 
 
+def test_unavailable_keyring_has_actionable_safe_error(monkeypatch):
+    monkeypatch.setattr(
+        auth.keyring,
+        "get_password",
+        Mock(side_effect=NoKeyringError("sensitive-details")),
+    )
+    with pytest.raises(auth.LoginError, match="set ZOO_API_TOKEN") as raised:
+        auth.LoginStore().load(ORIGIN)
+    assert "sensitive-details" not in str(raised.value)
+
+
+def test_device_requests_use_system_certificate_store():
+    request = requests.Request("POST", ORIGIN + "/oauth2/device/auth").prepare()
+    _, settings = auth._SystemTrustAdapter().build_connection_pool_key_attributes(
+        request, True
+    )
+    assert settings["ssl_context"] is auth.ctx
+    assert settings["cert_reqs"] == "CERT_REQUIRED"
+
+
 @pytest.mark.asyncio
-async def test_environment_and_explicit_credentials_never_start_login(monkeypatch):
-    login = AsyncMock()
-    monkeypatch.setattr(auth, "_maintain_login", login)
+async def test_environment_and_explicit_credentials_bypass_keyring(monkeypatch):
+    load = Mock(side_effect=AssertionError("must not read local credentials"))
+    monkeypatch.setattr(auth.keyring, "get_password", load)
     monkeypatch.setattr(
         credentials, "_local_credentials", ZooCredentials("env", ORIGIN)
     )
-    assert auth.start_local_login() is None
+    assert auth.start_saved_login() is None
     monkeypatch.setattr(credentials, "_local_credentials", ZooCredentials("", ORIGIN))
     with use_credentials(ZooCredentials("explicit", ORIGIN)):
-        assert auth.start_local_login() is None
+        assert auth.start_saved_login() is None
         assert get_credentials().token == "explicit"
-    login.assert_not_called()
+    load.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_saved_login_survives_restart_and_revocation_reauthenticates(monkeypatch):
-    saved = auth.SavedLogin(ORIGIN, "saved", time.time() + 120)
-    auth.LoginStore().save(saved)
-    validate = AsyncMock(side_effect=[True, True, False])
-    device = AsyncMock(
-        return_value=auth.SavedLogin(ORIGIN, "replacement", time.time() + 120)
-    )
-    monkeypatch.setattr(auth, "validate_login", validate)
-    monkeypatch.setattr(auth, "device_login", device)
-    for expected in ("saved", "saved", "replacement"):
-        task = auth.start_local_login()
-        assert task is not None
-        for _ in range(20):
-            await asyncio.sleep(0)
-            if credentials._saved_login is not None:
-                break
-        assert get_credentials().token == expected
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        credentials._saved_login = None
-    assert device.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_lifespan_initializes_while_login_pending_and_cancels_on_shutdown(
+async def test_saved_login_survives_restart_but_revocation_never_starts_device_login(
     monkeypatch,
 ):
-    started, cancelled = asyncio.Event(), asyncio.Event()
+    saved = auth.SavedLogin(ORIGIN, "saved", time.time() + 120)
+    auth.LoginStore().save(saved)
+    monkeypatch.setattr(
+        auth, "validate_login", AsyncMock(side_effect=[True, True, False])
+    )
+    device = Mock(side_effect=AssertionError("server must not start device login"))
+    monkeypatch.setattr(auth, "device_login", device)
+    for valid in (True, True, False):
+        task = auth.start_saved_login()
+        assert task is not None
+        await task
+        if valid:
+            assert get_credentials().token == "saved"
+        else:
+            with pytest.raises(ValueError, match="auth login"):
+                get_credentials()
+    device.assert_not_called()
 
-    async def wait():
+
+@pytest.mark.asyncio
+async def test_startup_without_saved_login_never_opens_browser(browser):
+    task = auth.start_saved_login()
+    assert task is not None
+    await task
+    browser.assert_not_called()
+    with pytest.raises(ValueError, match="auth login"):
+        get_credentials()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_stays_responsive_and_cancels_blocked_keyring(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    def load(_service, _origin):
         started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            cancelled.set()
+        release.wait(5)
 
-    monkeypatch.setattr(auth, "_maintain_login", wait)
+    monkeypatch.setattr(auth.keyring, "get_password", load)
     monkeypatch.setattr(server, "_init_kcl_indexes", AsyncMock())
-    # Login cancellation must proceed even while modeling shutdown is waiting.
-    monkeypatch.setattr(server, "zoo_stop_all_modeling_sessions", cancelled.wait)
-    async with asyncio.timeout(2), server._lifespan(server.mcp):
-        await started.wait()
-        with pytest.raises(ValueError, match="login pending"):
-            get_credentials()
-        result = await server.mcp.call_tool("format_kcl", {"kcl_code": "x=1"})
-        assert isinstance(result, CallToolResult)
-        assert not result.is_error
-    assert cancelled.is_set()
+    monkeypatch.setattr(server, "zoo_stop_all_modeling_sessions", AsyncMock())
+    try:
+        async with asyncio.timeout(2), server._lifespan(server.mcp):
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+            result = await server.mcp.call_tool("format_kcl", {"kcl_code": "x=1"})
+            assert isinstance(result, CallToolResult)
+            assert not result.is_error
+    finally:
+        release.set()
+    assert credentials._saved_login is None
 
 
 @pytest.mark.asyncio
@@ -236,5 +325,5 @@ async def test_status_and_logout_never_print_tokens(monkeypatch, capsys):
     assert await auth.auth_command("logout") == 0
     assert await auth.auth_command("status") == 1
     assert store.load(other.origin) == other
-    captured = capsys.readouterr()
-    assert captured.out == "" and "secret" not in captured.err
+    output = capsys.readouterr()
+    assert output.out == "" and "secret" not in output.err
