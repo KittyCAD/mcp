@@ -82,7 +82,6 @@ async def test_login_uses_device_grant_and_saves_in_keyring(
         [
             {"status_code": 400, "json": {"error": "authorization_pending"}},
             {"status_code": 400, "json": {"error": "slow_down"}},
-            {"status_code": 503, "json": {}},
             {
                 "json": {
                     "access_token": "secret-token",
@@ -93,7 +92,7 @@ async def test_login_uses_device_grant_and_saves_in_keyring(
         ],
     )
     assert await auth.auth_command("login") == 0
-    assert clock == [2, 2, 7, 20, 7]
+    assert clock == [2, 2, 7]
     saved = auth.LoginStore().load(ORIGIN)
     assert saved is not None and saved.token == "secret-token"
     assert "secret-token" not in repr(saved)
@@ -194,33 +193,57 @@ def test_interrupt_and_network_failure_do_not_save_login(
     requests_mock.post(
         ORIGIN + "/oauth2/device/token", exc=requests.ReadTimeout("sensitive-details")
     )
-    with pytest.raises(auth.LoginError, match="expired") as raised:
+    with pytest.raises(auth.LoginError, match="Check connectivity") as raised:
         auth.device_login(ORIGIN)
     assert "sensitive-details" not in str(raised.value)
-    assert clock == [5, 5, 5]
+    assert clock == [5]
     monkeypatch.setattr(auth.webbrowser, "open", Mock(side_effect=KeyboardInterrupt))
     with pytest.raises(KeyboardInterrupt):
         auth.device_login(ORIGIN)
     assert auth.LoginStore().load(ORIGIN) is None
 
 
-def test_keyring_origin_isolation_expiry_and_corrupt_data(isolate):
+def test_keyring_stores_opaque_tokens_per_origin(isolate):
     store = auth.LoginStore()
-    saved = auth.SavedLogin(ORIGIN, "saved", time.time() + 120)
+    saved = ZooCredentials("saved", ORIGIN)
     store.save(saved)
-    other = auth.SavedLogin("https://other.example", "other", time.time() + 120)
+    other = ZooCredentials("other", "https://other.example")
     store.save(other)
+    assert isolate[(store.service, ORIGIN)] == "saved"
     assert store.load(ORIGIN + "/") == saved
     assert store.load("https://api.example:443") == saved
     assert store.load("https://api.example:8443") is None
     store.delete(ORIGIN)
     store.delete(ORIGIN)
     assert store.load(ORIGIN) is None
-    assert store.load(other.origin) == other
-    store.save(auth.SavedLogin(ORIGIN, "expired", time.time() - 1))
-    assert store.load(ORIGIN) is None
-    isolate[(store.service, ORIGIN)] = "invalid JSON"
-    assert store.load(ORIGIN) is None
+    assert store.load(other.base_url) == other
+
+
+@pytest.mark.parametrize("reported_lifetime", [0, 1, 36096])
+@pytest.mark.asyncio
+async def test_saved_token_validity_comes_from_api_not_reported_lifetime(
+    requests_mock, clock, monkeypatch, reported_lifetime
+):
+    device_response(requests_mock)
+    requests_mock.post(
+        ORIGIN + "/oauth2/device/token",
+        json={
+            "access_token": "saved",
+            "token_type": "Bearer",
+            "expires_in": reported_lifetime,
+        },
+    )
+    assert await auth.auth_command("login") == 0
+    tomorrow = time.time() + 86400
+    monkeypatch.setattr(auth.time, "time", lambda: tomorrow)
+    validate = AsyncMock(return_value=True)
+    monkeypatch.setattr(auth, "validate_login", validate)
+    task = auth.start_saved_login()
+    assert task is not None
+    await task
+    expected = ZooCredentials("saved", ORIGIN)
+    validate.assert_awaited_once_with(expected)
+    assert get_credentials() == expected
 
 
 def test_unavailable_keyring_has_actionable_safe_error(monkeypatch):
@@ -262,7 +285,7 @@ async def test_environment_and_explicit_credentials_bypass_keyring(monkeypatch):
 async def test_saved_login_survives_restart_but_revocation_never_starts_device_login(
     monkeypatch,
 ):
-    saved = auth.SavedLogin(ORIGIN, "saved", time.time() + 120)
+    saved = ZooCredentials("saved", ORIGIN)
     auth.LoginStore().save(saved)
     monkeypatch.setattr(
         auth, "validate_login", AsyncMock(side_effect=[True, True, False])
@@ -317,13 +340,13 @@ async def test_lifespan_stays_responsive_and_cancels_blocked_keyring(monkeypatch
 @pytest.mark.asyncio
 async def test_status_and_logout_never_print_tokens(monkeypatch, capsys):
     store = auth.LoginStore()
-    store.save(auth.SavedLogin(ORIGIN, "secret-token", time.time() + 120))
-    other = auth.SavedLogin("https://other.example", "other-secret", time.time() + 120)
+    store.save(ZooCredentials("secret-token", ORIGIN))
+    other = ZooCredentials("other-secret", "https://other.example")
     store.save(other)
     monkeypatch.setattr(auth, "validate_login", AsyncMock(return_value=True))
     assert await auth.auth_command("status") == 0
     assert await auth.auth_command("logout") == 0
     assert await auth.auth_command("status") == 1
-    assert store.load(other.origin) == other
+    assert store.load(other.base_url) == other
     output = capsys.readouterr()
     assert output.out == "" and "secret" not in output.err

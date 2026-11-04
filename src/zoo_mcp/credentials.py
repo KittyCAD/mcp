@@ -5,12 +5,8 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from kittycad.client import DEFAULT_BASE_URL
-
-if TYPE_CHECKING:
-    from zoo_mcp.auth import SavedLogin
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +34,7 @@ class ZooCredentials:
 # All entry points import this module at startup. An unconfigured local server
 # can still use tools that do not need Zoo credentials.
 _local_credentials = ZooCredentials.from_environment()
-_saved_login: "SavedLogin | None" = None
+_saved_login: ZooCredentials | None = None
 _login_message: str = (
     "No API token configured. Run zoo-mcp auth login or set ZOO_API_TOKEN."
 )
@@ -51,13 +47,8 @@ def get_credentials() -> ZooCredentials:
     """Return explicit call credentials or the local startup settings."""
     explicit = _credentials.get()
     credentials = explicit if explicit is not None else _local_credentials
-    if (
-        explicit is None
-        and not credentials.token
-        and _saved_login is not None
-        and _saved_login.valid()
-    ):
-        return ZooCredentials(_saved_login.token, _saved_login.origin)
+    if explicit is None and not credentials.token and _saved_login is not None:
+        return _saved_login
     if not credentials.token:
         raise ValueError(
             "Explicit ZooCredentials requires a token."

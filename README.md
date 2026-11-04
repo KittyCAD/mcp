@@ -57,6 +57,7 @@ Locker, or a supported Linux keyring. On headless systems without an available
 keyring, set `ZOO_API_TOKEN` instead. Status never displays tokens. Logout removes
 only the saved login for the current origin; restart running servers afterward.
 If your login expires or is revoked, run `auth login` again and restart the server.
+If the login command fails because of a network error, run it again to retry.
 Server startup never opens a browser. Device authorization and polling use
 [`requests-oauth2client`](https://github.com/guillp/requests_oauth2client).
 Device login requires the API's dedicated Zoo MCP device client registration.
