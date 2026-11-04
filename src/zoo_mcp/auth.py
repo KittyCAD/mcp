@@ -197,9 +197,8 @@ async def validate_login(credentials: ZooCredentials) -> bool:
             ) as client,
         ):
             user = await client.users.get_user_self()
-            return (
-                user is not None and user.block is None and not user.deletion_scheduled
-            )
+            # Leave billing and access restrictions to the API for each operation.
+            return user is not None and not user.deletion_scheduled
     except Exception as error:
         # SDK errors intentionally do not reach stderr: some contain request details.
         status = getattr(error, "status_code", None)

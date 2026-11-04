@@ -2,12 +2,23 @@ import asyncio
 
 import httpx
 import pytest
+from kittycad.models import BlockReason
 
-from zoo_mcp import auth
-from zoo_mcp.credentials import ZooCredentials
+from zoo_mcp import auth, credentials
+from zoo_mcp.credentials import ZooCredentials, get_credentials
 
 CREDENTIALS = ZooCredentials("secret-token", "https://api.example")
 USER_URL = CREDENTIALS.base_url + "/user"
+
+
+@pytest.fixture
+def user_response():
+    return {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "image": "https://api.example/avatar.png",
+    }
 
 
 @pytest.mark.asyncio
@@ -15,25 +26,48 @@ USER_URL = CREDENTIALS.base_url + "/user"
     "changes,valid",
     [
         ({}, True),
-        ({"block": "admin"}, False),
+        *[({"block": reason.value}, True) for reason in BlockReason],
         ({"deletion_scheduled": True}, False),
     ],
 )
-async def test_validate_login_checks_user_through_sdk(httpx_mock, changes, valid):
-    httpx_mock.add_response(
-        url=USER_URL,
-        json={
-            "id": "00000000-0000-4000-8000-000000000001",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "image": "https://api.example/avatar.png",
-        }
-        | changes,
-    )
+async def test_validate_login_checks_user_through_sdk(
+    httpx_mock, user_response, changes, valid
+):
+    httpx_mock.add_response(url=USER_URL, json=user_response | changes)
     assert await auth.validate_login(CREDENTIALS) is valid
     request = httpx_mock.get_request()
     assert request.method == "GET"
     assert request.headers["Authorization"] == "Bearer secret-token"
+
+
+@pytest.mark.parametrize("entrypoint", ["startup", "status"])
+def test_billing_block_does_not_disable_saved_login(
+    monkeypatch, httpx_mock, user_response, capsys, entrypoint
+):
+    for name in ("KITTYCAD_API_TOKEN", "ZOO_API_TOKEN", "ZOO_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ZOO_HOST", CREDENTIALS.base_url)
+    monkeypatch.setattr(
+        credentials, "_local_credentials", ZooCredentials("", CREDENTIALS.base_url)
+    )
+    monkeypatch.setattr(credentials, "_saved_login", None)
+    monkeypatch.setattr(credentials, "_login_message", "No API token configured")
+    monkeypatch.setattr(auth.LoginStore, "load", lambda self, origin: CREDENTIALS)
+    httpx_mock.add_response(
+        url=USER_URL, json=user_response | {"block": "payment_method_failed"}
+    )
+    if entrypoint == "startup":
+
+        async def start():
+            task = auth.start_saved_login()
+            assert task is not None
+            await task
+            assert get_credentials() == CREDENTIALS
+
+        asyncio.run(start())
+    else:
+        auth.auth_command("status")
+        assert "logged in" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
