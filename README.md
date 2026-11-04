@@ -81,6 +81,12 @@ session constructors and restores the previous configuration on exit. New
 calls can use refreshed credentials. Finish child tasks before leaving their
 credential context.
 
+To forward custom HTTP headers, pass `headers={"User-Agent": "MyApp/1.0",
+"X-Request-Source": "example"}` to `ZooCredentials`. These headers reach REST
+requests and modeling WebSocket handshakes, including KCL sessions. A supplied
+`User-Agent` replaces the default value. Tokens and headers are excluded from
+credential representations.
+
 Credential contexts configure downstream calls. Applications serving different
 owners must also isolate their process-wide modeling sessions and workspaces.
 

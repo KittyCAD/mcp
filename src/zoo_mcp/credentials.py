@@ -1,7 +1,7 @@
 """Explicit, context-local credentials for Zoo SDK and KCL calls."""
 
 import os
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -11,10 +11,11 @@ from kittycad.client import DEFAULT_BASE_URL
 
 @dataclass(frozen=True, slots=True)
 class ZooCredentials:
-    """Downstream API configuration; tokens are excluded from representations."""
+    """Downstream API configuration; tokens and headers are excluded from repr."""
 
     token: str = field(repr=False)
     base_url: str = DEFAULT_BASE_URL
+    headers: Mapping[str, str] | None = field(default=None, repr=False)
 
     @classmethod
     def from_environment(cls) -> "ZooCredentials":

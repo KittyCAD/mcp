@@ -158,7 +158,11 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
     snapshot_options = MagicMock(wraps=kcl.SnapshotOptions)
     monkeypatch.setattr(kcl, "SnapshotOptions", snapshot_options)
 
-    credentials = ZooCredentials("synthetic-session-token", "https://api.example")
+    credentials = ZooCredentials(
+        "synthetic-session-token",
+        "https://api.example",
+        headers={"X-Request-Source": "execution-preflight"},
+    )
     with use_credentials(credentials):
         result = await zoo_tools.zoo_execute_kcl(
             kcl_code="x = 1",
@@ -186,6 +190,7 @@ async def test_requested_outputs_reuse_one_real_execution_session(monkeypatch):
         video_res_height=1024,
         token=credentials.token,
         base_url=credentials.base_url,
+        headers=credentials.headers,
     )
     old_execute.assert_not_awaited()
     assert result.inspection.sketch_constraints_status == "succeeded"

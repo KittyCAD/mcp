@@ -192,7 +192,10 @@ async def _capture_rest_response(response: httpx.Response) -> None:
 def _new_zoo_client() -> AsyncKittyCAD:
     credentials = get_credentials()
     client = AsyncKittyCAD(
-        token=credentials.token, base_url=credentials.base_url, verify_ssl=ctx
+        token=credentials.token,
+        base_url=credentials.base_url,
+        headers=dict(credentials.headers or {}),
+        verify_ssl=ctx,
     )
     # SDK endpoint paths include their leading slash.
     client.base_url = client.base_url.rstrip("/")
@@ -663,6 +666,7 @@ async def _open_kcl_session(
                 video_res_height=video_res_height,
                 token=credentials.token,
                 base_url=credentials.base_url,
+                headers=credentials.headers,
             )
         else:
             assert kcl_path is not None
@@ -674,6 +678,7 @@ async def _open_kcl_session(
                 video_res_height=video_res_height,
                 token=credentials.token,
                 base_url=credentials.base_url,
+                headers=credentials.headers,
             )
         record_api_call_event(
             "kcl",
