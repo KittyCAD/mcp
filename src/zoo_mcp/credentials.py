@@ -35,6 +35,10 @@ class ZooCredentials:
 # All entry points import this module at startup. An unconfigured local server
 # can still use tools that do not need Zoo credentials.
 _local_credentials = ZooCredentials.from_environment()
+_saved_login: ZooCredentials | None = None
+_login_message: str = (
+    "No API token configured. Run zoo-mcp auth login or set ZOO_API_TOKEN."
+)
 _credentials: ContextVar[ZooCredentials | None] = ContextVar(
     "zoo_credentials", default=None
 )
@@ -42,11 +46,15 @@ _credentials: ContextVar[ZooCredentials | None] = ContextVar(
 
 def get_credentials() -> ZooCredentials:
     """Return explicit call credentials or the local startup settings."""
-    credentials = _credentials.get() or _local_credentials
+    explicit = _credentials.get()
+    credentials = explicit if explicit is not None else _local_credentials
+    if explicit is None and not credentials.token and _saved_login is not None:
+        return _saved_login
     if not credentials.token:
         raise ValueError(
-            "No API token configured. Use ZooCredentials or set "
-            "KITTYCAD_API_TOKEN or ZOO_API_TOKEN before starting the server."
+            "Explicit ZooCredentials requires a token."
+            if explicit is not None
+            else _login_message
         )
     return credentials
 

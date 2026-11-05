@@ -6,19 +6,19 @@
     "url": "https://github.com/KittyCAD/mcp",
     "source": "github"
   },
-  "version": "0.33.1",
+  "version": "0.34.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "zoo_mcp",
-      "version": "0.33.1",
+      "version": "0.34.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
-          "description": "Your Zoo API key to access the Zoo services. Get one from https://zoo.dev/account/developer",
-          "isRequired": true,
+          "description": "Optional Zoo API key. If unset, run zoo-mcp auth login before starting the server to save a login in your system credential store. Get an API key from https://zoo.dev/account/developer",
+          "isRequired": false,
           "format": "string",
           "isSecret": true,
           "name": "ZOO_TOKEN"
