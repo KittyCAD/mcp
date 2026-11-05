@@ -1,4 +1,4 @@
-"""Explicit, context-local credentials for Zoo SDK and KCL calls."""
+"""Explicit, context-local client configuration for Zoo SDK and KCL calls."""
 
 import os
 from collections.abc import Generator, Mapping
@@ -10,7 +10,7 @@ from kittycad.client import DEFAULT_BASE_URL
 
 
 @dataclass(frozen=True, slots=True)
-class ZooCredentials:
+class ZooClientConfig:
     """Downstream API configuration; tokens and headers are excluded from repr."""
 
     token: str = field(repr=False)
@@ -18,7 +18,7 @@ class ZooCredentials:
     headers: Mapping[str, str] | None = field(default=None, repr=False)
 
     @classmethod
-    def from_environment(cls) -> "ZooCredentials":
+    def from_environment(cls) -> "ZooClientConfig":
         """Capture local environment aliases and the KittyCAD SDK's default URL."""
         token = (
             os.getenv("KITTYCAD_API_TOKEN")
@@ -34,36 +34,36 @@ class ZooCredentials:
 
 # All entry points import this module at startup. An unconfigured local server
 # can still use tools that do not need Zoo credentials.
-_local_credentials = ZooCredentials.from_environment()
-_saved_login: ZooCredentials | None = None
+_local_config = ZooClientConfig.from_environment()
+_saved_login: ZooClientConfig | None = None
 _login_message: str = (
     "No API token configured. Run zoo-mcp auth login or set ZOO_API_TOKEN."
 )
-_credentials: ContextVar[ZooCredentials | None] = ContextVar(
-    "zoo_credentials", default=None
+_client_config: ContextVar[ZooClientConfig | None] = ContextVar(
+    "zoo_client_config", default=None
 )
 
 
-def get_credentials() -> ZooCredentials:
-    """Return explicit call credentials or the local startup settings."""
-    explicit = _credentials.get()
-    credentials = explicit if explicit is not None else _local_credentials
-    if explicit is None and not credentials.token and _saved_login is not None:
+def get_client_config() -> ZooClientConfig:
+    """Return explicit call configuration or the local startup settings."""
+    explicit = _client_config.get()
+    config = explicit if explicit is not None else _local_config
+    if explicit is None and not config.token and _saved_login is not None:
         return _saved_login
-    if not credentials.token:
+    if not config.token:
         raise ValueError(
-            "Explicit ZooCredentials requires a token."
+            "Explicit ZooClientConfig requires a token."
             if explicit is not None
             else _login_message
         )
-    return credentials
+    return config
 
 
 @contextmanager
-def use_credentials(credentials: ZooCredentials) -> Generator[None, None, None]:
-    """Scope credentials to this context and its child tasks without changing env."""
-    previous = _credentials.set(credentials)
+def use_client_config(config: ZooClientConfig) -> Generator[None, None, None]:
+    """Scope configuration to this context and its child tasks without changing env."""
+    previous = _client_config.set(config)
     try:
         yield
     finally:
-        _credentials.reset(previous)
+        _client_config.reset(previous)

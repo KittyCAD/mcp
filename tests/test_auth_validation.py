@@ -4,10 +4,10 @@ import httpx
 import pytest
 from kittycad.models import BlockReason
 
-from zoo_mcp import auth, credentials
-from zoo_mcp.credentials import ZooCredentials, get_credentials
+from zoo_mcp import auth, client_config
+from zoo_mcp.client_config import ZooClientConfig, get_client_config
 
-CREDENTIALS = ZooCredentials("secret-token", "https://api.example")
+CREDENTIALS = ZooClientConfig("secret-token", "https://api.example")
 USER_URL = CREDENTIALS.base_url + "/user"
 
 
@@ -40,6 +40,50 @@ async def test_validate_login_checks_user_through_sdk(
     assert request.headers["Authorization"] == "Bearer secret-token"
 
 
+@pytest.mark.asyncio
+async def test_validate_login_forwards_headers_without_leaking_between_configs(
+    httpx_mock, user_response
+):
+    httpx_mock.add_response(url=USER_URL, json=user_response, is_reusable=True)
+    configurations = [
+        ZooClientConfig(
+            "first-token",
+            CREDENTIALS.base_url,
+            headers={
+                "User-Agent": "ExampleClient/1.0",
+                "X-Request-Source": "first-source",
+            },
+        ),
+        ZooClientConfig(
+            "second-token",
+            CREDENTIALS.base_url,
+            headers={
+                "user-agent": "AnotherCaller/2.0",
+                "X-Request-Source": "second-source",
+            },
+        ),
+        ZooClientConfig("plain-token", CREDENTIALS.base_url),
+        ZooClientConfig("empty-headers-token", CREDENTIALS.base_url, headers={}),
+    ]
+    assert all(
+        await asyncio.gather(
+            *(auth.validate_login(config) for config in configurations)
+        )
+    )
+    requests = httpx_mock.get_requests()
+    assert len(requests) == len(configurations)
+    by_token = {request.headers["Authorization"]: request for request in requests}
+    for config in configurations:
+        headers = by_token[f"Bearer {config.token}"].headers
+        assert len(headers.get_list("User-Agent")) == 1
+        if config.headers:
+            for name, value in config.headers.items():
+                assert headers.get_list(name) == [value]
+        else:
+            assert headers["User-Agent"].startswith("python-httpx/")
+            assert "X-Request-Source" not in headers
+
+
 @pytest.mark.parametrize("entrypoint", ["startup", "status"])
 def test_billing_block_does_not_disable_saved_login(
     monkeypatch, httpx_mock, user_response, capsys, entrypoint
@@ -48,10 +92,10 @@ def test_billing_block_does_not_disable_saved_login(
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ZOO_HOST", CREDENTIALS.base_url)
     monkeypatch.setattr(
-        credentials, "_local_credentials", ZooCredentials("", CREDENTIALS.base_url)
+        client_config, "_local_config", ZooClientConfig("", CREDENTIALS.base_url)
     )
-    monkeypatch.setattr(credentials, "_saved_login", None)
-    monkeypatch.setattr(credentials, "_login_message", "No API token configured")
+    monkeypatch.setattr(client_config, "_saved_login", None)
+    monkeypatch.setattr(client_config, "_login_message", "No API token configured")
     monkeypatch.setattr(auth.LoginStore, "load", lambda self, origin: CREDENTIALS)
     httpx_mock.add_response(
         url=USER_URL, json=user_response | {"block": "payment_method_failed"}
@@ -62,7 +106,7 @@ def test_billing_block_does_not_disable_saved_login(
             task = auth.start_saved_login()
             assert task is not None
             await task
-            assert get_credentials() == CREDENTIALS
+            assert get_client_config() == CREDENTIALS
 
         asyncio.run(start())
     else:

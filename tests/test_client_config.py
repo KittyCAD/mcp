@@ -1,4 +1,4 @@
-"""Credentials stay in their call context and reach both downstream SDKs."""
+"""Client configuration stays in its call context and reaches both downstream SDKs."""
 
 import asyncio
 import os
@@ -11,14 +11,14 @@ import pytest
 from kittycad.client import DEFAULT_BASE_URL
 from websockets.exceptions import InvalidStatus
 
-from zoo_mcp import credentials, zoo_tools
-from zoo_mcp.credentials import ZooCredentials, get_credentials, use_credentials
+from zoo_mcp import client_config, zoo_tools
+from zoo_mcp.client_config import ZooClientConfig, get_client_config, use_client_config
 
 
 @pytest.fixture(autouse=True)
-def local_credentials(monkeypatch):
-    local = ZooCredentials("local-token", "https://local.example")
-    monkeypatch.setattr(credentials, "_local_credentials", local)
+def local_config(monkeypatch):
+    local = ZooClientConfig("local-token", "https://local.example")
+    monkeypatch.setattr(client_config, "_local_config", local)
     return local
 
 
@@ -38,37 +38,37 @@ def test_local_settings_are_captured_once(monkeypatch, token_variable, host_vari
     monkeypatch.setenv(token_variable, "startup-token")
     if host_variable:
         monkeypatch.setenv(host_variable, "https://startup.example")
-    captured = ZooCredentials.from_environment()
-    monkeypatch.setattr(credentials, "_local_credentials", captured)
+    captured = ZooClientConfig.from_environment()
+    monkeypatch.setattr(client_config, "_local_config", captured)
 
     monkeypatch.setenv(token_variable, "changed-token")
     monkeypatch.setenv("ZOO_HOST", "https://changed.example")
-    assert get_credentials() == ZooCredentials(
+    assert get_client_config() == ZooClientConfig(
         "startup-token",
         "https://startup.example" if host_variable else DEFAULT_BASE_URL,
     )
 
 
 def test_missing_startup_token_cannot_fall_back_to_later_environment(monkeypatch):
-    monkeypatch.setattr(credentials, "_local_credentials", ZooCredentials(""))
+    monkeypatch.setattr(client_config, "_local_config", ZooClientConfig(""))
     monkeypatch.setenv("ZOO_API_TOKEN", "later-token")
     with pytest.raises(ValueError, match="No API token configured"):
-        get_credentials()
+        get_client_config()
 
 
 @pytest.mark.asyncio
 async def test_scopes_isolate_concurrent_calls_and_restore_after_failure(
-    local_credentials,
+    local_config,
 ):
-    first = ZooCredentials(
+    first = ZooClientConfig(
         "first-token", "https://first.example", headers={"X-Caller": "first"}
     )
-    second = ZooCredentials(
+    second = ZooClientConfig(
         "second-token", "https://second.example", headers={"X-Caller": "second"}
     )
 
     async def observe(configuration):
-        with use_credentials(configuration):
+        with use_client_config(configuration):
             await asyncio.sleep(0)
             async with zoo_tools._new_zoo_client() as client:
                 assert (client.token, client.base_url) == (
@@ -81,19 +81,19 @@ async def test_scopes_isolate_concurrent_calls_and_restore_after_failure(
                 )
             with (
                 pytest.raises(RuntimeError, match="synthetic failure"),
-                use_credentials(local_credentials),
+                use_client_config(local_config),
             ):
                 raise RuntimeError("synthetic failure")
-            assert get_credentials() is configuration
-        assert get_credentials() is local_credentials
+            assert get_client_config() is configuration
+        assert get_client_config() is local_config
 
     await asyncio.gather(observe(first), observe(second))
-    assert get_credentials() is local_credentials
+    assert get_client_config() is local_config
     assert "first-token" not in repr(first)
 
 
-def test_credential_repr_omits_headers():
-    configuration = ZooCredentials(
+def test_config_repr_omits_headers():
+    configuration = ZooClientConfig(
         "private-token",
         headers={
             "User-Agent": "ExampleClient/1.0",
@@ -112,7 +112,7 @@ def test_credential_repr_omits_headers():
 @pytest.mark.asyncio
 async def test_sdk_clients_do_not_share_mutable_headers():
     headers = {"X-Caller": "original"}
-    with use_credentials(ZooCredentials("caller-token", headers=headers)):
+    with use_client_config(ZooClientConfig("caller-token", headers=headers)):
         async with zoo_tools._new_zoo_client() as first:
             first.headers["X-Caller"] = "changed"
             async with zoo_tools._new_zoo_client() as second:
@@ -122,11 +122,11 @@ async def test_sdk_clients_do_not_share_mutable_headers():
 
 @pytest.mark.asyncio
 async def test_rest_requests_use_context_headers_and_restore_defaults(
-    httpx_mock, local_credentials
+    httpx_mock, local_config
 ):
     httpx_mock.add_response(json={"items": [], "next_page": None}, is_reusable=True)
     configurations = [
-        ZooCredentials(
+        ZooClientConfig(
             "first-token",
             headers={
                 "User-Agent": "ExampleClient/1.0",
@@ -134,7 +134,7 @@ async def test_rest_requests_use_context_headers_and_restore_defaults(
                 "X-Caller": "first",
             },
         ),
-        ZooCredentials(
+        ZooClientConfig(
             "second-token",
             headers={
                 "user-agent": "AnotherCaller/2.0",
@@ -142,18 +142,18 @@ async def test_rest_requests_use_context_headers_and_restore_defaults(
                 "X-Caller": "second",
             },
         ),
-        ZooCredentials("plain-token"),
-        ZooCredentials("empty-headers-token", headers={}),
+        ZooClientConfig("plain-token"),
+        ZooClientConfig("empty-headers-token", headers={}),
     ]
 
     async def call(configuration):
-        with use_credentials(configuration):
+        with use_client_config(configuration):
             await asyncio.sleep(0)
             assert await zoo_tools.zoo_list_org_datasets() == []
 
     await asyncio.gather(*(call(configuration) for configuration in configurations))
     assert await zoo_tools.zoo_list_org_datasets() == []
-    configurations.append(local_credentials)
+    configurations.append(local_config)
     requests = httpx_mock.get_requests()
     assert len(requests) == len(configurations)
     by_token = {request.headers["Authorization"]: request for request in requests}
@@ -171,13 +171,13 @@ async def test_rest_requests_use_context_headers_and_restore_defaults(
 
 
 @pytest.mark.asyncio
-async def test_cancellation_resets_credentials(local_credentials):
+async def test_cancellation_resets_config(local_config):
     async def cancel_inside_scope():
         try:
-            with use_credentials(ZooCredentials("cancelled-token")):
+            with use_client_config(ZooClientConfig("cancelled-token")):
                 raise asyncio.CancelledError
         finally:
-            assert get_credentials() is local_credentials
+            assert get_client_config() is local_config
 
     with pytest.raises(asyncio.CancelledError):
         await cancel_inside_scope()
@@ -215,7 +215,7 @@ def modeling_api():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("from_file", [False, True])
-async def test_explicit_credentials_reach_native_kcl_without_environment_changes(
+async def test_explicit_config_reaches_native_kcl_without_environment_changes(
     monkeypatch, tmp_path, modeling_api, from_file
 ):
     monkeypatch.setenv("ZOO_API_TOKEN", "conflicting-environment-token")
@@ -227,7 +227,7 @@ async def test_explicit_credentials_reach_native_kcl_without_environment_changes
     path.write_text(code)
 
     configurations = [
-        ZooCredentials(
+        ZooClientConfig(
             "first-token",
             base_url,
             headers={
@@ -235,7 +235,7 @@ async def test_explicit_credentials_reach_native_kcl_without_environment_changes
                 "X-Request-Source": "first-source",
             },
         ),
-        ZooCredentials(
+        ZooClientConfig(
             "refreshed-token",
             base_url,
             headers={
@@ -243,11 +243,12 @@ async def test_explicit_credentials_reach_native_kcl_without_environment_changes
                 "X-Request-Source": "refreshed-source",
             },
         ),
-        ZooCredentials("plain-token", base_url),
+        ZooClientConfig("plain-token", base_url),
+        ZooClientConfig("empty-headers-token", base_url, headers={}),
     ]
 
     async def connect(configuration):
-        with use_credentials(configuration):
+        with use_client_config(configuration):
             async with asyncio.timeout(10):
                 with pytest.raises(Exception, match="401"):
                     await zoo_tools._open_kcl_session(
@@ -284,7 +285,9 @@ async def test_modeling_websocket_forwards_headers_once(modeling_api, user_agent
         "X-Request-Source": "modeling-source",
         "X-Caller": "modeling",
     }
-    with use_credentials(ZooCredentials("modeling-token", base_url, headers=headers)):
+    with use_client_config(
+        ZooClientConfig("modeling-token", base_url, headers=headers)
+    ):
         async with zoo_tools._new_zoo_client() as client:
             with pytest.raises(InvalidStatus, match="401"):
                 await zoo_tools._open_modeling_websocket(client)
@@ -300,7 +303,9 @@ async def test_modeling_websocket_forwards_headers_once(modeling_api, user_agent
 @pytest.mark.parametrize("headers", [None, {}])
 async def test_modeling_websocket_preserves_default_headers(modeling_api, headers):
     base_url, requests = modeling_api
-    with use_credentials(ZooCredentials("modeling-token", base_url, headers=headers)):
+    with use_client_config(
+        ZooClientConfig("modeling-token", base_url, headers=headers)
+    ):
         async with zoo_tools._new_zoo_client() as client:
             with pytest.raises(InvalidStatus, match="401"):
                 await zoo_tools._open_modeling_websocket(client)
@@ -322,13 +327,13 @@ async def test_refresh_reaches_kcl_on_the_next_call(monkeypatch, from_file):
         constructor,
     )
     configurations = [
-        ZooCredentials("first-token", headers={"X-Caller": "first"}),
-        ZooCredentials("refreshed-token", headers={"X-Caller": "refreshed"}),
-        ZooCredentials("plain-token"),
-        ZooCredentials("empty-headers-token", headers={}),
+        ZooClientConfig("first-token", headers={"X-Caller": "first"}),
+        ZooClientConfig("refreshed-token", headers={"X-Caller": "refreshed"}),
+        ZooClientConfig("plain-token"),
+        ZooClientConfig("empty-headers-token", headers={}),
     ]
     for configuration in configurations:
-        with use_credentials(configuration):
+        with use_client_config(configuration):
             await zoo_tools._open_kcl_session(
                 None if from_file else "value = 1", "main.kcl" if from_file else None
             )

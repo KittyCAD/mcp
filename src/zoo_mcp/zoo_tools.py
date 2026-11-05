@@ -155,7 +155,7 @@ from zoo_mcp.api_call_events import (
 from zoo_mcp.api_call_events import (
     capture_api_call_events as capture_api_call_events,  # noqa: PLC0414 -- public re-export
 )
-from zoo_mcp.credentials import get_credentials
+from zoo_mcp.client_config import get_client_config
 from zoo_mcp.sketch_execution import current_sketch_execution
 from zoo_mcp.utils.image_utils import create_image_collage, resize_image
 from zoo_mcp.utils.kcl_project import (
@@ -190,11 +190,11 @@ async def _capture_rest_response(response: httpx.Response) -> None:
 
 
 def _new_zoo_client() -> AsyncKittyCAD:
-    credentials = get_credentials()
+    config = get_client_config()
     client = AsyncKittyCAD(
-        token=credentials.token,
-        base_url=credentials.base_url,
-        headers=dict(credentials.headers or {}),
+        token=config.token,
+        base_url=config.base_url,
+        headers=dict(config.headers or {}),
         verify_ssl=ctx,
     )
     # SDK endpoint paths include their leading slash.
@@ -656,7 +656,7 @@ async def _open_kcl_session(
     """
     session: kcl.KclSession | None = None
     try:
-        credentials = get_credentials()
+        config = get_client_config()
         if kcl_code is not None:
             session = await kcl.new_kcl_session_code(
                 kcl_code,
@@ -664,9 +664,9 @@ async def _open_kcl_session(
                 highlight_edges=highlight_edges,
                 video_res_width=video_res_width,
                 video_res_height=video_res_height,
-                token=credentials.token,
-                base_url=credentials.base_url,
-                headers=credentials.headers,
+                token=config.token,
+                base_url=config.base_url,
+                headers=config.headers,
             )
         else:
             assert kcl_path is not None
@@ -676,9 +676,9 @@ async def _open_kcl_session(
                 highlight_edges=highlight_edges,
                 video_res_width=video_res_width,
                 video_res_height=video_res_height,
-                token=credentials.token,
-                base_url=credentials.base_url,
-                headers=credentials.headers,
+                token=config.token,
+                base_url=config.base_url,
+                headers=config.headers,
             )
         record_api_call_event(
             "kcl",
