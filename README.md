@@ -81,7 +81,7 @@ Connect an MCP client to `http://127.0.0.1:8000/mcp`. The SDK manages HTTP
 sessions and streaming responses. `--host` and `--port` configure the HTTP
 listener; their defaults are `127.0.0.1` and `8000`.
 
-### Supplying credentials from Python
+### Supplying client configuration from Python
 
 Local entry points capture credentials when Zoo MCP is imported at startup.
 Token precedence is `KITTYCAD_API_TOKEN`, `ZOO_API_TOKEN`, then the registry's
@@ -89,25 +89,31 @@ Token precedence is `KITTYCAD_API_TOKEN`, `ZOO_API_TOKEN`, then the registry's
 API origin precedence is `ZOO_HOST`, `KITTYCAD_HOST`, then `https://api.zoo.dev`.
 Saved logins never cross API origins.
 
-Applications can supply credentials explicitly without changing the process
+Applications can supply client configuration explicitly without changing the process
 environment or adding authentication arguments to MCP tools:
 
 ```python
-from zoo_mcp.credentials import ZooCredentials, use_credentials
+from zoo_mcp.client_config import ZooClientConfig, use_client_config
 from zoo_mcp.server import mcp
 
-with use_credentials(ZooCredentials(token=api_token, base_url=api_origin)):
+with use_client_config(ZooClientConfig(token=api_token, base_url=api_origin)):
     result = await mcp.call_tool("list_org_datasets", {})
 ```
 
-The context supplies the same token and origin to the KittyCAD SDK and KCL
+The context supplies the same token, origin, and headers to the KittyCAD SDK and KCL
 session constructors and restores the previous configuration on exit. New
-calls can use refreshed credentials. Finish child tasks before leaving their
-credential context.
-An explicit credential context also prevents the server lifespan from loading a
+calls can use refreshed configuration. Finish child tasks before leaving their
+configuration context.
+An explicit configuration context also prevents the server lifespan from loading a
 saved local login. Hosted workers and embeddings should always use this interface.
 
-Credential contexts configure downstream calls. Applications serving different
+To forward custom HTTP headers, pass `headers={"User-Agent": "MyApp/1.0",
+"X-Request-Source": "example"}` to `ZooClientConfig`. These headers reach REST
+requests and modeling WebSocket handshakes, including KCL sessions. A supplied
+`User-Agent` replaces the default value. Tokens and headers are excluded from
+configuration representations.
+
+Client configuration applies to downstream calls. Applications serving different
 owners must also isolate their process-wide modeling sessions and workspaces.
 
 ### Prebuilt binaries

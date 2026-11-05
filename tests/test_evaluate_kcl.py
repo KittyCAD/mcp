@@ -13,7 +13,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from PIL import Image
 
 from tests.test_execution_preflight import Outcome, Session
-from zoo_mcp.credentials import ZooCredentials, use_credentials
+from zoo_mcp.client_config import ZooClientConfig, use_client_config
 from zoo_mcp.server import mcp
 from zoo_mcp.zoo_tools import KclExportRequest, zoo_evaluate_kcl
 
@@ -66,7 +66,7 @@ def bindings(monkeypatch):
     monkeypatch.setattr(kcl, "mock_execute", mock)
     monkeypatch.setattr(kcl, "new_kcl_session_code", opened)
     monkeypatch.setattr(kcl, "new_kcl_session", opened)
-    with use_credentials(ZooCredentials("test-token")):
+    with use_client_config(ZooClientConfig("test-token")):
         yield SimpleNamespace(session=session, mock=mock, opened=opened)
 
 

@@ -9,8 +9,8 @@ import pytest
 import requests
 from keyring.errors import NoKeyringError
 
-from zoo_mcp import auth, credentials
-from zoo_mcp.credentials import ZooCredentials, get_credentials, use_credentials
+from zoo_mcp import auth, client_config
+from zoo_mcp.client_config import ZooClientConfig, get_client_config, use_client_config
 
 ORIGIN = "https://api.example"
 
@@ -27,9 +27,9 @@ def isolate(monkeypatch):
     monkeypatch.setattr(
         auth.keyring, "delete_password", lambda *key: passwords.pop(key)
     )
-    monkeypatch.setattr(credentials, "_local_credentials", ZooCredentials("", ORIGIN))
-    monkeypatch.setattr(credentials, "_saved_login", None)
-    monkeypatch.setattr(credentials, "_login_message", "No API token configured")
+    monkeypatch.setattr(client_config, "_local_config", ZooClientConfig("", ORIGIN))
+    monkeypatch.setattr(client_config, "_saved_login", None)
+    monkeypatch.setattr(client_config, "_login_message", "No API token configured")
     for name in ("KITTYCAD_API_TOKEN", "ZOO_API_TOKEN", "ZOO_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ZOO_HOST", ORIGIN)
@@ -183,7 +183,7 @@ def test_device_login_allows_same_origin_loopback_http(
         origin + "/oauth2/device/token",
         json={"access_token": "token", "token_type": "Bearer"},
     )
-    assert auth.device_login(origin, browser=open_browser) == ZooCredentials(
+    assert auth.device_login(origin, browser=open_browser) == ZooClientConfig(
         "token", origin
     )
     if open_browser:
@@ -246,9 +246,9 @@ def test_interrupt_and_network_failure_do_not_save_login(
 
 def test_keyring_stores_opaque_tokens_per_origin(isolate):
     store = auth.LoginStore()
-    saved = ZooCredentials("saved", ORIGIN)
+    saved = ZooClientConfig("saved", ORIGIN)
     store.save(saved)
-    other = ZooCredentials("other", "https://other.example")
+    other = ZooClientConfig("other", "https://other.example")
     store.save(other)
     assert isolate[(store.service, ORIGIN)] == "saved"
     assert store.load(ORIGIN + "/") == saved
@@ -282,9 +282,9 @@ async def test_saved_token_validity_comes_from_api_not_reported_lifetime(
     task = auth.start_saved_login()
     assert task is not None
     await task
-    expected = ZooCredentials("saved", ORIGIN)
+    expected = ZooClientConfig("saved", ORIGIN)
     validate.assert_awaited_once_with(expected)
-    assert get_credentials() == expected
+    assert get_client_config() == expected
 
 
 def test_unavailable_keyring_has_actionable_safe_error(monkeypatch):
@@ -311,14 +311,12 @@ def test_device_requests_use_system_certificate_store():
 async def test_environment_and_explicit_credentials_bypass_keyring(monkeypatch):
     load = Mock(side_effect=AssertionError("must not read local credentials"))
     monkeypatch.setattr(auth.keyring, "get_password", load)
-    monkeypatch.setattr(
-        credentials, "_local_credentials", ZooCredentials("env", ORIGIN)
-    )
+    monkeypatch.setattr(client_config, "_local_config", ZooClientConfig("env", ORIGIN))
     assert auth.start_saved_login() is None
-    monkeypatch.setattr(credentials, "_local_credentials", ZooCredentials("", ORIGIN))
-    with use_credentials(ZooCredentials("explicit", ORIGIN)):
+    monkeypatch.setattr(client_config, "_local_config", ZooClientConfig("", ORIGIN))
+    with use_client_config(ZooClientConfig("explicit", ORIGIN)):
         assert auth.start_saved_login() is None
-        assert get_credentials().token == "explicit"
+        assert get_client_config().token == "explicit"
     load.assert_not_called()
 
 
@@ -326,7 +324,7 @@ async def test_environment_and_explicit_credentials_bypass_keyring(monkeypatch):
 async def test_saved_login_survives_restart_but_revocation_never_starts_device_login(
     monkeypatch,
 ):
-    saved = ZooCredentials("saved", ORIGIN)
+    saved = ZooClientConfig("saved", ORIGIN)
     auth.LoginStore().save(saved)
     monkeypatch.setattr(
         auth, "validate_login", AsyncMock(side_effect=[True, True, False])
@@ -338,10 +336,10 @@ async def test_saved_login_survives_restart_but_revocation_never_starts_device_l
         assert task is not None
         await task
         if valid:
-            assert get_credentials().token == "saved"
+            assert get_client_config().token == "saved"
         else:
             with pytest.raises(ValueError, match="auth login"):
-                get_credentials()
+                get_client_config()
     device.assert_not_called()
 
 
@@ -352,7 +350,7 @@ async def test_startup_without_saved_login_never_opens_browser(browser):
     await task
     browser.assert_not_called()
     with pytest.raises(ValueError, match="auth login"):
-        get_credentials()
+        get_client_config()
 
 
 def test_lifespan_exits_process_with_keyring_still_blocked():
@@ -366,8 +364,8 @@ import threading
 from unittest.mock import AsyncMock
 
 from mcp.types import CallToolResult
-from zoo_mcp import auth, credentials, logger, server
-from zoo_mcp.credentials import ZooCredentials
+from zoo_mcp import auth, client_config, logger, server
+from zoo_mcp.client_config import ZooClientConfig
 
 started = threading.Event()
 
@@ -377,7 +375,7 @@ def load(_service, _origin):
 
 auth.keyring.get_password = load
 logger.setLevel("WARNING")
-credentials._local_credentials = ZooCredentials("", "https://api.example")
+client_config._local_config = ZooClientConfig("", "https://api.example")
 server._init_kcl_indexes = AsyncMock()
 server.zoo_stop_all_modeling_sessions = AsyncMock()
 
@@ -388,7 +386,7 @@ async def main():
         result = await server.mcp.call_tool("format_kcl", {"kcl_code": "x=1"})
         assert isinstance(result, CallToolResult)
         assert not result.is_error
-    assert credentials._saved_login is None
+    assert client_config._saved_login is None
 
 asyncio.run(main())
 print("Shutdown complete", flush=True)
@@ -409,7 +407,7 @@ print("Shutdown complete", flush=True)
 async def test_saved_login_reports_pending_until_validation_finishes(
     monkeypatch, valid
 ):
-    saved = ZooCredentials("saved", ORIGIN)
+    saved = ZooClientConfig("saved", ORIGIN)
     auth.LoginStore().save(saved)
     started, finish = asyncio.Event(), asyncio.Event()
 
@@ -424,18 +422,18 @@ async def test_saved_login_reports_pending_until_validation_finishes(
     assert task is not None
     try:
         with pytest.raises(ValueError, match="Checking saved Zoo login; retry shortly"):
-            get_credentials()
+            get_client_config()
         async with asyncio.timeout(2):
             await started.wait()
         with pytest.raises(ValueError, match="Checking saved Zoo login; retry shortly"):
-            get_credentials()
+            get_client_config()
         finish.set()
         await task
         if valid:
-            assert get_credentials() == saved
+            assert get_client_config() == saved
         else:
             with pytest.raises(ValueError, match="Run zoo-mcp auth login"):
-                get_credentials()
+                get_client_config()
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -443,8 +441,8 @@ async def test_saved_login_reports_pending_until_validation_finishes(
 
 def test_status_and_logout_never_print_tokens(monkeypatch, capsys):
     store = auth.LoginStore()
-    store.save(ZooCredentials("secret-token", ORIGIN))
-    other = ZooCredentials("other-secret", "https://other.example")
+    store.save(ZooClientConfig("secret-token", ORIGIN))
+    other = ZooClientConfig("other-secret", "https://other.example")
     store.save(other)
     monkeypatch.setattr(auth, "validate_login", AsyncMock(return_value=True))
     auth.auth_command("status")

@@ -1,4 +1,4 @@
-"""Local device login. Hosted callers supply ZooCredentials explicitly."""
+"""Local device login. Hosted callers supply ZooClientConfig explicitly."""
 
 import asyncio
 import sys
@@ -24,9 +24,8 @@ from requests_oauth2client import (
 )
 from requests_oauth2client.utils import validate_endpoint_uri
 
-from zoo_mcp import credentials as credentials_module
-from zoo_mcp import ctx, logger
-from zoo_mcp.credentials import ZooCredentials
+from zoo_mcp import client_config, ctx, logger
+from zoo_mcp.client_config import ZooClientConfig
 
 # Dedicated first-party public device client, registered by the API seed migration.
 MCP_CLIENT_ID = "c1bc3f76-8578-4ff1-9f64-0e909c164670"
@@ -69,17 +68,17 @@ class LoginStore:
 
     service = "zoo-mcp"
 
-    def load(self, origin: str) -> ZooCredentials | None:
+    def load(self, origin: str) -> ZooClientConfig | None:
         origin = api_origin(origin)
         try:
             token = keyring.get_password(self.service, origin)
-            return ZooCredentials(token, origin) if token else None
+            return ZooClientConfig(token, origin) if token else None
         except KeyringError:
             raise LoginError(
                 "Could not access the system credential store. Unlock it or set ZOO_API_TOKEN."
             ) from None
 
-    def save(self, login: ZooCredentials) -> None:
+    def save(self, login: ZooClientConfig) -> None:
         try:
             keyring.set_password(self.service, api_origin(login.base_url), login.token)
         except KeyringError:
@@ -107,7 +106,7 @@ class _SystemTrustAdapter(HTTPAdapter):
         return host, settings
 
 
-def device_login(origin: str, *, browser: bool = True) -> ZooCredentials:
+def device_login(origin: str, *, browser: bool = True) -> ZooClientConfig:
     """Run interactive login in the CLI; OAuth polling belongs to the library."""
     origin = api_origin(origin)
     request_options = {"timeout": 15, "allow_redirects": False}
@@ -162,7 +161,7 @@ def device_login(origin: str, *, browser: bool = True) -> ZooCredentials:
                         or not token.access_token
                     ):
                         raise LoginError("Zoo returned an invalid device token.")
-                    return ZooCredentials(token.access_token, origin)
+                    return ZooClientConfig(token.access_token, origin)
             raise LoginError("Zoo device login expired. Run zoo-mcp auth login again.")
     except AccessDenied:
         raise LoginError(
@@ -186,13 +185,14 @@ def device_login(origin: str, *, browser: bool = True) -> ZooCredentials:
         ) from None
 
 
-async def validate_login(credentials: ZooCredentials) -> bool:
+async def validate_login(config: ZooClientConfig) -> bool:
     try:
         async with (
             asyncio.timeout(15),
             AsyncKittyCAD(
-                token=credentials.token,
-                base_url=api_origin(credentials.base_url),
+                token=config.token,
+                base_url=api_origin(config.base_url),
+                headers=dict(config.headers or {}),
                 verify_ssl=ctx,
             ) as client,
         ):
@@ -209,9 +209,9 @@ async def validate_login(credentials: ZooCredentials) -> bool:
         ) from None
 
 
-async def _read_saved_login(origin: str) -> ZooCredentials | None:
+async def _read_saved_login(origin: str) -> ZooClientConfig | None:
     """A keyring unlock prompt must not keep the process alive at shutdown."""
-    result: Future[ZooCredentials | None] = Future()
+    result: Future[ZooClientConfig | None] = Future()
 
     def read() -> None:
         if not result.set_running_or_notify_cancel():
@@ -228,31 +228,31 @@ async def _read_saved_login(origin: str) -> ZooCredentials | None:
 async def _load_saved_login() -> None:
     message = "Run zoo-mcp auth login and restart the server, or set ZOO_API_TOKEN."
     try:
-        origin = api_origin(credentials_module._local_credentials.base_url)
+        origin = api_origin(client_config._local_config.base_url)
         login = await _read_saved_login(origin)
         if login and await validate_login(login):
-            credentials_module._saved_login = login
+            client_config._saved_login = login
     except (LoginError, OSError):
         message = "Zoo login unavailable. Run zoo-mcp auth login and restart the server, or set ZOO_API_TOKEN."
         logger.warning("%s", message)
     finally:
-        credentials_module._login_message = message
+        client_config._login_message = message
 
 
 def start_saved_login() -> asyncio.Task[None] | None:
     if (
-        credentials_module._credentials.get() is not None
-        or credentials_module._local_credentials.token
+        client_config._client_config.get() is not None
+        or client_config._local_config.token
     ):
         return None
-    credentials_module._saved_login = None
-    credentials_module._login_message = "Checking saved Zoo login; retry shortly."
+    client_config._saved_login = None
+    client_config._login_message = "Checking saved Zoo login; retry shortly."
     return asyncio.create_task(_load_saved_login(), name="zoo-saved-login")
 
 
 def auth_command(command: str, *, browser: bool = True) -> None:
     """Keep synchronous device polling outside asyncio's SIGINT handler."""
-    config = ZooCredentials.from_environment()
+    config = ZooClientConfig.from_environment()
     origin = api_origin(config.base_url)
     store = LoginStore()
     if command == "logout":

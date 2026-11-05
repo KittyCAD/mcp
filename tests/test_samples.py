@@ -13,7 +13,7 @@ from mcp.types import CallToolResult, TextContent
 from pytest_httpx import HTTPXMock
 
 from zoo_mcp import kcl_samples, server
-from zoo_mcp.credentials import ZooCredentials, use_credentials
+from zoo_mcp.client_config import ZooClientConfig, use_client_config
 from zoo_mcp.kcl_docs import KCLDocs
 from zoo_mcp.kcl_samples import KCLSamples, SampleMetadata
 
@@ -88,8 +88,8 @@ async def test_index_follows_all_pages_without_credentials(
         json={"items": [_project(_OTHER_ID, "Axial Fan")], "next_page": None},
     )
 
-    with use_credentials(
-        ZooCredentials(token="caller-token", base_url="https://private.example")
+    with use_client_config(
+        ZooClientConfig(token="caller-token", base_url="https://private.example")
     ):
         await KCLSamples.initialize()
 
@@ -329,8 +329,8 @@ async def test_get_sample_downloads_and_caches_kcl_files(
     )
     assert kcl_samples.list_available_samples()[0]["multipleFiles"] is False
 
-    with use_credentials(
-        ZooCredentials(token="caller-token", base_url="https://private.example")
+    with use_client_config(
+        ZooClientConfig(token="caller-token", base_url="https://private.example")
     ):
         result = await kcl_samples.get_sample_content(_PROJECT_ID)
     assert result is not None
