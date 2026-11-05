@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import asdict
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,7 +9,16 @@ import kcl
 import pytest
 from kittycad import AsyncKittyCAD
 from kittycad.exceptions import KittyCADServerError
-from kittycad.models import ApiCallStatus, FileVolume
+from kittycad.models import (
+    ApiCallStatus,
+    FileVolume,
+    OrgDataset,
+    OrgDatasetResultsPage,
+    OrgDatasetStatus,
+    StorageProvider,
+    Uuid,
+)
+from pydantic import ValidationError
 
 from zoo_mcp import ZooMCPException, zoo_tools
 from zoo_mcp.api_call_events import (
@@ -16,6 +26,7 @@ from zoo_mcp.api_call_events import (
     capture_api_call_events,
     record_api_call_event,
 )
+from zoo_mcp.client_config import ZooClientConfig, use_client_config
 
 
 @pytest.mark.asyncio
@@ -324,31 +335,110 @@ async def test_missing_backend_ids_are_valid_and_emit_no_observation(monkeypatch
 def client(monkeypatch):
     client = AsyncKittyCAD(token="private-token")
     monkeypatch.setattr(zoo_tools, "AsyncKittyCAD", lambda **kwargs: client)
-    return client
+    with use_client_config(ZooClientConfig(token="private-token")):
+        yield client
+
+
+@pytest.fixture
+def org_dataset() -> OrgDataset:
+    return OrgDataset(
+        access_role_arn="arn:aws:iam::000000000000:role/dataset",
+        created_at=datetime(2026, 11, 5, tzinfo=UTC),
+        description="A paused dataset",
+        id=Uuid("11111111-1111-4111-8111-111111111111"),
+        lookup_enabled=True,
+        name="alpha",
+        org_id=Uuid("22222222-2222-4222-8222-222222222222"),
+        require_raw_kcl_similarity_score_for_success=False,
+        source_uri="s3://fixture-bucket/dataset",
+        status=OrgDatasetStatus.PAUSED,
+        storage_provider=StorageProvider.S3,
+        updated_at=datetime(2026, 11, 5, tzinfo=UTC),
+    )
 
 
 @pytest.mark.asyncio
-async def test_sdk_failure_raw_fallback_and_pagination_capture_each_response(
-    client, httpx_mock
+async def test_org_dataset_sdk_pagination_captures_each_response(
+    client, httpx_mock, org_dataset
 ):
-    first = {
-        "items": [
-            {"id": "dataset-1", "name": "dataset", "status": "new-backend-status"}
-        ],
-        "next_page": "private-page-token",
-    }
-    for api_id, payload in [
-        ("sdk-page", first),
-        ("raw-page-1", first),
-        ("raw-page-2", {"items": [], "next_page": None}),
+    second = org_dataset.model_copy(
+        update={
+            "id": Uuid("33333333-3333-4333-8333-333333333333"),
+            "name": "beta",
+            "description": None,
+        }
+    )
+    for api_id, dataset, token in [
+        ("sdk-page-1", org_dataset, "private-page-token"),
+        ("sdk-page-2", second, None),
     ]:
-        httpx_mock.add_response(headers={"X-Api-Call-Id": api_id}, json=payload)
+        page = OrgDatasetResultsPage(items=[dataset], next_page=token)
+        httpx_mock.add_response(
+            headers={"X-Api-Call-Id": api_id}, json=page.model_dump(mode="json")
+        )
     with capture_api_call_events() as events:
         result = await zoo_tools.zoo_list_org_datasets()
-    assert result == [{"id": "dataset-1", "name": "dataset", "description": None}]
-    assert [e.api_call_id for e in events] == ["sdk-page", "raw-page-1", "raw-page-2"]
+    assert result == [
+        {"id": str(org_dataset.id), "name": "alpha", "description": "A paused dataset"},
+        {"id": str(second.id), "name": "beta", "description": None},
+    ]
+    assert [e.api_call_id for e in events] == ["sdk-page-1", "sdk-page-2"]
     assert "private-page-token" not in str([asdict(e) for e in events])
-    assert len(httpx_mock.get_requests()) == 3
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    assert dict(requests[0].url.params) == {"lookup_enabled": "true"}
+    assert dict(requests[1].url.params) == {
+        "lookup_enabled": "true",
+        "page_token": "private-page-token",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "error_type"),
+    [
+        ("http", KittyCADServerError),
+        ("client", ZooMCPException),
+        ("parse", ValueError),
+        ("validation", ValidationError),
+        ("network", httpx.ConnectError),
+        ("cancel", asyncio.CancelledError),
+    ],
+)
+async def test_org_dataset_sdk_later_page_failure_returns_no_partial_result(
+    client, httpx_mock, org_dataset, failure, error_type
+):
+    first = OrgDatasetResultsPage(items=[org_dataset], next_page="next")
+    httpx_mock.add_response(
+        headers={"X-Api-Call-Id": "first-page"}, json=first.model_dump(mode="json")
+    )
+    if failure == "network":
+        httpx_mock.add_exception(httpx.ConnectError("unavailable"))
+    elif failure == "cancel":
+
+        async def cancel(request: httpx.Request) -> httpx.Response:
+            raise asyncio.CancelledError
+
+        httpx_mock.add_callback(cancel)
+    else:
+        httpx_mock.add_response(
+            status_code=503
+            if failure == "http"
+            else 403
+            if failure == "client"
+            else 200,
+            headers={"X-Api-Call-Id": "failed-page"},
+            text="invalid JSON" if failure == "parse" else None,
+            json=None if failure == "parse" else {"items": [{}], "next_page": None},
+        )
+    with capture_api_call_events() as events, pytest.raises(error_type):
+        await zoo_tools.zoo_list_org_datasets()
+    assert len(httpx_mock.get_requests()) == 2
+    assert [e.api_call_id for e in events] == (
+        ["first-page"]
+        if failure in {"network", "cancel"}
+        else ["first-page", "failed-page"]
+    )
 
 
 @pytest.mark.asyncio
