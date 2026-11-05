@@ -103,6 +103,7 @@ jobs:
             --copy-metadata zoo_mcp \
             --collect-all mcp --collect-all kcl --collect-all kittycad \
             --collect-all trimesh --collect-all truststore \
+            --collect-all keyring \
             pyinstaller_entry.py
 
       - name: Rename binary
