@@ -3341,14 +3341,7 @@ def _start_idle_modeling_reader(session: _ModelingSession) -> None:
 
 
 async def _read_idle_modeling_frames(session: _ModelingSession) -> None:
-    """Drain unsolicited frames between commands, keeping pong processing live.
-
-    The WebSocket's bounded receive buffer also controls socket reads. Leaving
-    status frames unread fills it and prevents keepalive pongs from arriving.
-    There are no outstanding commands while this reader owns the socket; the
-    next command cancels it before receiving its own responses. Canceling recv
-    preserves any frame it hasn't returned, including fragmented messages.
-    """
+    """Drain unsolicited frames between commands, keeping pong processing live."""
     try:
         while _modeling_session is session:
             # A burst of buffered status frames must leave commands and
