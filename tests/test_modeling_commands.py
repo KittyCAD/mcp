@@ -59,6 +59,7 @@ from kittycad.models.ok_web_socket_response_data import (
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from pydantic import ValidationError
+from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosedError
 
 from zoo_mcp import ZooMCPException, zoo_tools
@@ -512,7 +513,11 @@ async def test_session_is_evicted_when_its_websocket_dies(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    monkeypatch.setattr(zoo_tools, "_open_modeling_websocket", AsyncMock())
+    websocket = AsyncMock()
+    websocket.transport = MagicMock()
+    monkeypatch.setattr(
+        zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
+    )
 
     session_id = await zoo_tools.zoo_start_modeling_session()
     artifact_graph_path = tmp_path / "artifact-graph.json"
@@ -556,6 +561,105 @@ async def test_get_modeling_sessions(monkeypatch: pytest.MonkeyPatch):
 
     await zoo_tools.zoo_stop_modeling_session(session_id)
     assert zoo_tools.zoo_get_modeling_sessions() == []
+
+
+@pytest.mark.asyncio
+async def test_idle_status_bursts_do_not_block_pongs_or_later_commands(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Exercise real receive-buffer flow control, not a mocked recv loop."""
+    publish = asyncio.Event()
+    published = asyncio.Event()
+    expected = ResponseEntityGetIndex(data=EntityGetIndex(entity_index=4))
+
+    async def engine(socket):
+        await publish.wait()
+        for _ in range(64):
+            await socket.send(_session_frame())
+        published.set()
+        request = json.loads(await socket.recv())
+        await socket.send(_ok_frame(request["cmd_id"], expected))
+        await socket.wait_closed()
+
+    async with serve(engine, "127.0.0.1", 0, ping_interval=None) as listener:
+        port = listener.sockets[0].getsockname()[1]
+        client = SimpleNamespace(
+            base_url=f"http://127.0.0.1:{port}",
+            get_headers=dict,
+            aclose=AsyncMock(),
+        )
+        monkeypatch.setattr(zoo_tools, "_new_zoo_client", lambda: client)
+        session_id = await zoo_tools.zoo_start_modeling_session()
+        session = zoo_tools._modeling_session
+        assert isinstance(session, zoo_tools._ModelingSession)
+        socket = session.websocket
+        try:
+            publish.set()
+            await asyncio.wait_for(published.wait(), timeout=2)
+            # Without an idle reader, more than 16 status frames pause socket
+            # reads, leaving this pong behind the unread application messages.
+            pong = await socket.ping()
+            await asyncio.wait_for(pong, timeout=2)
+            assert session.api_call_id == "api-call-id"
+
+            result = await asyncio.wait_for(
+                zoo_tools.zoo_execute_modeling_command(
+                    ModelingCmd(OptionEntityGetIndex(entity_id="entity-id")),
+                    ResponseEntityGetIndex,
+                    "entity index",
+                    session_id,
+                ),
+                timeout=2,
+            )
+            assert result == expected
+            await asyncio.wait_for(
+                zoo_tools.zoo_stop_modeling_session(session_id), timeout=2
+            )
+            assert session.idle_reader is None
+            client.aclose.assert_awaited_once_with()
+        finally:
+            # Keep a regression failure from spending the real 120s close
+            # timeout waiting for a close frame behind the full receive buffer.
+            socket.transport.abort()
+            await zoo_tools.zoo_stop_all_modeling_sessions()
+
+
+@pytest.mark.asyncio
+async def test_idle_disconnect_releases_session_and_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    disconnect = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def engine(socket):
+        await disconnect.wait()
+        await socket.close(code=1011, reason="engine disconnected")
+
+    async with serve(engine, "127.0.0.1", 0, ping_interval=None) as listener:
+        port = listener.sockets[0].getsockname()[1]
+        client = SimpleNamespace(
+            base_url=f"http://127.0.0.1:{port}",
+            get_headers=dict,
+            aclose=AsyncMock(side_effect=cleaned.set),
+        )
+        monkeypatch.setattr(zoo_tools, "_new_zoo_client", lambda: client)
+        session_id = await zoo_tools.zoo_start_modeling_session()
+        session = zoo_tools._modeling_session
+        assert isinstance(session, zoo_tools._ModelingSession)
+        artifact = tmp_path / "artifact.json"
+        artifact.write_text("{}")
+        session.artifact_graph_paths.add(artifact)
+
+        disconnect.set()
+        await asyncio.wait_for(cleaned.wait(), timeout=2)
+
+        assert zoo_tools.zoo_get_modeling_sessions() == []
+        assert not artifact.exists()
+        assert session.idle_reader is None
+        client.aclose.assert_awaited_once_with()
+        with pytest.raises(ZooMCPException, match="Unknown modeling session"):
+            async with zoo_tools._modeling_websocket(session_id):
+                pass
 
 
 @pytest.mark.asyncio
@@ -1284,6 +1388,7 @@ async def test_connection_close_mid_command_reports_a_dead_session(
     monkeypatch: pytest.MonkeyPatch,
 ):
     websocket = AsyncMock()
+    websocket.transport = MagicMock()
     websocket.recv.side_effect = ConnectionClosedError(None, None)
     monkeypatch.setattr(
         zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
@@ -1469,16 +1574,13 @@ async def test_session_metadata_is_captured_in_both_receive_paths(monkeypatch, p
             "x-api-call-id": "other-http-header",
         }
     )
-    saw_metadata = False
+    responses: asyncio.Queue[str] = asyncio.Queue()
 
-    async def recv():
-        nonlocal saw_metadata
-        if not saw_metadata:
-            saw_metadata = True
-            return _session_frame()
-        request = json.loads(websocket.send.call_args.args[0])
+    async def send(payload: str):
+        request = json.loads(payload)
+        await responses.put(_session_frame())
         if project:
-            return json.dumps(
+            response = json.dumps(
                 {
                     "success": True,
                     "request_id": request["request_id"],
@@ -1488,12 +1590,15 @@ async def test_session_metadata_is_captured_in_both_receive_paths(monkeypatch, p
                     },
                 }
             )
-        return _ok_frame(
-            request["cmd_id"],
-            ResponseEntityGetIndex(data=EntityGetIndex(entity_index=4)),
-        )
+        else:
+            response = _ok_frame(
+                request["cmd_id"],
+                ResponseEntityGetIndex(data=EntityGetIndex(entity_index=4)),
+            )
+        await responses.put(response)
 
-    websocket.recv.side_effect = recv
+    websocket.send.side_effect = send
+    websocket.recv.side_effect = responses.get
     monkeypatch.setattr(
         zoo_tools, "_open_modeling_websocket", AsyncMock(return_value=websocket)
     )
@@ -1534,8 +1639,11 @@ async def test_session_failure_retains_handshake_id_before_eviction(
     )
     websocket.transport = MagicMock()
     ready = asyncio.Event()
+    sent = asyncio.Event()
+    websocket.send.side_effect = lambda _: sent.set()
 
     async def recv():
+        await sent.wait()
         ready.set()
         if cancel:
             await asyncio.Event().wait()

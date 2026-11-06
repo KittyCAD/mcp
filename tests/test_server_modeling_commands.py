@@ -361,6 +361,39 @@ async def test_modeling_tool_returns_error(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "implementation", "arguments"),
+    [
+        ("start_modeling_session", "zoo_start_modeling_session", {}),
+        (
+            "stop_modeling_session",
+            "zoo_stop_modeling_session",
+            {"session_id": "session-id"},
+        ),
+        ("snapshot", "zoo_snapshot", {"session_id": "session-id"}),
+        (
+            "entity_get_index",
+            "zoo_execute_modeling_command",
+            {"entity_id": "entity-id", "session_id": "session-id"},
+        ),
+    ],
+)
+async def test_expected_modeling_errors_retain_recovery_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    implementation: str,
+    arguments: dict[str, str],
+):
+    error = server.ZooMCPException(
+        "Modeling session is no longer connected; start a new session"
+    )
+    monkeypatch.setattr(server, implementation, AsyncMock(side_effect=error))
+
+    with pytest.raises(ToolError, match="no longer connected; start a new session"):
+        await mcp.call_tool(tool_name, arguments=arguments)
+
+
+@pytest.mark.asyncio
 async def test_start_and_stop_modeling_session_tools(
     monkeypatch: pytest.MonkeyPatch,
 ):
