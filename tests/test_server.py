@@ -20,7 +20,6 @@ from kittycad.models import (
     FaceGetGradient,
     FaceGetPosition,
     FileVolume,
-    OrgDataset,
     Point3d,
 )
 from kittycad.models.async_api_call_output import OptionFileMass, OptionFileVolume
@@ -2400,55 +2399,6 @@ async def test_list_org_datasets_success(
 
 
 @pytest.mark.asyncio
-async def test_list_org_datasets_falls_back_for_unknown_status(
-    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
-):
-    with pytest.raises(ValueError) as exc_info:
-        OrgDataset.model_validate({"status": "paused"})
-
-    monkeypatch.setattr(
-        async_kittycad_client.orgs,
-        "list_org_datasets",
-        MagicMock(return_value=_async_error(exc_info.value)),
-    )
-    raw_response = SimpleNamespace(
-        is_success=True,
-        json=MagicMock(
-            return_value={
-                "items": [
-                    {
-                        "id": "uuid-paused",
-                        "name": "paused dataset",
-                        "description": "temporarily paused",
-                        "status": "paused",
-                    }
-                ],
-                "next_page": None,
-            }
-        ),
-    )
-    http_client = MagicMock()
-    http_client.get = AsyncMock(return_value=raw_response)
-    monkeypatch.setattr(
-        async_kittycad_client,
-        "get_http_client",
-        MagicMock(return_value=http_client),
-    )
-
-    response = await mcp.call_tool("list_org_datasets", arguments={})
-
-    assert _meta_result(response) == [
-        {
-            "id": "uuid-paused",
-            "name": "paused dataset",
-            "description": "temporarily paused",
-        }
-    ]
-    # The raw fallback has to filter on lookup too, not just the SDK path.
-    assert http_client.get.call_args.kwargs["params"] == {"lookup_enabled": "true"}
-
-
-@pytest.mark.asyncio
 async def test_list_org_datasets_empty_when_404(
     monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
 ):
@@ -2465,37 +2415,6 @@ async def test_list_org_datasets_empty_when_404(
     response = await mcp.call_tool("list_org_datasets", arguments={})
     result = _meta_result(response)
     assert result == []
-
-
-@pytest.mark.asyncio
-async def test_list_org_datasets_empty_when_fallback_hits_404(
-    monkeypatch: pytest.MonkeyPatch, async_kittycad_client: AsyncKittyCAD
-):
-    """Schema drift plus a 404 must still be empty, not an uncaught client error."""
-    with pytest.raises(ValueError) as exc_info:
-        OrgDataset.model_validate({"status": "paused"})
-
-    monkeypatch.setattr(
-        async_kittycad_client.orgs,
-        "list_org_datasets",
-        MagicMock(return_value=_async_error(exc_info.value)),
-    )
-    http_client = MagicMock()
-    http_client.get = AsyncMock(return_value=SimpleNamespace(is_success=False))
-    monkeypatch.setattr(
-        async_kittycad_client,
-        "get_http_client",
-        MagicMock(return_value=http_client),
-    )
-    monkeypatch.setattr(
-        "kittycad.response_helpers.raise_for_status",
-        MagicMock(
-            side_effect=KittyCADClientError(message="No org found", status_code=404)
-        ),
-    )
-
-    response = await mcp.call_tool("list_org_datasets", arguments={})
-    assert _meta_result(response) == []
 
 
 @pytest.mark.asyncio

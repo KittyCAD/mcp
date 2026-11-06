@@ -4001,68 +4001,6 @@ async def zoo_snapshot(
     )
 
 
-async def _list_org_datasets_raw(
-    client: AsyncKittyCAD,
-    lookup_enabled: bool | None,
-) -> list[dict[str, str | None]]:
-    """List datasets without validating fields unrelated to this tool's output."""
-    http_client = client.get_http_client()
-    url = f"{client.base_url}/org/datasets"
-    page_token: str | None = None
-    seen_page_tokens: set[str] = set()
-    datasets: list[dict[str, str | None]] = []
-
-    while True:
-        # A page token carries the filter forward, so only the first request has
-        # to spell it out; sending both is harmless.
-        params: dict[str, str] = {}
-        if lookup_enabled is not None:
-            params["lookup_enabled"] = "true" if lookup_enabled else "false"
-        if page_token is not None:
-            params["page_token"] = page_token
-        response = await http_client.get(
-            url=url,
-            headers=client.get_headers(),
-            params=params,
-        )
-        if not response.is_success:
-            from kittycad.response_helpers import raise_for_status
-
-            raise_for_status(response)
-
-        payload = response.json()
-        items = payload.get("items", [])
-        if not isinstance(items, list):
-            raise ZooMCPException("Failed to list org datasets: invalid response")
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            dataset_id = item.get("id")
-            name = item.get("name")
-            description = item.get("description")
-            if isinstance(dataset_id, str) and isinstance(name, str):
-                datasets.append(
-                    {
-                        "id": dataset_id,
-                        "name": name,
-                        "description": description
-                        if isinstance(description, str)
-                        else None,
-                    }
-                )
-
-        page_token = payload.get("next_page")
-        if not isinstance(page_token, str) or not page_token:
-            return datasets
-        if page_token in seen_page_tokens:
-            logger.warning(
-                "Org datasets pagination repeated page token; stopping early"
-            )
-            return datasets
-        seen_page_tokens.add(page_token)
-
-
 def _org_datasets_empty_or_raise(
     exc: KittyCADClientError,
 ) -> list[dict[str, str | None]]:
@@ -4089,8 +4027,6 @@ async def zoo_list_org_datasets(
     """
     logger.info("Listing org datasets (lookup_enabled=%s)", lookup_enabled)
     async with _new_zoo_client() as client:
-        use_raw_fallback = False
-        datasets = []
         try:
             datasets = [
                 dataset
@@ -4098,22 +4034,8 @@ async def zoo_list_org_datasets(
                     limit=None, page_token=None, lookup_enabled=lookup_enabled
                 )
             ]
-        except ValueError as exc:
-            logger.warning(
-                "SDK could not validate org datasets; falling back to raw JSON: %s",
-                exc,
-            )
-            use_raw_fallback = True
         except KittyCADClientError as exc:
             return _org_datasets_empty_or_raise(exc)
-
-        # Run the fallback outside the handler above so its own client errors still
-        # get the 404-means-empty treatment instead of escaping uncaught.
-        if use_raw_fallback:
-            try:
-                return await _list_org_datasets_raw(client, lookup_enabled)
-            except KittyCADClientError as exc:
-                return _org_datasets_empty_or_raise(exc)
 
     return [
         {"id": str(d.id), "name": d.name, "description": d.description}
