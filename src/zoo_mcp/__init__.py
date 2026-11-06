@@ -9,6 +9,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 
 import truststore
+from mcp.server.mcpserver.exceptions import ToolError
 
 FORMAT = "%(asctime)s | %(levelname)-7s | %(filename)s:%(lineno)d | %(funcName)s | %(message)s"
 
@@ -25,8 +26,8 @@ except PackageNotFoundError:
     logger.error("zoo-mcp package is not installed.")
 
 
-class ZooMCPException(Exception):
-    """Custom exception for Zoo MCP Server."""
+class ZooMCPException(ToolError):
+    """An expected Zoo tool failure whose message is safe for the caller."""
 
 
 class ZooMCPTimeoutError(ZooMCPException):

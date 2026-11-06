@@ -6,7 +6,7 @@ import json
 import os
 import random
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
@@ -3161,6 +3161,7 @@ class _ModelingSession:
     api_call_id: str | None = None
     websocket_upgrade_request_id: str | None = None
     graphics_enabled: bool = False
+    idle_reader: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
 _active_modeling_session: ContextVar[_ModelingSession | None] = ContextVar(
@@ -3187,9 +3188,12 @@ def _capture_session_ids(session: _ModelingSession) -> Generator[None, None, Non
         _active_modeling_session.reset(token)
 
 
-def _observe_modeling_frame(response: object) -> None:
+def _observe_modeling_frame(
+    response: object, *, session: _ModelingSession | None = None
+) -> None:
     """Read session metadata without consuming an extra frame or changing matching."""
-    session = _active_modeling_session.get()
+    if session is None:
+        session = _active_modeling_session.get()
     if session is None or not isinstance(response, dict):
         return
     payload = response.get("resp")
@@ -3263,6 +3267,7 @@ async def _close_modeling_session(session: _ModelingSession) -> None:
     """Close one session's websocket, waiting for any in-flight command."""
     try:
         async with session.lock:
+            await _stop_idle_modeling_reader(session)
             _record_session_event(session)
             await session.websocket.close()
     finally:
@@ -3294,6 +3299,7 @@ async def _discard_modeling_websocket(
     Deliberately not _close_modeling_session: that waits on ``session.lock``,
     which the command calling this still holds, so it would deadlock.
     """
+    await _stop_idle_modeling_reader(session)
     if abort:
         _abort_modeling_websocket(session)
         resources = (("async client", session.client.aclose),)
@@ -3321,6 +3327,52 @@ def _unlink_modeling_session_artifact_graphs(session: _ModelingSession) -> None:
     for path in session.artifact_graph_paths:
         path.unlink(missing_ok=True)
     session.artifact_graph_paths.clear()
+
+
+async def _stop_idle_modeling_reader(session: _ModelingSession) -> None:
+    reader, session.idle_reader = session.idle_reader, None
+    if reader is not None and reader is not asyncio.current_task():
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+def _start_idle_modeling_reader(session: _ModelingSession) -> None:
+    session.idle_reader = asyncio.create_task(_read_idle_modeling_frames(session))
+
+
+async def _read_idle_modeling_frames(session: _ModelingSession) -> None:
+    """Drain unsolicited frames between commands, keeping pong processing live.
+
+    The WebSocket's bounded receive buffer also controls socket reads. Leaving
+    status frames unread fills it and prevents keepalive pongs from arriving.
+    There are no outstanding commands while this reader owns the socket; the
+    next command cancels it before receiving its own responses. Canceling recv
+    preserves any frame it hasn't returned, including fragmented messages.
+    """
+    try:
+        while _modeling_session is session:
+            # A burst of buffered status frames must leave commands and
+            # shutdown a chance to take ownership of the receiver.
+            await asyncio.sleep(0)
+            raw = await session.websocket.recv()
+            try:
+                response = json.loads(raw)
+            except (TypeError, ValueError):
+                pass
+            else:
+                _observe_modeling_frame(response, session=session)
+    except (WebSocketException, OSError) as error:
+        if _modeling_session is session:
+            logger.info(
+                "Modeling session %s disconnected while idle: %s",
+                session.session_id,
+                error,
+            )
+            _evict_modeling_session(session.session_id)
+            await _discard_modeling_websocket(session, abort=True)
+    finally:
+        if session.idle_reader is asyncio.current_task():
+            session.idle_reader = None
 
 
 @api_operation
@@ -3377,6 +3429,7 @@ async def zoo_start_modeling_session() -> str:
     )
     if _modeling_session is starting:
         _modeling_session = session
+        _start_idle_modeling_reader(session)
         return session_id
 
     await websocket.close()
@@ -3441,6 +3494,9 @@ def _abort_all_modeling_sessions() -> None:
         return
 
     try:
+        if session.idle_reader is not None:
+            with suppress(RuntimeError):
+                session.idle_reader.cancel()
         _abort_modeling_websocket(session)
     finally:
         _unlink_modeling_session_artifact_graphs(session)
@@ -3484,6 +3540,9 @@ async def _modeling_websocket(
     # serializes commands that yield during websocket I/O.
     async with session.lock:
         try:
+            await _stop_idle_modeling_reader(session)
+            if _modeling_session is not session:
+                raise ZooMCPException(f"Unknown modeling session '{session_id}'")
             with _capture_session_ids(session):
                 yield session.websocket
         except ZooMCPTimeoutError:
@@ -3504,11 +3563,14 @@ async def _modeling_websocket(
             raise
         except (WebSocketException, OSError) as error:
             _evict_modeling_session(session_id)
-            await _discard_modeling_websocket(session)
+            await _discard_modeling_websocket(session, abort=True)
             raise ZooMCPException(
                 f"Modeling session '{session_id}' is no longer connected "
                 f"({error}); start a new session"
             ) from error
+        finally:
+            if _modeling_session is session:
+                _start_idle_modeling_reader(session)
 
 
 @api_operation

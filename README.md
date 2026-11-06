@@ -198,6 +198,11 @@ session with `execute_kcl` or `import_cad_file`, passing `session_id` to either
 tool. Reuse the same `session_id` with `snapshot` and modeling tools; then call
 `stop_modeling_session` when finished.
 
+Sessions remain available across client reconnects while the server and engine
+connection stay alive. Idle sessions continue receiving engine status messages
+so keepalive checks remain responsive. Disconnected sessions are removed from
+`get_modeling_sessions`; start a new session and execute the model again to recover.
+
 KCL execution and persistent modeling sessions use the CPU engine pool. Isolated
 KCL snapshots temporarily enable CPU rendering. Persistent sessions initialize
 rendering on the first snapshot, selection, highlight, or camera tool and retain
