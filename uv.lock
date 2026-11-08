@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.15"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -421,8 +421,8 @@ name = "httpcore2"
 version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c0/61/afa9d6b7452f9eca73f73d45324eb0bb52f098fd5e6049bf6b8263be9b4e/httpcore2-2.16.0.tar.gz", hash = "sha256:c72cd0413563b17e1cd8354677dff887466f8ec2551679759e93126534428643", size = 69886, upload-time = "2026-10-21T07:09:45.31Z" }
 wheels = [
@@ -484,7 +484,7 @@ name = "importlib-metadata"
 version = "10.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp", marker = "python_full_version < '3.12'" },
+    { name = "zipp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/98/f6/4eda8458eb00ec03e715c376c6b23b3def69687924c68d36d1c4003d3bc4/importlib_metadata-10.1.0.tar.gz", hash = "sha256:82b04047fa09792c1a8cfeddfe08bec79e4b13c29c8469b0d3949860f61017e8", size = 67761, upload-time = "2026-10-24T00:01:44.856Z" }
 wheels = [
@@ -606,7 +606,7 @@ wheels = [
 
 [[package]]
 name = "kittycad"
-version = "1.8.0"
+version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -619,9 +619,9 @@ dependencies = [
     { name = "truststore" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/43/60/ec4a4326b1215f10fbeea7cf30b1fb9233c1b3619dda206fcec28eebe5be/kittycad-1.8.0.tar.gz", hash = "sha256:0b5ea4ebe75718c7f3b7fee229009b5264d530519f524248f830110017364963", size = 227717, upload-time = "2026-10-15T18:43:39.709Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fe/57/11ff88f3823cc45613965b6c8c7dfb63a84979b06b3416089fc03ab41286/kittycad-1.10.0.tar.gz", hash = "sha256:8095963a86f16922a7739ad85f5a83190e1a84823dccc7d3077eece20d78de3b", size = 251820, upload-time = "2026-11-06T19:28:38.323Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6d/dc/e02bb550bc01f071f842ed3a61f8d8ef4a28429c3fbbabe80fd48877e235/kittycad-1.8.0-py3-none-any.whl", hash = "sha256:7094eebf74b98315c1c4de7c6457e4affe40e5d9ad88e5cdd926fe2d04666def", size = 400233, upload-time = "2026-10-15T18:43:38.027Z" },
+    { url = "https://files.pythonhosted.org/packages/98/a9/67ec5166278044e0d9a0c5976bfefa8882bcc325e9f07aea8ad377e2a20f/kittycad-1.10.0-py3-none-any.whl", hash = "sha256:48091f4507566ea13b50a882834cea201ad2965e4a3da50f5eb26ac2fc7ed3fb", size = 426957, upload-time = "2026-11-06T19:28:36.662Z" },
 ]
 
 [[package]]
@@ -1516,8 +1516,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
-    { name = "jeepney", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "cryptography" },
+    { name = "jeepney" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
@@ -1691,8 +1691,8 @@ name = "uvicorn"
 version = "0.54.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
-    { name = "h11", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "click" },
+    { name = "h11" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cfc589dfff3cb796bd07a3aeb1a3e415ba09dd89d7bb4/uvicorn-0.54.0.tar.gz", hash = "sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620", size = 112283, upload-time = "2026-09-25T06:52:37.601Z" }
 wheels = [
