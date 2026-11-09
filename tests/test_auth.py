@@ -13,6 +13,11 @@ from zoo_mcp import auth, client_config
 from zoo_mcp.client_config import ZooClientConfig, get_client_config, use_client_config
 
 ORIGIN = "https://api.example"
+# KittyCAD 1.10 emits this import warning independently of auth CLI output.
+_KITTYCAD_SCHEMA_WARNING_FILTER = (
+    'ignore:Field name "schema" in "OptionStep" shadows an attribute in parent '
+    '"KittyCadBaseModel":UserWarning:kittycad.models.output_format3d'
+)
 
 
 @pytest.fixture(autouse=True)
@@ -357,6 +362,8 @@ def test_lifespan_exits_process_with_keyring_still_blocked():
     result = subprocess.run(
         [
             sys.executable,
+            "-W",
+            _KITTYCAD_SCHEMA_WARNING_FILTER,
             "-c",
             """
 import asyncio
@@ -481,6 +488,8 @@ def test_auth_cli_exit_status_and_error_output(outcome, exit_code, stderr):
     result = subprocess.run(
         [
             sys.executable,
+            "-W",
+            _KITTYCAD_SCHEMA_WARNING_FILTER,
             "-c",
             """
 import sys
@@ -515,6 +524,8 @@ def test_first_sigint_stops_device_polling_before_saving_credentials():
     result = subprocess.run(
         [
             sys.executable,
+            "-W",
+            _KITTYCAD_SCHEMA_WARNING_FILTER,
             "-c",
             """
 import signal
