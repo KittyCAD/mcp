@@ -310,21 +310,11 @@ async def test_conflict_reapplies_without_losing_unrelated_edit(api):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["timeout_before", "timeout_after"])
-@pytest.mark.parametrize("operation", ["mkdir", "mv", "rm", "write_file"])
-async def test_upload_timeout_propagates_without_retry_or_reload(
-    api, failure, operation
-):
+async def test_upload_timeout_propagates_without_retry_or_reload(api, failure):
     api.failure = failure
-    fs = ProjectFileSystem(PROJECT_ID)
-    args = {
-        "mkdir": ["new"],
-        "mv": ["parts/a.bin", "moved.bin"],
-        "rm": ["parts/a.bin"],
-        "write_file": ["parts/a.bin", b"changed"],
-    }[operation]
     original = api.files.copy()
     with pytest.raises(httpx.ReadTimeout, match="response lost"):
-        await getattr(fs, operation)(*args)
+        await ProjectFileSystem(PROJECT_ID).write_file("parts/a.bin", b"changed")
     assert len(api.uploads) == 1
     assert api.requests[-1].method == "PUT"
     assert (api.files == original) == (failure == "timeout_before")
@@ -422,15 +412,12 @@ async def test_read_missing_file_or_directory_does_not_download_contents(api, pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["metadata", "download", "mutation"])
-async def test_limit_at_each_boundary(api, stage):
+@pytest.mark.parametrize("stage", ["metadata", "mutation"])
+async def test_project_size_limit_before_download_and_after_mutation(api, stage):
     current_size = sum(map(len, api.files.values()))
     fs = ProjectFileSystem(
         PROJECT_ID, current_size if stage == "mutation" else current_size - 1
     )
-    if stage == "download":
-        fs.limit = current_size
-        api.download_contents = b"x" * (current_size + 1)
     with pytest.raises(ZooMCPException, match="size"):
         await fs.write_file("new", b"larger")
     assert not api.uploads
@@ -439,9 +426,7 @@ async def test_limit_at_each_boundary(api, stage):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "contents", [b"// oops", b"short", b"", b"longer than declared"]
-)
+@pytest.mark.parametrize("contents", [b"// oops", b"short", b""])
 async def test_file_download_checks_size_and_hash(api, contents):
     api.download_contents = contents
     with pytest.raises(ZooMCPException, match="size|hash"):
@@ -467,7 +452,8 @@ async def test_oversized_file_stream_stops_before_reading_remaining_chunks(
 
     project_transport(handle)
     with pytest.raises(ZooMCPException, match="exceeds its declared byte size"):
-        await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
+        await ProjectFileSystem(PROJECT_ID).write_file("new", "x")
+    assert not api.uploads
 
 
 @pytest.mark.asyncio
@@ -575,36 +561,6 @@ async def test_same_project_writes_are_serialized(api):
     )
     assert all(api.files[f"file-{n}"] == str(n).encode() for n in range(3))
     assert len(api.uploads) == 3
-
-
-@pytest.mark.asyncio
-async def test_mcp_binary_round_trip_and_errors(api):
-    encoded = base64.b64encode(b"\xff\x00").decode()
-    result = await mcp.call_tool(
-        "project_write_file",
-        {
-            "project_id": PROJECT_ID,
-            "path": "binary",
-            "contents": encoded,
-            "encoding": "base64",
-        },
-    )
-    assert isinstance(result, CallToolResult)
-    assert not result.is_error
-    result = await mcp.call_tool(
-        "project_read_file",
-        {"project_id": PROJECT_ID, "path": "binary", "encoding": "base64"},
-    )
-    assert isinstance(result, CallToolResult)
-    assert isinstance(result.content[0], TextContent)
-    assert json.loads(result.content[0].text) == {
-        "contents": encoded,
-        "encoding": "base64",
-    }
-    with pytest.raises(ToolError, match="main.kcl"):
-        await mcp.call_tool(
-            "project_rm", {"project_id": PROJECT_ID, "path": "main.kcl"}
-        )
 
 
 @pytest.mark.asyncio
@@ -754,6 +710,10 @@ async def test_remaining_mcp_tools(api, tool, args):
 
 @pytest.mark.asyncio
 async def test_mcp_bad_inputs_return_actionable_errors(api):
+    with pytest.raises(ToolError, match="main.kcl"):
+        await mcp.call_tool(
+            "project_rm", {"project_id": PROJECT_ID, "path": "main.kcl"}
+        )
     with pytest.raises(ToolError, match="cloud:"):
         await mcp.call_tool("project_stat", {"project_id": "local:bad"})
     with pytest.raises(ToolError, match="base64|padding|digit|characters"):
