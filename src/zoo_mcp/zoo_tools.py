@@ -4188,9 +4188,7 @@ def _project_path(path: str) -> str:
     if path.startswith("/") or ".." in path.split("/"):
         raise ZooMCPException("Expected a project-relative POSIX path without '..'")
     result = str(PurePosixPath(path))
-    if result == ".":
-        return ""
-    return result
+    return "" if result == "." else result
 
 
 def _project_kind(files: dict, path: str) -> str | None:
@@ -4201,6 +4199,14 @@ def _project_kind(files: dict, path: str) -> str | None:
     if any(name.startswith(path + "/") for name in files):
         return "directory"
     return None
+
+
+def _project_subtree(files: dict[str, bytes], path: str) -> dict[str, bytes]:
+    return {
+        name: content
+        for name, content in files.items()
+        if name == path or name.startswith(path + "/")
+    }
 
 
 def _project_parent(files: dict, path: str) -> None:
@@ -4415,9 +4421,7 @@ class ProjectFileSystem:
         path = _project_path(path)
         async with self._operation() as client:
             metadata = await self._metadata(client)
-        files = {entry["relative_path"]: entry for entry in metadata["files"]}
-        if _project_kind(files, path) is None:
-            raise ZooMCPException(f"Path does not exist: {path}")
+        self._stat(self._entries(metadata), path)
         return {"access": metadata["access"]}
 
     @api_operation
@@ -4483,18 +4487,13 @@ class ProjectFileSystem:
             raise ZooMCPException("Only utf-8 text decoding is supported")
         async with self._operation() as client:
             metadata = await self._metadata(client)
-            entry = next(
-                (
-                    entry
-                    for entry in metadata["files"]
-                    if entry["relative_path"] == path
-                ),
-                None,
-            )
-            if entry is None:
-                raise ZooMCPException(f"Not a file: {path}")
-            content = await self._download_file(client, metadata["revision"], entry)
-        return content.decode("utf-8") if encoding else content
+            for entry in metadata["files"]:
+                if entry["relative_path"] == path:
+                    content = await self._download_file(
+                        client, metadata["revision"], entry
+                    )
+                    return content.decode("utf-8") if encoding else content
+        raise ZooMCPException(f"Not a file: {path}")
 
     async def _put(
         self,
@@ -4587,7 +4586,6 @@ class ProjectFileSystem:
             if _project_kind(files, path) is not None:
                 raise ZooMCPException(f"Path already exists: {path}")
             _project_parent(files, path)
-            # A zero-byte .empty file persists the directory in the file-only Project API.
             files[path + "/.empty"] = b""
 
         return await self._mutate(transform)
@@ -4599,9 +4597,7 @@ class ProjectFileSystem:
             raise ZooMCPException("Cannot remove the project root or main.kcl")
 
         def transform(files: dict[str, bytes]) -> None:
-            targets = [
-                name for name in files if name == path or name.startswith(path + "/")
-            ]
+            targets = _project_subtree(files, path)
             if not targets:
                 raise ZooMCPException(f"Path does not exist: {path}")
             for name in targets:
@@ -4634,11 +4630,7 @@ class ProjectFileSystem:
                 raise ZooMCPException(
                     "Destination already exists or has an incompatible type"
                 )
-            selected = {
-                name: content
-                for name, content in files.items()
-                if name == source or name.startswith(source + "/")
-            }
+            selected = _project_subtree(files, source)
             for name, content in selected.items():
                 files[target + name[len(source) :]] = content
             if move:
