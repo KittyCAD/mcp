@@ -1,20 +1,20 @@
 import argparse
 import asyncio
 import atexit
+import base64
 import json
 import math
 import signal
 import sys
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from types import FrameType
-from typing import Annotated, Literal, TypeAlias, TypeVar
-import kcl
-import base64
-from collections.abc import AsyncGenerator, Awaitable, Callable
 from functools import wraps
-from typing import Literal, ParamSpec, TypeVar
+from types import FrameType
+from typing import Annotated, Literal, ParamSpec, TypeAlias, TypeVar
+
 import httpx
+import kcl
 from kittycad.models import (
     CameraMovement,
     CurveGetEndPoints,
@@ -2035,8 +2035,8 @@ async def project_read_file(
 ) -> dict:
     """Read a cloud project file as UTF-8 text or base64-encoded binary data.
 
-    Returns {contents: str, encoding: str}. Downloads a consistent project
-    snapshot. Default total uncompressed project limit: 256 MiB.
+    Returns {contents: str, encoding: str}. Downloads only the requested file
+    from the current immutable revision. Default total project limit: 256 MiB.
     """
     content = await ProjectFileSystem(project_id, max_project_bytes).read_file(
         path, encoding="utf-8" if encoding == "utf-8" else None

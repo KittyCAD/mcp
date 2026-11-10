@@ -126,12 +126,17 @@ selects the root for metadata and directory reads. Quoted filenames are preserve
 control characters in paths are rejected. Operations stay within one
 project.
 
-Every mutation fetches current metadata and complete file contents, applies its
-changes in memory, then uploads the whole project with `expected_revision` and
-explicit `deleted_paths`. Copies and moves use one upload, including recursive
-directory operations. A revision conflict reloads the latest project and
-reapplies the operation, up to three upload attempts. Thus a write replaces the
-target's latest contents, and recursive removal includes files added before a
+File reads fetch current metadata, then download only the requested file by its
+file ID and immutable project revision. Concurrent saves cannot change those
+bytes. Each download checks the response's revision, file ID, byte size, and
+available SHA-256 hash against the metadata.
+
+Every mutation fetches current metadata and all files from that immutable
+revision, applies its changes in memory, then uploads the whole project with
+`expected_revision` and explicit `deleted_paths`. Copies and moves use one
+upload, including recursive directory operations. A revision conflict reloads
+the latest project and reapplies the operation, up to three upload attempts.
+Thus a write replaces the target's latest contents, and recursive removal includes files added before a
 retry. Unrelated files and project metadata are preserved. Connection failures,
 timeouts, other HTTP errors, and unreadable responses surface to the caller
 without an automatic retry. After an upload error, the caller can inspect the
@@ -139,9 +144,10 @@ project before deciding whether to retry.
 
 The default limit is **256 MiB of total uncompressed project contents**, based on
 four times text-to-CAD's 64 MiB DFM capture limit. Callers can override
-`max_project_bytes`. The limit applies before downloading, while reading the
-archive, and after mutations. A complete operation has a 300-second deadline.
-There is no persistent content cache.
+`max_project_bytes`. The limit applies to metadata before downloading and after
+mutations; streamed file downloads are bounded by their declared sizes.
+A complete operation has a 300-second deadline. There is no persistent content
+cache.
 
 - `project_write_file` accepts raw Python bytes when encoding is omitted;
   strings default to UTF-8. Explicit `encoding="utf-8"` or `encoding="base64"`
@@ -174,10 +180,10 @@ There is no persistent content cache.
 Python callers can use the implementation directly:
 
 ```python
-from zoo_mcp.credentials import ZooCredentials, use_credentials
+from zoo_mcp.client_config import ZooClientConfig, use_client_config
 from zoo_mcp.zoo_tools import ProjectFileSystem
 
-with use_credentials(ZooCredentials(token=api_token)):
+with use_client_config(ZooClientConfig(token=api_token)):
     project = ProjectFileSystem("cloud:00000000-0000-4000-8000-000000000001")
     await project.mkdir("parts")
     await project.write_file("parts/bracket.kcl", "// KCL contents")
@@ -185,8 +191,8 @@ with use_credentials(ZooCredentials(token=api_token)):
 ```
 
 `read_file` returns bytes when no encoding is supplied. A `ProjectFileSystem`
-instance retains the credentials supplied when it was constructed; construct a
-new instance when changing the token or API host.
+instance retains the client configuration supplied when constructed; construct a
+new instance when changing the token, API host, or request headers.
 
 ### Prebuilt binaries
 

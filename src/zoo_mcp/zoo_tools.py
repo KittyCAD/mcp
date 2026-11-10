@@ -7,15 +7,13 @@ import json
 import mimetypes
 import os
 import random
-import zipfile
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path, PurePosixPath, PureWindowsPath
 from hashlib import sha256
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
@@ -4292,7 +4290,7 @@ class ProjectFileSystem:
     """Authenticated filesystem operations on one existing cloud project.
 
     All mutations use the same complete-snapshot replacement pipeline. There is
-    no persistent content cache. Instances capture credentials when constructed.
+    no persistent content cache. Instances capture client configuration when constructed.
     """
 
     def __init__(self, project_id: str, max_project_bytes: int = MAX_PROJECT_BYTES):
@@ -4311,12 +4309,15 @@ class ProjectFileSystem:
         ):
             raise ZooMCPException("max_project_bytes must be positive")
         self.limit = max_project_bytes
-        self.credentials = get_credentials()
-        self.url = self.credentials.base_url.rstrip("/") + "/user/projects/" + self.id
+        self.config = get_client_config()
+        self.url = self.config.base_url.rstrip("/") + "/user/projects/" + self.id
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {self.credentials.token}"},
+            headers={
+                "Authorization": f"Bearer {self.config.token}",
+                **(self.config.headers or {}),
+            },
             verify=ctx,
             timeout=60.0,
             follow_redirects=False,
@@ -4327,7 +4328,7 @@ class ProjectFileSystem:
         # Locks belong to their event loop; weak references discard idle locks.
         loop = asyncio.get_running_loop()
         locks = _project_locks.setdefault(loop, WeakValueDictionary())
-        key = (self.url, sha256(self.credentials.token.encode()).digest())
+        key = (self.url, sha256(self.config.token.encode()).digest())
         lock = locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
@@ -4367,90 +4368,47 @@ class ProjectFileSystem:
         _validate_project_paths(paths)
         return data
 
-    async def _download_archive(
-        self, client: httpx.AsyncClient, metadata: dict
-    ) -> io.BytesIO:
-        """Download a ZIP within the project size bound plus archive overhead."""
-        archive = io.BytesIO()
-        # ZIP overhead includes entry names and headers, even for empty files.
-        wire_limit = (
-            self.limit
-            + self.limit // 1000
-            + 1024 * 1024
-            + sum(
-                256 + 2 * len(entry["relative_path"].encode())
-                for entry in metadata["files"]
-            )
-        )
+    async def _download_file(
+        self, client: httpx.AsyncClient, revision: str, entry: dict
+    ) -> bytes:
+        """Fetch exact bytes from one immutable version, bounded by its manifest."""
+        file_id = entry["id"]
+        size = entry["byte_size"]
+        content = io.BytesIO()
         async with client.stream(
-            "GET", self.url + "/download", params={"format": "zip"}
+            "GET", f"{self.url}/versions/{revision}/files/{file_id}"
         ) as response:
             response.raise_for_status()
+            if (
+                response.headers.get("X-Project-Revision") != revision
+                or response.headers.get("X-Artifact-Id") != file_id
+            ):
+                raise ZooMCPException(
+                    "Project file response does not match its version"
+                )
             async for chunk in response.aiter_bytes():
-                if archive.tell() + len(chunk) > wire_limit:
-                    raise ZooMCPException(
-                        "Project archive exceeds the download size limit"
-                    )
-                archive.write(chunk)
-        return archive
-
-    def _read_archive(self, archive: io.BytesIO) -> dict[str, bytes]:
-        """Read ZIP contents, validating paths, file types, and uncompressed size."""
-        files: dict[str, bytes] = {}
-        total = 0
-        try:
-            with zipfile.ZipFile(archive) as zip_file:
-                for entry in zip_file.infolist():
-                    if entry.is_dir():
-                        continue
-                    path = _project_path(entry.filename)
-                    if (
-                        not path
-                        or path in files
-                        or (entry.external_attr >> 16) & 0o170000 == 0o120000
-                    ):
-                        raise ZooMCPException(
-                            "Invalid or duplicate project archive path"
-                        )
-                    total += entry.file_size
-                    _check_project_size(total, self.limit)
-                    with zip_file.open(entry) as source:
-                        content = source.read(
-                            self.limit - (total - entry.file_size) + 1
-                        )
-                    if len(content) != entry.file_size:
-                        raise ZooMCPException("Invalid project archive entry size")
-                    files[path] = content
-        except (zipfile.BadZipFile, RuntimeError, EOFError) as exc:
-            raise ZooMCPException("Invalid project ZIP archive") from exc
-        return files
+                if content.tell() + len(chunk) > size:
+                    raise ZooMCPException("Project file exceeds its declared byte size")
+                content.write(chunk)
+        data = content.getvalue()
+        if len(data) != size:
+            raise ZooMCPException("Project file does not match its declared byte size")
+        if (
+            entry.get("sha256") is not None
+            and sha256(data).hexdigest() != entry["sha256"]
+        ):
+            raise ZooMCPException("Project file does not match its declared hash")
+        return data
 
     async def _snapshot(self, client: httpx.AsyncClient) -> _ProjectSnapshot:
-        """Load files that agree with a stable metadata revision."""
-        for _ in range(_PROJECT_ATTEMPTS):
-            metadata = await self._metadata(client)
-            archive = await self._download_archive(client, metadata)
-            files = self._read_archive(archive)
-            # Metadata and downloads are separate requests; verify their agreement.
-            latest = await self._metadata(client)
-            if latest["revision"] != metadata["revision"]:
-                continue
-            entries = {entry["relative_path"]: entry for entry in latest["files"]}
-            if files.keys() != entries.keys():
-                continue
-            if any(
-                len(content) != entries[path]["byte_size"]
-                or (
-                    entries[path].get("sha256") is not None
-                    and sha256(content).hexdigest() != entries[path]["sha256"]
-                )
-                for path, content in files.items()
-            ):
-                continue
-            return _ProjectSnapshot(latest, files)
-        raise ZooMCPException(
-            "Project kept changing while loading its contents; try again"
-        )
+        """Load every file from the immutable revision selected by metadata."""
+        metadata = await self._metadata(client)
+        files = {}
+        for entry in metadata["files"]:
+            files[entry["relative_path"]] = await self._download_file(
+                client, metadata["revision"], entry
+            )
+        return _ProjectSnapshot(metadata, files)
 
     @api_operation
     async def access(self, path: str = ".") -> dict:
@@ -4524,10 +4482,18 @@ class ProjectFileSystem:
         if encoding not in (None, "utf-8"):
             raise ZooMCPException("Only utf-8 text decoding is supported")
         async with self._operation() as client:
-            snapshot = await self._snapshot(client)
-        if path not in snapshot.files:
-            raise ZooMCPException(f"Not a file: {path}")
-        content = snapshot.files[path]
+            metadata = await self._metadata(client)
+            entry = next(
+                (
+                    entry
+                    for entry in metadata["files"]
+                    if entry["relative_path"] == path
+                ),
+                None,
+            )
+            if entry is None:
+                raise ZooMCPException(f"Not a file: {path}")
+            content = await self._download_file(client, metadata["revision"], entry)
         return content.decode("utf-8") if encoding else content
 
     async def _put(

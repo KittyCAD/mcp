@@ -4,19 +4,18 @@ import asyncio
 import base64
 import copy
 import hashlib
-import io
 import json
-import zipfile
 from email import policy
 from email.parser import BytesParser
+from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
-from zoo_mcp import ZooMCPException, credentials, zoo_tools
-from zoo_mcp.credentials import ZooCredentials
+from zoo_mcp import ZooMCPException, client_config, zoo_tools
+from zoo_mcp.client_config import ZooClientConfig, use_client_config
 from zoo_mcp.server import mcp
 from zoo_mcp.zoo_tools import ProjectFileSystem
 
@@ -39,9 +38,16 @@ class ProjectAPI:
         self.failure = None
         self.editable = True
         self.download_hook = None
-        self.archive_files: dict[str, bytes] | None = None
+        self.versions = {}
+        self.download_contents: bytes | None = None
+
+    def file_id(self, path):
+        return str(uuid5(NAMESPACE_URL, f"{self.revision}/{path}"))
 
     def metadata(self):
+        self.versions[str(self.revision)] = {
+            self.file_id(path): data for path, data in self.files.items()
+        }
         return {
             "id": PROJECT_ID[6:],
             "revision": str(self.revision),
@@ -57,7 +63,7 @@ class ProjectAPI:
                     "relative_path": path,
                     "byte_size": len(data),
                     "sha256": hashlib.sha256(data).hexdigest(),
-                    "id": path,
+                    "id": self.file_id(path),
                     "created_at": "created",
                     "updated_at": "updated",
                     "content_type": "application/octet-stream",
@@ -73,19 +79,27 @@ class ProjectAPI:
         self.requests.append(request)
         assert request.headers["Authorization"] == "Bearer test-token"
         assert request.url.path.startswith("/custom/user/projects/")
-        if request.method == "GET" and request.url.path.endswith("/download"):
-            assert request.url.params["format"] == "zip"
-            archive = io.BytesIO()
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as z:
-                for path, content in (
-                    self.archive_files if self.archive_files is not None else self.files
-                ).items():
-                    z.writestr(path, content)
+        if request.method == "GET" and "/versions/" in request.url.path:
+            project_path, revision, files_segment, file_id = request.url.path.rsplit(
+                "/", 3
+            )
+            assert project_path.endswith("/versions")
+            assert files_segment == "files"
+            content = self.versions.get(revision, {}).get(file_id)
+            if content is None:
+                return httpx.Response(404)
             if self.download_hook:
                 hook, self.download_hook = self.download_hook, None
                 hook()
-            return httpx.Response(200, content=archive.getvalue())
+            return httpx.Response(
+                200,
+                content=content
+                if self.download_contents is None
+                else self.download_contents,
+                headers={"X-Project-Revision": revision, "X-Artifact-Id": file_id},
+            )
         if request.method == "GET":
+            assert request.url.path == f"/custom/user/projects/{PROJECT_ID[6:]}"
             return httpx.Response(200, json=self.metadata())
         assert request.method == "PUT"
         mime = BytesParser(policy=policy.default).parsebytes(
@@ -112,7 +126,8 @@ class ProjectAPI:
             self.files["concurrent.txt"] = b"preserve concurrent edit"
             self.revision += 1
             return httpx.Response(409)
-        assert body["expected_revision"] == str(self.revision)
+        if body["expected_revision"] != str(self.revision):
+            return httpx.Response(409)
         assert body["title"] == "My project"
         assert body["description"] == "Keep this description"
         assert body["category_ids"] == ["category"]
@@ -140,9 +155,9 @@ class ProjectAPI:
 @pytest.fixture
 def api(monkeypatch, httpx_mock):
     monkeypatch.setattr(
-        credentials,
-        "_local_credentials",
-        ZooCredentials("test-token", "https://api.example.test/custom/"),
+        client_config,
+        "_local_config",
+        ZooClientConfig("test-token", "https://api.example.test/custom/"),
     )
     remote = ProjectAPI()
     httpx_mock.add_callback(remote.handle, is_reusable=True, is_optional=True)
@@ -365,30 +380,58 @@ async def test_mcp_upload_timeout_surfaces_as_tool_error(api):
 
 
 @pytest.mark.asyncio
-async def test_snapshot_retries_download_racing_metadata(api):
+async def test_read_fetches_only_requested_file_from_pinned_revision(api):
     def edit():
         api.files["main.kcl"] = b"// newer revision"
         api.revision += 1
 
     api.download_hook = edit
+    assert await ProjectFileSystem(PROJECT_ID).read_file("main.kcl") == b"// main"
+    assert api.files["main.kcl"] == b"// newer revision"
+    downloads = [
+        request for request in api.requests if "/versions/" in request.url.path
+    ]
+    assert len(downloads) == 1
+    assert "/versions/1/files/" in downloads[0].url.path
     assert (
         await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
         == b"// newer revision"
     )
-    assert sum(request.url.path.endswith("/download") for request in api.requests) == 2
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["metadata", "archive", "mutation"])
+async def test_save_reloads_after_edit_during_pinned_file_download(api):
+    def edit():
+        api.files["parts/a.bin"] = b"concurrent binary edit"
+        api.revision += 1
+
+    api.download_hook = edit
+
+    await ProjectFileSystem(PROJECT_ID).write_file("new.kcl", "// new")
+    assert api.uploads[0][1]["parts/a.bin"] == b"\xff\x00"
+    assert api.files["parts/a.bin"] == b"concurrent binary edit"
+    assert api.files["new.kcl"] == b"// new"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["missing", "parts", "."])
+async def test_read_missing_file_or_directory_does_not_download_contents(api, path):
+    with pytest.raises(ZooMCPException, match="Not a file"):
+        await ProjectFileSystem(PROJECT_ID).read_file(path)
+    assert len(api.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["metadata", "download", "mutation"])
 async def test_limit_at_each_boundary(api, stage):
     current_size = sum(map(len, api.files.values()))
     fs = ProjectFileSystem(
         PROJECT_ID, current_size if stage == "mutation" else current_size - 1
     )
-    if stage == "archive":
+    if stage == "download":
         fs.limit = current_size
-        api.archive_files = {"main.kcl": b"x" * (current_size + 1)}
-    with pytest.raises(ZooMCPException, match="size limit"):
+        api.download_contents = b"x" * (current_size + 1)
+    with pytest.raises(ZooMCPException, match="size"):
         await fs.write_file("new", b"larger")
     assert not api.uploads
     if stage == "metadata":
@@ -397,13 +440,116 @@ async def test_limit_at_each_boundary(api, stage):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "bad_archive", [{"../escape": b"x"}, {"main.kcl": b"wrong hash"}]
+    "contents", [b"// oops", b"short", b"", b"longer than declared"]
 )
-async def test_archive_path_and_integrity_validation(api, bad_archive):
-    api.archive_files = bad_archive
-    with pytest.raises(ZooMCPException):
+async def test_file_download_checks_size_and_hash(api, contents):
+    api.download_contents = contents
+    with pytest.raises(ZooMCPException, match="size|hash"):
         await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
     assert not api.uploads
+
+
+@pytest.mark.asyncio
+async def test_oversized_file_stream_stops_before_reading_remaining_chunks(
+    api, project_transport
+):
+    class OversizedFile(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"// main"
+            yield b"extra"
+            raise AssertionError("Must stop when the declared byte size is exceeded")
+
+    def handle(request):
+        response = api.handle(request)
+        if "/versions/" in request.url.path:
+            return httpx.Response(200, headers=response.headers, stream=OversizedFile())
+        return response
+
+    project_transport(handle)
+    with pytest.raises(ZooMCPException, match="exceeds its declared byte size"):
+        await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
+
+
+@pytest.mark.asyncio
+async def test_unsafe_manifest_path_is_rejected_before_downloading(api):
+    api.files["../escape"] = b"unsafe"
+    with pytest.raises(ZooMCPException, match="project-relative"):
+        await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
+    assert len(api.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", ["X-Project-Revision", "X-Artifact-Id"])
+async def test_file_from_wrong_version_or_id_is_rejected(
+    api, project_transport, header
+):
+    def handle(request):
+        response = api.handle(request)
+        if "/versions/" in request.url.path:
+            response.headers[header] = "wrong"
+        return response
+
+    project_transport(handle)
+    with pytest.raises(ZooMCPException, match="does not match its version"):
+        await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 404, 500])
+async def test_file_download_failure_does_not_upload_or_retry(
+    api, project_transport, status
+):
+    downloads = []
+
+    def handle(request):
+        if "/versions/" in request.url.path:
+            downloads.append(request)
+            return httpx.Response(status)
+        return api.handle(request)
+
+    project_transport(handle)
+    with pytest.raises(httpx.HTTPStatusError):
+        await ProjectFileSystem(PROJECT_ID).write_file("new", "x")
+    assert len(downloads) == 1
+    assert not api.uploads
+
+
+@pytest.mark.asyncio
+async def test_slow_file_download_allows_metadata_queries(
+    api, project_transport, monkeypatch
+):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowFile(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            entered.set()
+            await release.wait()
+            yield b"// main"
+
+    def handle(request):
+        response = api.handle(request)
+        if "/versions/" in request.url.path:
+            return httpx.Response(200, headers=response.headers, stream=SlowFile())
+        return response
+
+    project_transport(handle)
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    elapsed = 0.0
+    monkeypatch.setattr(loop, "time", lambda: real_time() + elapsed)
+    fs = ProjectFileSystem(PROJECT_ID)
+    task = asyncio.create_task(fs.read_file("main.kcl"))
+    try:
+        await entered.wait()
+        elapsed = 7.0
+        assert (await fs.stat("parts/a.bin"))["byte_size"] == 2
+        assert not task.done()
+        release.set()
+        assert await task == b"// main"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -525,16 +671,31 @@ async def test_conflicting_remove_includes_new_descendants(api, project_transpor
 @pytest.mark.asyncio
 async def test_credentials_are_captured_and_locks_are_scoped(api):
     fs = ProjectFileSystem(PROJECT_ID)
-    from zoo_mcp.credentials import use_credentials
-
-    with use_credentials(
-        ZooCredentials("different-token", "https://other.example.test")
+    with use_client_config(
+        ZooClientConfig("different-token", "https://other.example.test")
     ):
         other = ProjectFileSystem(PROJECT_ID)
         lock = fs._lock()
         assert other._lock() is not lock
         assert ProjectFileSystem(PROJECT_ID)._lock() is other._lock()
         assert await fs.read_file("main.kcl") == b"// main"
+
+
+@pytest.mark.asyncio
+async def test_file_requests_keep_captured_custom_headers(api):
+    with use_client_config(
+        ZooClientConfig(
+            "test-token",
+            "https://api.example.test/custom/",
+            headers={"X-Caller": "project-owner"},
+        )
+    ):
+        fs = ProjectFileSystem(PROJECT_ID)
+
+    assert await fs.read_file("parts/a.bin") == b"\xff\x00"
+    assert all(
+        request.headers["X-Caller"] == "project-owner" for request in api.requests
+    )
 
 
 @pytest.mark.asyncio
@@ -567,7 +728,7 @@ async def test_total_deadline_has_actionable_error(api, monkeypatch):
         await asyncio.sleep(0)
         raise AssertionError("Deadline should cancel snapshot loading")
 
-    monkeypatch.setattr(ProjectFileSystem, "_snapshot", blocked)
+    monkeypatch.setattr(ProjectFileSystem, "_metadata", blocked)
     with pytest.raises(ZooMCPException, match="deadline exceeded"):
         await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
 
@@ -614,11 +775,11 @@ def test_invalid_limits(api, limit):
 
 
 @pytest.mark.asyncio
-async def test_project_download_follows_no_redirects(api, project_transport):
+async def test_file_download_follows_no_redirects(api, project_transport):
     original = api.handle
 
     def handle(request):
-        if request.url.path.endswith("/download"):
+        if "/versions/" in request.url.path:
             return httpx.Response(
                 302, headers={"Location": "https://other.example.test/archive.zip"}
             )
