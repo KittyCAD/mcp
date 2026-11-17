@@ -19,8 +19,6 @@ from zoo_mcp import ZooMCPException, ctx
 from zoo_mcp.client_config import get_client_config
 from zoo_mcp.utils.async_utils import run_blocking
 
-MAX_INPUT_FILES = 256
-LOG_PAGE_BYTES = 65536
 TERMINAL_STATUSES = {"succeeded", "failed", "timed_out", "canceled"}
 _download_slots: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, asyncio.Semaphore
@@ -112,7 +110,7 @@ class ExecutionLog(BaseModel):
 
     def decoded(self) -> bytes:
         data = base64.b64decode(self.data_base64, validate=True)
-        if len(data) > LOG_PAGE_BYTES or self.next_offset != self.offset + len(data):
+        if self.next_offset != self.offset + len(data):
             raise ExecutionError("The execution API returned an invalid log page.")
         return data
 
@@ -156,9 +154,7 @@ class ExecutionSubmission(BaseModel):
     runtime_id: str = Field(min_length=1)
     compute_profile_id: str = Field(min_length=1)
     command: list[str] = Field(min_length=1, max_length=128)
-    inputs: list[ExecutionInput] = Field(
-        default_factory=list, max_length=MAX_INPUT_FILES
-    )
+    inputs: list[ExecutionInput] = Field(default_factory=list)
     outputs: list[ExecutionOutput] = Field(default_factory=list, max_length=256)
     environment: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=300, ge=1, le=86400)

@@ -33,6 +33,7 @@ def api(monkeypatch):
         artifact_id = uuid4()
         name = "result.csv"
         data = b"value\n55\n"
+        log_data = b"done\xff\n"
 
         def __init__(self):
             self.requests = []
@@ -115,7 +116,7 @@ def api(monkeypatch):
                 stream = request.url.params["stream"]
                 offset = int(request.url.params["offset"])
                 content = (
-                    b"done\xff\n"[offset : offset + int(request.url.params["limit"])]
+                    self.log_data[offset : offset + int(request.url.params["limit"])]
                     if stream == "stdout"
                     else b""
                 )
@@ -128,7 +129,7 @@ def api(monkeypatch):
                         "data_base64": base64.b64encode(content).decode(),
                         "offset": offset,
                         "next_offset": offset + len(content),
-                        "stored_bytes": 6,
+                        "stored_bytes": len(self.log_data) if stream == "stdout" else 0,
                         "complete": True,
                         "truncated": False,
                     },
@@ -221,6 +222,42 @@ async def test_mcp_submission_upload_and_job_management(
     }
     canceled = await call_tool("cancel_job_execution", {"job_id": str(api.job_id)})
     assert canceled.structured_content["status"] == "canceling"
+
+
+@pytest.mark.asyncio
+async def test_submission_forwards_more_than_256_inputs(api):
+    inputs = [
+        {"artifact_id": str(api.input_id), "path": f"inputs/{index}.dat"}
+        for index in range(300)
+    ]
+    result = await call_tool(
+        "submit_job_execution",
+        {
+            "idempotency_key": "many-inputs",
+            "submission": {
+                "runtime_id": "openfoam-14",
+                "compute_profile_id": "cpu-standard-2",
+                "command": ["sh", "run.sh"],
+                "inputs": inputs,
+            },
+        },
+    )
+    assert result.structured_content["id"] == str(api.job_id)
+    assert api.submissions[0][1]["inputs"] == inputs
+
+
+@pytest.mark.asyncio
+async def test_log_reads_forward_and_decode_pages_larger_than_64k(api):
+    limit = 128 * 1024
+    api.log_data = b"prefix" + b"x" * limit + b"tail"
+    result = await call_tool(
+        "read_job_execution_logs",
+        {"job_id": str(api.job_id), "offset": 6, "limit": limit},
+    )
+    assert result.structured_content["text"] == "x" * limit
+    assert result.structured_content["next_offset"] == 6 + limit
+    assert result.structured_content["stored_bytes"] == len(api.log_data)
+    assert api.requests[-1].url.params["limit"] == str(limit)
 
 
 @pytest.mark.asyncio
