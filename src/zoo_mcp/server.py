@@ -3,9 +3,11 @@ import asyncio
 import atexit
 import json
 import math
+import os
 import shutil
 import signal
 import sys
+import tempfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
@@ -105,6 +107,7 @@ from zoo_mcp.execution_jobs import (
     ExecutionJob,
     ExecutionSubmission,
     UploadedInput,
+    can_read_artifact_inline,
     execution_client,
     read_artifact_content,
 )
@@ -310,26 +313,31 @@ async def use_job_execution_artifact(
     target = Path(destination).absolute() if destination else None
     if target is not None and target.exists():
         raise ExecutionError("The download destination already exists.")
-    async with (
-        execution_client() as client,
-        client.open_artifact(job_id, artifact_id) as (artifact, path),
-    ):
+    async with execution_client() as client:
+        artifact = await client.artifact(job_id, artifact_id)
         data = {"artifact": artifact.model_dump(mode="json"), "job_id": str(job_id)}
         image = None
-        if target is not None:
-            await run_blocking(_save_execution_artifact, path, target)
-            data["destination"] = str(target)
-        else:
-            content = await run_blocking(
-                read_artifact_content, path, artifact.path, offset
+        if action == "read" and not can_read_artifact_inline(artifact, offset):
+            data["message"] = (
+                "This image exceeds the host's inline size limit. "
+                "Use action='download' with a destination to save it."
             )
-            if isinstance(content, ArtifactImage):
-                image = ImageContent(
-                    type="image", mime_type=content.mime_type, data=content.data
-                )
-            else:
-                text, next_offset = content
-                data.update(text=text, next_offset=next_offset)
+        else:
+            async with client.download(job_id, artifact) as path:
+                if target is not None:
+                    await run_blocking(_save_execution_artifact, path, target)
+                    data["destination"] = str(target)
+                else:
+                    content = await run_blocking(
+                        read_artifact_content, path, artifact.path, offset
+                    )
+                    if isinstance(content, ArtifactImage):
+                        image = ImageContent(
+                            type="image", mime_type=content.mime_type, data=content.data
+                        )
+                    else:
+                        text, next_offset = content
+                        data.update(text=text, next_offset=next_offset)
         result = CallToolResult(
             structured_content=data,
             content=[TextContent(type="text", text=json.dumps(data))],
@@ -340,14 +348,19 @@ async def use_job_execution_artifact(
 
 
 def _save_execution_artifact(source: Path, destination: Path) -> None:
-    """Copy verified bytes without overwriting an existing destination."""
-    with destination.open("xb") as output:
+    """Publish the closed, complete file exclusively on the destination filesystem."""
+    with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
+        temporary = Path(directory) / "artifact"
+        with source.open("rb") as input_file, temporary.open("wb") as output:
+            shutil.copyfileobj(input_file, output, length=65536)
         try:
-            with source.open("rb") as input_file:
-                shutil.copyfileobj(input_file, output, length=65536)
-        except BaseException:
-            destination.unlink(missing_ok=True)
-            raise
+            if sys.platform == "win32":
+                # Windows rename is exclusive and also works on volumes without hard links.
+                os.rename(temporary, destination)
+            else:
+                os.link(temporary, destination)
+        except FileExistsError:
+            raise ExecutionError("The download destination already exists.") from None
 
 
 @mcp.tool()

@@ -2,7 +2,9 @@
 
 import asyncio
 import base64
+import codecs
 import hashlib
+import os
 import tempfile
 import weakref
 from collections.abc import AsyncGenerator
@@ -20,6 +22,8 @@ from zoo_mcp import ZooMCPException, ctx
 from zoo_mcp.client_config import get_client_config
 from zoo_mcp.utils.async_utils import run_blocking
 
+MAX_EXECUTION_INPUTS = 256
+MAX_LOG_PAGE_BYTES = 65536
 TERMINAL_STATUSES = {"succeeded", "failed", "timed_out", "canceled"}
 _download_slots: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, asyncio.Semaphore
@@ -159,7 +163,9 @@ class ExecutionSubmission(BaseModel):
         max_length=128,
         description="Executable and arguments. Invoke a shell explicitly for shell syntax.",
     )
-    inputs: list[ExecutionInput] = Field(default_factory=list)
+    inputs: list[ExecutionInput] = Field(
+        default_factory=list, max_length=MAX_EXECUTION_INPUTS
+    )
     outputs: list[ExecutionOutput] = Field(default_factory=list, max_length=256)
     environment: dict[str, str] = Field(
         default_factory=dict,
@@ -179,6 +185,8 @@ class ExecutionSubmission(BaseModel):
 
 def validate_input_paths(paths: list[str]) -> None:
     """Validate normalized workspace paths and reject file/directory collisions."""
+    if len(paths) > MAX_EXECUTION_INPUTS:
+        raise ExecutionError(f"A job accepts at most {MAX_EXECUTION_INPUTS} inputs.")
     destinations = {workspace_path(path) for path in paths}
     if len(paths) != len(destinations) or any(
         parent.as_posix() in destinations
@@ -260,10 +268,10 @@ class ExecutionClient:
             )
         return uploaded
 
-    async def submit_staged(
-        self, submission: ExecutionSubmission, files: list[tuple[str, Path]], key: str
-    ) -> ExecutionJob:
-        """Upload local snapshots once, then submit with the resulting immutable input IDs."""
+    async def prepare_submission(
+        self, submission: ExecutionSubmission, files: list[tuple[str, Path]]
+    ) -> ExecutionSubmission:
+        """Upload snapshots and return the exact request a host can save for replay."""
         validate_input_paths(
             [item.path for item in submission.inputs]
             + [destination for destination, _ in files]
@@ -272,7 +280,13 @@ class ExecutionClient:
         for destination, path in files:
             uploaded = await self.upload(path)
             inputs.append(ExecutionInput(path=destination, artifact_id=uploaded.id))
-        return await self.submit(submission.model_copy(update={"inputs": inputs}), key)
+        return submission.model_copy(update={"inputs": inputs})
+
+    async def submit_staged(
+        self, submission: ExecutionSubmission, files: list[tuple[str, Path]], key: str
+    ) -> ExecutionJob:
+        """Prepare and submit in one call. Replayable hosts save prepare_submission first."""
+        return await self.submit(await self.prepare_submission(submission, files), key)
 
     async def submit(
         self, request: ExecutionSubmission | dict, key: str
@@ -380,7 +394,7 @@ class ExecutionClient:
             page = await self.artifacts(job_id, token)
             for artifact in page.artifacts.items:
                 if artifact.id == artifact_id:
-                    workspace_path(artifact.path)
+                    workspace_path(artifact.path, glob=True)
                     return artifact
             token = page.artifacts.next_page
             if token is None:
@@ -393,6 +407,7 @@ class ExecutionClient:
     async def logs(
         self, job_id: UUID, stream: Literal["stdout", "stderr"], offset: int, limit: int
     ) -> ExecutionLog:
+        limit = min(limit, MAX_LOG_PAGE_BYTES)
         response = await self.request(
             "GET",
             f"jobs/{job_id}/logs",
@@ -500,6 +515,10 @@ class ExecutionLogPage(BaseModel):
     truncated: bool
     failure_code: str | None
     utf8_replaced: bool
+    data_base64: str | None = Field(
+        default=None,
+        description="Exact bytes of this page when its text alone cannot reproduce them.",
+    )
 
 
 class ExecutionObservation(BaseModel):
@@ -523,16 +542,32 @@ async def read_execution_log(
 ) -> ExecutionLogPage:
     page = await client.logs(job_id, stream, offset, limit)
     data = page.decoded()
+    # A UTF-8 scalar may start up to three bytes before this byte cursor.
+    # Emit each scalar on the page that completes it, even with a one-byte limit.
+    prefix = b""
+    if offset and data:
+        size = min(3, offset)
+        previous = await client.logs(job_id, stream, offset - size, size)
+        if previous.next_offset != offset:
+            raise ExecutionError("The execution API returned incomplete log context.")
+        context = previous.decoded()
+        _, consumed = codecs.utf_8_decode(context, "replace", False)
+        prefix = context[consumed:]
+    window = prefix + data
+    final = page.stored_bytes is None or page.next_offset >= page.stored_bytes
     try:
-        text = data.decode("utf-8")
+        text, consumed = codecs.utf_8_decode(window, "strict", final)
         replaced = False
     except UnicodeDecodeError:
-        text = data.decode("utf-8", errors="replace")
+        text, consumed = codecs.utf_8_decode(window, "replace", final)
         replaced = True
     return ExecutionLogPage(
         **page.model_dump(exclude={"data_base64"}),
         text=text,
         utf8_replaced=replaced,
+        data_base64=page.data_base64
+        if replaced or prefix or consumed < len(window)
+        else None,
     )
 
 
@@ -561,25 +596,18 @@ async def observe_execution(
         job_id=job.id,
         job=job,
     )
-    try:
-        async with asyncio.timeout(30):
-            artifacts, stdout, stderr = await asyncio.gather(
-                client.artifacts(job.id, page_token),
-                read_execution_log(client, job.id, "stdout"),
-                read_execution_log(client, job.id, "stderr"),
-                return_exceptions=True,
-            )
-        result.results = (
-            artifacts if isinstance(artifacts, ExecutionArtifacts) else None
-        )
-        result.logs = [
-            page for page in (stdout, stderr) if isinstance(page, ExecutionLogPage)
-        ]
-        if result.results is None or len(result.logs) != 2:
-            result.msg += " Some result reads failed; check this job again later."
-            result.error_code = "execution_results_unavailable"
-    except (ExecutionError, httpx.HTTPError, TimeoutError, ValueError):
-        result.msg += " Results are currently unavailable; check this job again later."
+    artifacts, stdout, stderr = await asyncio.gather(
+        client.artifacts(job.id, page_token),
+        read_execution_log(client, job.id, "stdout"),
+        read_execution_log(client, job.id, "stderr"),
+        return_exceptions=True,
+    )
+    result.results = artifacts if isinstance(artifacts, ExecutionArtifacts) else None
+    result.logs = [
+        page for page in (stdout, stderr) if isinstance(page, ExecutionLogPage)
+    ]
+    if result.results is None or len(result.logs) != 2:
+        result.msg += " Some result reads failed; check this job again later."
         result.error_code = "execution_results_unavailable"
     return result
 
@@ -620,11 +648,31 @@ _IMAGE_FORMATS = {
 }
 
 
+def _artifact_image_mime(artifact_name: str) -> str | None:
+    return _IMAGE_FORMATS.get(PurePosixPath(artifact_name).suffix.lower())
+
+
+def can_read_artifact_inline(artifact: ExecutionArtifact, offset: int) -> bool:
+    """Check the host's raw image byte budget before fetching a retained output."""
+    if _artifact_image_mime(artifact.path) is None:
+        return True
+    if offset:
+        raise ExecutionError("Image reads do not support offsets.")
+    configured = os.getenv("ZOO_MCP_MAX_INLINE_IMAGE_BYTES")
+    if configured is None:
+        return True
+    if not configured.isascii() or not configured.isdecimal():
+        raise ExecutionError(
+            "ZOO_MCP_MAX_INLINE_IMAGE_BYTES must be a nonnegative integer."
+        )
+    return artifact.byte_length <= int(configured)
+
+
 def read_artifact_content(
     path: Path, artifact_name: str, offset: int = 0
 ) -> ArtifactImage | tuple[str, int]:
     """Read a verified file as an inline image or a page of UTF-8 text."""
-    mime = _IMAGE_FORMATS.get(PurePosixPath(artifact_name).suffix.lower())
+    mime = _artifact_image_mime(artifact_name)
     if mime is None:
         return read_text_page(path, offset)
     if offset:

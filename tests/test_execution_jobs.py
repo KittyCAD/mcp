@@ -278,6 +278,14 @@ async def test_staged_submission_retries_without_reupload(tmp_path):
             await client.submit_staged(
                 submission, [("input", source), ("input/sub", source)], "key"
             )
+        with pytest.raises(ExecutionError, match="at most 256"):
+            existing = ExecutionSubmission(
+                **submission.model_dump(exclude={"inputs"}),
+                inputs=[{"path": "existing", "artifact_id": input_id}],
+            )
+            await client.prepare_submission(
+                existing, [(str(i), source) for i in range(256)]
+            )
         assert not uploads and not admissions
         job = await client.submit_staged(submission, [("input", source)], "key")
     assert job.id == job_id and uploads == [b"input"]

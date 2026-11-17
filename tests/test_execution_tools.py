@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+from unittest.mock import Mock
 from uuid import uuid4
 
 import httpx
@@ -15,7 +16,7 @@ from mcp.types import CallToolResult, ImageContent
 from zoo_mcp import execution_jobs
 from zoo_mcp.client_config import ZooClientConfig, get_client_config, use_client_config
 from zoo_mcp.execution_jobs import ExecutionClient, ExecutionError, execution_client
-from zoo_mcp.server import mcp
+from zoo_mcp.server import _save_execution_artifact, mcp
 
 
 async def call_tool(name: str, arguments: dict) -> CallToolResult:
@@ -263,10 +264,10 @@ async def test_repeated_cancel_returns_the_observed_status(api):
 
 
 @pytest.mark.asyncio
-async def test_submission_forwards_more_than_256_inputs(api):
+async def test_submission_accepts_256_inputs(api):
     inputs = [
         {"artifact_id": str(api.input_id), "path": f"inputs/{index}.dat"}
-        for index in range(300)
+        for index in range(256)
     ]
     result = await call_tool(
         "submit_job_execution",
@@ -285,22 +286,50 @@ async def test_submission_forwards_more_than_256_inputs(api):
 
 
 @pytest.mark.asyncio
-async def test_log_reads_forward_and_decode_pages_larger_than_64k(api):
+async def test_log_reads_page_through_128k(api):
     limit = 128 * 1024
-    api.log_data = b"prefix" + b"x" * limit + b"tail"
-    result = await call_tool(
-        "read_job_execution_logs",
-        {"job_id": str(api.job_id), "offset": 6, "limit": limit},
-    )
-    assert result.structured_content["text"] == "x" * limit
-    assert result.structured_content["next_offset"] == 6 + limit
-    assert result.structured_content["stored_bytes"] == len(api.log_data)
-    assert api.requests[-1].url.params["limit"] == str(limit)
+    api.log_data = b"prefix" + b"x" * limit
+    offset = 6
+    for _ in range(2):
+        result = await call_tool(
+            "read_job_execution_logs",
+            {"job_id": str(api.job_id), "offset": offset, "limit": limit},
+        )
+        assert result.structured_content["text"] == "x" * 65536
+        offset = result.structured_content["next_offset"]
+    assert offset == len(api.log_data)
+    assert max(int(request.url.params["limit"]) for request in api.requests) == 65536
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [8192, 1])
+async def test_log_pages_preserve_utf8_and_byte_cursors(api, limit):
+    prefix = "a" * (limit - 1)
+    api.log_data = (prefix + "é🌍").encode() + b"\xff"
+    text_pages = []
+    offset = 0
+    while offset < len(api.log_data):
+        result = await call_tool(
+            "read_job_execution_logs",
+            {"job_id": str(api.job_id), "offset": offset, "limit": limit},
+        )
+        page = result.structured_content
+        text_pages.append(page["text"])
+        assert offset < page["next_offset"] <= offset + limit
+        if page["data_base64"] is not None:
+            assert (
+                base64.b64decode(page["data_base64"])
+                == api.log_data[offset : page["next_offset"]]
+            )
+        if page["utf8_replaced"]:
+            assert page["data_base64"] is not None
+        offset = page["next_offset"]
+    assert "".join(text_pages) == prefix + "é🌍�"
 
 
 @pytest.mark.asyncio
 async def test_mcp_text_image_and_verified_download(api, tmp_path):
-    api.name = "result.txt"
+    api.name = "stress[0].txt"
     api.data = ("x" * 65535 + "éend").encode()
     arguments = {"job_id": str(api.job_id), "artifact_id": str(api.artifact_id)}
     first = await call_tool("use_job_execution_artifact", arguments)
@@ -312,7 +341,7 @@ async def test_mcp_text_image_and_verified_download(api, tmp_path):
     assert second.structured_content["text"] == "éend"
     with pytest.raises(ToolError, match="UTF-8 character boundary"):
         await call_tool("use_job_execution_artifact", {**arguments, "offset": 65536})
-    api.name = "result.png"
+    api.name = "stress[0].png"
     api.data = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1sAAAAASUVORK5CYII="
     )
@@ -334,6 +363,97 @@ async def test_mcp_text_image_and_verified_download(api, tmp_path):
             {**arguments, "action": "download", "destination": str(destination)},
         )
     assert destination.read_bytes() == api.data
+
+
+@pytest.mark.asyncio
+async def test_inline_image_budget_uses_metadata_before_fetch(
+    api, monkeypatch, tmp_path
+):
+    api.name = "plot[0].png"
+    args = {"job_id": str(api.job_id), "artifact_id": str(api.artifact_id)}
+    monkeypatch.setenv("ZOO_MCP_MAX_INLINE_IMAGE_BYTES", str(len(api.data) - 1))
+    result = await call_tool("use_job_execution_artifact", args)
+    assert result.structured_content["artifact"] == api.artifact
+    assert "download" in result.structured_content["message"]
+    assert all(request.url.path.endswith("/artifacts") for request in api.requests)
+    target = tmp_path / "plot.png"
+    await call_tool(
+        "use_job_execution_artifact",
+        {**args, "action": "download", "destination": str(target)},
+    )
+    assert target.read_bytes() == api.data
+    monkeypatch.setenv("ZOO_MCP_MAX_INLINE_IMAGE_BYTES", str(len(api.data)))
+    inline = await call_tool("use_job_execution_artifact", args)
+    assert any(isinstance(part, ImageContent) for part in inline.content)
+
+
+def test_download_failed_close_leaves_destination_available(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from pathlib import Path
+
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.write_bytes(b"verified")
+    real_open = Path.open
+
+    @contextmanager
+    def fail_close(path, mode, *args, **kwargs):
+        with real_open(path, mode, *args, **kwargs) as file:
+            yield file
+        if mode == "wb":
+            raise OSError("flush failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", fail_close)
+        with pytest.raises(OSError, match="flush failed"):
+            _save_execution_artifact(source, target)
+    assert list(tmp_path.iterdir()) == [source]
+    _save_execution_artifact(source, target)
+    assert target.read_bytes() == b"verified"
+
+
+def test_download_preserves_concurrent_creator(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.write_bytes(b"verified")
+    publish_method = "rename" if sys.platform == "win32" else "link"
+    publish = getattr(os, publish_method)
+
+    def concurrent_create(temp, destination):
+        target.write_bytes(b"winner")
+        publish(temp, destination)
+
+    monkeypatch.setattr(os, publish_method, concurrent_create)
+    with pytest.raises(ExecutionError, match="already exists"):
+        _save_execution_artifact(source, target)
+    assert target.read_bytes() == b"winner"
+    assert set(tmp_path.iterdir()) == {source, target}
+
+
+@pytest.mark.asyncio
+async def test_slow_stderr_preserves_completed_observations(api, monkeypatch):
+    loop = asyncio.get_running_loop()
+    clock = Mock(wraps=loop.time)
+    monkeypatch.setattr(loop, "time", clock)
+    logs = ExecutionClient.logs
+
+    async def delayed(self, job_id, stream, offset, limit):
+        if stream == "stderr":
+            clock.return_value = loop_time + 31
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            raise httpx.ReadTimeout("slow log")
+        return await logs(self, job_id, stream, offset, limit)
+
+    loop_time = loop.time()
+    monkeypatch.setattr(ExecutionClient, "logs", delayed)
+    result = (
+        await call_tool("get_job_execution", {"job_id": str(api.job_id)})
+    ).structured_content
+    assert result["results"]["artifacts"]["items"] == [api.artifact]
+    assert [log["stream"] for log in result["logs"]] == ["stdout"]
+    assert result["error_code"] == "execution_results_unavailable"
 
 
 @pytest.mark.asyncio

@@ -52,7 +52,10 @@ async def read_job_execution_logs(
     offset: Annotated[int, Field(ge=0)] = 0,
     limit: Annotated[int, Field(ge=1)] = 8192,
 ) -> ExecutionLogPage:
-    """Read archived stdout or stderr. Check available and use next_offset to page through stored bytes."""
+    """Read up to 64 KiB of archived stdout or stderr. Check available and continue
+    at next_offset. data_base64 gives the original page bytes when text is lossy
+    or a UTF-8 character crosses a page boundary.
+    """
     if offset < 0 or limit < 1:
         raise ExecutionError(
             "Log offset must be nonnegative and limit must be positive."

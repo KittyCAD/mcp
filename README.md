@@ -116,6 +116,10 @@ configuration representations.
 Client configuration applies to downstream calls. Applications serving different
 owners must also isolate their process-wide modeling sessions and workspaces.
 
+The optional `ZOO_MCP_MAX_INLINE_IMAGE_BYTES` environment variable limits the
+raw file size for inline execution images. Larger images return artifact
+metadata and can be downloaded. The default has no size limit.
+
 ### Prebuilt binaries
 
 Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:
