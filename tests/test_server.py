@@ -20,9 +20,20 @@ from kittycad.models import (
     FaceGetGradient,
     FaceGetPosition,
     FileVolume,
+    ModelingCmd,
     Point3d,
 )
 from kittycad.models.async_api_call_output import OptionFileMass, OptionFileVolume
+from kittycad.models.modeling_cmd import (
+    OptionDefaultCameraGetSettings,
+    OptionSelectGet,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionDefaultCameraGetSettings as ResponseDefaultCameraGetSettings,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionSelectGet as ResponseSelectGet,
+)
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, InputRequiredResult, TextContent
 from PIL import Image as PILImage
@@ -1819,6 +1830,25 @@ async def test_cpu_kcl_snapshots_and_measurements(
 async def test_cpu_session_preserves_camera_and_selection(cube_kcl):
     tools = zoo_mcp.zoo_tools
     session_id = await tools.zoo_start_modeling_session()
+
+    async def selection_ids():
+        result = await tools.zoo_execute_modeling_command(
+            ModelingCmd(OptionSelectGet()),
+            ResponseSelectGet,
+            "selection state",
+            session_id,
+        )
+        return result.data.entity_ids
+
+    async def camera_settings():
+        result = await tools.zoo_execute_modeling_command(
+            ModelingCmd(OptionDefaultCameraGetSettings()),
+            ResponseDefaultCameraGetSettings,
+            "camera settings",
+            session_id,
+        )
+        return result.data.settings
+
     try:
         execution = await tools.zoo_exec_kcl_project(
             session_id=session_id, kcl_path=cube_kcl
@@ -1838,15 +1868,22 @@ async def test_cpu_session_preserves_camera_and_selection(cube_kcl):
         ):
             await mcp.call_tool(name, arguments={"session_id": session_id, **arguments})
 
+        assert await selection_ids() == [face_id]
+        camera = await camera_settings()
         selected = await tools.zoo_snapshot(session_id=session_id, zoom=False)
         repeated = await tools.zoo_snapshot(session_id=session_id, zoom=False)
         assert selected == repeated, "Repeated snapshots must retain camera framing"
+        # CPU snapshots can omit selection overlays. Query the actual scene
+        # state instead of using a pixel difference to infer selection retention.
+        assert await selection_ids() == [face_id]
+        assert await camera_settings() == camera
         for name in ("select_entities", "highlight_set_entities"):
             await mcp.call_tool(
                 name, arguments={"session_id": session_id, "entity_ids": []}
             )
-        cleared = await tools.zoo_snapshot(session_id=session_id, zoom=False)
-        assert selected != cleared, "Selections and highlights must remain visible"
+        await tools.zoo_snapshot(session_id=session_id, zoom=False)
+        assert await selection_ids() == []
+        assert await camera_settings() == camera
         await mcp.call_tool(
             "entity_get_index",
             arguments={"session_id": session_id, "entity_id": face_id},
