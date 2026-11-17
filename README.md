@@ -182,6 +182,22 @@ You can also use the helper script included in this repo:
 ```
 The script prompts for a request, runs Codex with the Zoo MCP server, and saves a JSONL transcript (including token usage) to `codex-run-<timestamp>.jsonl`.
 
+## Remote job execution
+
+Use `upload_job_execution_input` to upload selected files, then
+`submit_job_execution` with explicit runtime and compute-profile IDs, an argv
+command, input destinations, output selectors, and a stable idempotency key.
+Execution uses the current caller's Zoo authentication and host configuration;
+the API controls which runtimes and compute profiles the account can use.
+
+Jobs continue after disconnects. Use `get_job_execution`, `list_job_executions`,
+`read_job_execution_logs`, and `cancel_job_execution` to manage them.
+`use_job_execution_artifact` reads paginated text or raster images, or downloads
+verified bytes to an explicit local destination without overwriting files.
+After uncertain submission, recover the existing job rather than re-uploading
+inputs or choosing a new idempotency key. These tools execute jobs only;
+simulation preparation, result interpretation, and postprocessing stay with callers.
+
 ## Architecture
 
 Tools are defined in `src/zoo_mcp/*.py`, where they are then imported into
