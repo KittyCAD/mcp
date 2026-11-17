@@ -1,5 +1,6 @@
 """The shared execution transport accepts solver jobs without Python policy."""
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -9,7 +10,14 @@ import httpx
 import pytest
 from kittycad import AsyncKittyCAD
 
-from zoo_mcp.execution_jobs import ExecutionClient, ExecutionError, observe_execution
+from zoo_mcp.execution_jobs import (
+    ExecutionArtifact,
+    ExecutionClient,
+    ExecutionError,
+    ExecutionJob,
+    ExecutionSubmission,
+    observe_execution,
+)
 
 
 @pytest.mark.asyncio
@@ -150,26 +158,152 @@ async def test_solver_job_lifecycle_uses_shared_transport(
 
 
 @pytest.mark.asyncio
-async def test_uncertain_solver_submission_has_runtime_neutral_recovery_message():
+@pytest.mark.parametrize("failure, attempts_expected", [("lost", 2), ("malformed", 1)])
+async def test_uncertain_solver_submission_has_runtime_neutral_recovery_message(
+    failure, attempts_expected
+):
     attempts = []
 
-    def fail(request):
+    def respond(request):
         attempts.append((request.headers["Idempotency-Key"], request.content))
-        raise httpx.ReadError("connection lost", request=request)
+        if failure == "lost":
+            raise httpx.ReadError("connection lost", request=request)
+        return httpx.Response(202, json={})
 
     async with AsyncKittyCAD(
         token="solver-user",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(fail)),
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     ) as sdk:
         client = ExecutionClient(sdk)
-        with pytest.raises(ExecutionError) as failure:
+        with pytest.raises(ExecutionError) as error:
             await client.submit(
                 {"runtime_id": "calculix-2.23", "command": ["ccx"]}, "solver-submission"
             )
-    assert len(attempts) == 2 and attempts[0] == attempts[1]
-    assert failure.value.code == "execution_submission_unknown"
-    assert "python" not in str(failure.value).lower()
+    assert len(attempts) == attempts_expected and len(set(attempts)) == 1
+    assert error.value.code == "execution_submission_unknown"
+    assert "python" not in str(error.value).lower()
 
 
 def test_default_execution_error_is_runtime_neutral():
     assert ExecutionError("Solver error").code == "execution_error"
+
+
+@pytest.mark.asyncio
+async def test_download_larger_than_former_limit_is_streamed_and_verified():
+    chunk = b"x" * (1024 * 1024)
+    digest = hashlib.sha256()
+    for _ in range(100):
+        digest.update(chunk)
+    digest.update(b"x")
+    length = 100 * len(chunk) + 1
+
+    class ArtifactStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(100):
+                yield chunk
+            yield b"x"
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, stream=ArtifactStream())
+    )
+    artifact = ExecutionArtifact(
+        id=uuid4(),
+        path="large.bin",
+        byte_length=length,
+        sha256=digest.hexdigest(),
+    )
+    async with AsyncKittyCAD(
+        token="test-user-token", http_client=httpx.AsyncClient(transport=transport)
+    ) as sdk:
+        client = ExecutionClient(sdk)
+        async with client.download(uuid4(), artifact) as path:
+            assert path.stat().st_size == length
+
+
+@pytest.mark.asyncio
+async def test_wait_deadline_covers_a_slow_status_read(monkeypatch):
+    async def slow_read(job_id):
+        await asyncio.sleep(10)
+        pytest.fail("The wait deadline should cancel this read")
+
+    async with AsyncKittyCAD(token="caller") as sdk:
+        client = ExecutionClient(sdk)
+        monkeypatch.setattr(client, "job", slow_read)
+        job = ExecutionJob(
+            id=uuid4(),
+            status="running",
+            runtime_id="r",
+            compute_profile_id="c",
+            timeout_seconds=10,
+        )
+        assert await asyncio.wait_for(client.wait(job, 1), timeout=2) == job
+
+
+@pytest.mark.asyncio
+async def test_staged_submission_retries_without_reupload(tmp_path):
+    input_id, job_id = uuid4(), uuid4()
+    uploads, admissions = [], []
+    source = tmp_path / "input.dat"
+    source.write_bytes(b"input")
+
+    def respond(request):
+        if request.url.path.endswith("/inputs"):
+            uploads.append(request.content)
+            return httpx.Response(
+                201,
+                json={
+                    "id": str(input_id),
+                    "byte_length": len(request.content),
+                    "sha256": hashlib.sha256(request.content).hexdigest(),
+                },
+            )
+        admissions.append(
+            (request.headers["Idempotency-Key"], json.loads(request.content))
+        )
+        if len(admissions) == 1:
+            raise httpx.ReadError("lost response", request=request)
+        return httpx.Response(
+            202, json={"id": str(job_id), "status": "queued", **admissions[-1][1]}
+        )
+
+    submission = ExecutionSubmission(
+        runtime_id="solver", compute_profile_id="cpu", command=["solve"]
+    )
+    async with AsyncKittyCAD(
+        token="caller",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as sdk:
+        client = ExecutionClient(sdk)
+        with pytest.raises(ExecutionError, match="overlap"):
+            await client.submit_staged(
+                submission, [("input", source), ("input/sub", source)], "key"
+            )
+        assert not uploads and not admissions
+        job = await client.submit_staged(submission, [("input", source)], "key")
+    assert job.id == job_id and uploads == [b"input"]
+    assert len(admissions) == 2 and admissions[0] == admissions[1]
+    assert admissions[0][0] == "key"
+    assert admissions[0][1]["inputs"] == [
+        {"artifact_id": str(input_id), "path": "input"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_observation_preserves_job_when_wait_fails(monkeypatch):
+    async def failed_wait(job, seconds):
+        raise httpx.ReadError("private detail")
+
+    async with AsyncKittyCAD(token="caller") as sdk:
+        client = ExecutionClient(sdk)
+        monkeypatch.setattr(client, "wait", failed_wait)
+        job = ExecutionJob(
+            id=uuid4(),
+            status="running",
+            runtime_id="r",
+            compute_profile_id="c",
+            timeout_seconds=10,
+        )
+        result = await observe_execution(client, job, wait_seconds=20)
+    assert result.job == job and result.job_id == job.id
+    assert result.error_code == "execution_observation_unavailable"
+    assert "private detail" not in result.msg

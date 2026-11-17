@@ -7,6 +7,7 @@ import tempfile
 import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 from uuid import UUID
@@ -153,10 +154,17 @@ class ExecutionSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
     runtime_id: str = Field(min_length=1)
     compute_profile_id: str = Field(min_length=1)
-    command: list[str] = Field(min_length=1, max_length=128)
+    command: list[str] = Field(
+        min_length=1,
+        max_length=128,
+        description="Executable and arguments. Invoke a shell explicitly for shell syntax.",
+    )
     inputs: list[ExecutionInput] = Field(default_factory=list)
     outputs: list[ExecutionOutput] = Field(default_factory=list, max_length=256)
-    environment: dict[str, str] = Field(default_factory=dict)
+    environment: dict[str, str] = Field(
+        default_factory=dict,
+        description="Non-secret environment variables for the job.",
+    )
     timeout_seconds: int = Field(default=300, ge=1, le=86400)
 
     @model_validator(mode="after")
@@ -165,12 +173,22 @@ class ExecutionSubmission(BaseModel):
             raise ValueError(
                 "command requires an executable and cannot contain NUL bytes."
             )
-        paths = [item.path for item in self.inputs]
-        if len(set(paths)) != len(paths) or any(
-            other.startswith(path + "/") for path in paths for other in paths
-        ):
-            raise ValueError("Input destinations must be unique and must not overlap.")
+        validate_input_paths([item.path for item in self.inputs])
         return self
+
+
+def validate_input_paths(paths: list[str]) -> None:
+    """Validate normalized workspace paths and reject file/directory collisions."""
+    destinations = {workspace_path(path) for path in paths}
+    if len(paths) != len(destinations) or any(
+        parent.as_posix() in destinations
+        for path in paths
+        for parent in PurePosixPath(path).parents
+    ):
+        raise ExecutionError(
+            "Input destinations must be unique and must not overlap.",
+            "invalid_execution_path",
+        )
 
 
 def check_response(response: httpx.Response) -> None:
@@ -242,7 +260,23 @@ class ExecutionClient:
             )
         return uploaded
 
-    async def submit(self, request: dict, key: str) -> ExecutionJob:
+    async def submit_staged(
+        self, submission: ExecutionSubmission, files: list[tuple[str, Path]], key: str
+    ) -> ExecutionJob:
+        """Upload local snapshots once, then submit with the resulting immutable input IDs."""
+        validate_input_paths(
+            [item.path for item in submission.inputs]
+            + [destination for destination, _ in files]
+        )
+        inputs = list(submission.inputs)
+        for destination, path in files:
+            uploaded = await self.upload(path)
+            inputs.append(ExecutionInput(path=destination, artifact_id=uploaded.id))
+        return await self.submit(submission.model_copy(update={"inputs": inputs}), key)
+
+    async def submit(
+        self, request: ExecutionSubmission | dict, key: str
+    ) -> ExecutionJob:
         """Submit a frozen API request with its caller-owned idempotency key.
 
         The caller selects runtime_id, compute_profile_id, command, inputs,
@@ -251,6 +285,8 @@ class ExecutionClient:
         """
         # Repeating this exact request is safe even when the first response was
         # lost. Never regenerate upload IDs or the key inside this retry loop.
+        if isinstance(request, ExecutionSubmission):
+            request = request.model_dump(mode="json")
         for attempt in range(2):
             try:
                 response = await self.http.post(
@@ -370,6 +406,15 @@ class ExecutionClient:
         ):
             raise ExecutionError("The execution API returned an invalid log cursor.")
         return page
+
+    @asynccontextmanager
+    async def open_artifact(
+        self, job_id: UUID, artifact_id: UUID
+    ) -> AsyncGenerator[tuple[ExecutionArtifact, Path], None]:
+        """Yield the metadata and verified local bytes for one retained output."""
+        artifact = await self.artifact(job_id, artifact_id)
+        async with self.download(job_id, artifact) as path:
+            yield artifact, path
 
     @asynccontextmanager
     async def download(
@@ -495,7 +540,20 @@ async def observe_execution(
     client: ExecutionClient,
     job: ExecutionJob,
     page_token: str | None = None,
+    *,
+    wait_seconds: int = 0,
 ) -> ExecutionObservation:
+    if wait_seconds:
+        try:
+            job = await client.wait(job, wait_seconds)
+        except (ExecutionError, httpx.HTTPError, ValueError, TimeoutError):
+            return ExecutionObservation(
+                ok=job.status not in {"failed", "timed_out", "canceled"},
+                msg=f"Job {job.id} could not be refreshed. Use get_job_execution to check it again.",
+                job_id=job.id,
+                job=job,
+                error_code="execution_observation_unavailable",
+            )
     result = ExecutionObservation(
         ok=job.status not in {"failed", "timed_out", "canceled"},
         msg=f"Execution job {job.id}: {job.status}. "
@@ -545,3 +603,30 @@ def read_text_page(path: Path, offset: int, limit: int = 65536) -> tuple[str, in
     except UnicodeDecodeError:
         raise ExecutionError("This output is not UTF-8 text; use download.") from None
     return text, offset + end
+
+
+@dataclass(frozen=True)
+class ArtifactImage:
+    mime_type: str
+    data: str  # base64-encoded image for inline tool output
+
+
+_IMAGE_FORMATS = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+def read_artifact_content(
+    path: Path, artifact_name: str, offset: int = 0
+) -> ArtifactImage | tuple[str, int]:
+    """Read a verified file as an inline image or a page of UTF-8 text."""
+    mime = _IMAGE_FORMATS.get(PurePosixPath(artifact_name).suffix.lower())
+    if mime is None:
+        return read_text_page(path, offset)
+    if offset:
+        raise ExecutionError("Image reads do not support offsets.")
+    return ArtifactImage(mime, base64.b64encode(path.read_bytes()).decode("ascii"))

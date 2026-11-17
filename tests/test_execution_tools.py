@@ -31,6 +31,9 @@ def api(monkeypatch):
         job_id = uuid4()
         input_id = uuid4()
         artifact_id = uuid4()
+        status = "succeeded"
+        archival = "complete"
+        cancel_status = "canceling"
         name = "result.csv"
         data = b"value\n55\n"
         log_data = b"done\xff\n"
@@ -43,7 +46,7 @@ def api(monkeypatch):
         def job(self):
             return {
                 "id": str(self.job_id),
-                "status": "succeeded",
+                "status": self.status,
                 "runtime_id": "openfoam-14",
                 "compute_profile_id": "cpu-standard-2",
                 "timeout_seconds": 300,
@@ -98,16 +101,23 @@ def api(monkeypatch):
                     200, json={"items": [self.job], "next_page": "next-jobs"}
                 )
             if path.endswith("/cancel"):
-                return httpx.Response(200, json={**self.job, "status": "canceling"})
+                return httpx.Response(
+                    200, json={**self.job, "status": self.cancel_status}
+                )
             if path == f"/execution/jobs/{self.job_id}":
                 return httpx.Response(200, json=self.job)
             if path.endswith("/artifacts"):
                 return httpx.Response(
                     200,
                     json={
-                        "state": "complete",
+                        "state": self.archival,
+                        "failure_code": "output_missing"
+                        if self.archival == "failed"
+                        else None,
                         "artifacts": {
-                            "items": [self.artifact],
+                            "items": [self.artifact]
+                            if self.archival != "pending"
+                            else [],
                             "next_page": "next-artifacts",
                         },
                     },
@@ -117,20 +127,22 @@ def api(monkeypatch):
                 offset = int(request.url.params["offset"])
                 content = (
                     self.log_data[offset : offset + int(request.url.params["limit"])]
-                    if stream == "stdout"
+                    if stream == "stdout" and self.archival != "pending"
                     else b""
                 )
                 return httpx.Response(
                     200,
                     json={
-                        "state": "complete",
-                        "available": True,
+                        "state": self.archival,
+                        "available": self.archival != "pending",
                         "stream": stream,
                         "data_base64": base64.b64encode(content).decode(),
                         "offset": offset,
                         "next_offset": offset + len(content),
-                        "stored_bytes": len(self.log_data) if stream == "stdout" else 0,
-                        "complete": True,
+                        "stored_bytes": None
+                        if self.archival == "pending"
+                        else (len(self.log_data) if stream == "stdout" else 0),
+                        "complete": self.archival != "pending",
                         "truncated": False,
                     },
                 )
@@ -222,6 +234,32 @@ async def test_mcp_submission_upload_and_job_management(
     }
     canceled = await call_tool("cancel_job_execution", {"job_id": str(api.job_id)})
     assert canceled.structured_content["status"] == "canceling"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "archival"), [("queued", "pending"), ("failed", "failed")]
+)
+async def test_job_observation_preserves_archive_state(api, status, archival):
+    api.status, api.archival = status, archival
+    response = await call_tool("get_job_execution", {"job_id": str(api.job_id)})
+    data = response.structured_content
+    assert data["job"]["status"] == status and data["results"]["state"] == archival
+    if archival == "pending":
+        assert data["ok"] and not data["logs"][0]["available"]
+        assert data["logs"][0]["stored_bytes"] is None
+    else:
+        assert not data["ok"] and data["results"]["failure_code"] == "output_missing"
+        assert data["logs"][0]["text"] and data["results"]["artifacts"]["items"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancel_returns_the_observed_status(api):
+    for status in ["canceling", "canceling", "succeeded"]:
+        api.cancel_status = status
+        result = await call_tool("cancel_job_execution", {"job_id": str(api.job_id)})
+        assert result.structured_content["status"] == status
+    assert not api.submissions
 
 
 @pytest.mark.asyncio
