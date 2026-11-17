@@ -1854,7 +1854,7 @@ wheels = [
 
 [[package]]
 name = "zoo-mcp"
-version = "0.34.4"
+version = "0.35.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
