@@ -47,6 +47,12 @@ from kittycad.models.ok_modeling_cmd_response import (
     OptionEntityGetIndex as ResponseEntityGetIndex,
 )
 from kittycad.models.ok_modeling_cmd_response import (
+    OptionHighlightSetEntities as ResponseHighlightSetEntities,
+)
+from kittycad.models.ok_modeling_cmd_response import (
+    OptionSelectReplace as ResponseSelectReplace,
+)
+from kittycad.models.ok_modeling_cmd_response import (
     OptionToggleGraphics as ResponseToggleGraphics,
 )
 from kittycad.models.ok_web_socket_response_data import (
@@ -780,6 +786,8 @@ def _capture_snapshot_commands(
         zoo_tools.ResponseZoomToFit: SimpleNamespace(data=None),
         zoo_tools.ResponseEdgeLinesVisible: SimpleNamespace(data=None),
         zoo_tools.ResponseSetOrderIndependentTransparency: SimpleNamespace(data=None),
+        ResponseSelectReplace: SimpleNamespace(data=None),
+        ResponseHighlightSetEntities: SimpleNamespace(data=None),
         zoo_tools.ResponseTakeSnapshot: SimpleNamespace(
             data=TakeSnapshot(contents="anBlZw==")
         ),
@@ -931,6 +939,21 @@ async def test_snapshot_retains_cpu_graphics_across_calls(
         monkeypatch.setattr(zoo_tools, "_send_modeling_command", send)
     else:
         await zoo_tools.zoo_snapshot(session_id=session_id)
+    # Selection and highlight commands share the initialized renderer with
+    # subsequent snapshots; reinitializing it would discard their scene state.
+    for command, response in (
+        (
+            OptionSelectReplace(entities=["selected-face"]),
+            ResponseSelectReplace,
+        ),
+        (
+            OptionHighlightSetEntities(entities=["selected-face"]),
+            ResponseHighlightSetEntities,
+        ),
+    ):
+        await zoo_tools.zoo_execute_modeling_command(
+            ModelingCmd(command), response, "visual state", session_id
+        )
     await zoo_tools.zoo_snapshot(session_id=session_id, zoom=False)
     assert [call.args[1] for call in toggle.await_args_list] == [True]
     assert isinstance(zoo_tools._modeling_session, zoo_tools._ModelingSession)
