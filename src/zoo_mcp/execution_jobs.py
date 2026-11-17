@@ -8,15 +8,25 @@ import os
 import tempfile
 import weakref
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
 from kittycad import AsyncKittyCAD
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from kittycad.models.error import Error as ZooAPIError
+from kittycad.pagination import create_async_page_iterator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from zoo_mcp import ZooMCPException, ctx
 from zoo_mcp.client_config import get_client_config
@@ -43,6 +53,37 @@ class ExecutionError(ZooMCPException):
     def __init__(self, message: str, code: str = "execution_error") -> None:
         super().__init__(message)
         self.code = code
+
+
+class ExecutionAPIError(ExecutionError):
+    """Expose the API's public error fields to tool callers."""
+
+    def __init__(self, status: int, detail: ZooAPIError | None) -> None:
+        self.status = status
+        code = f"execution_http_{status}"
+        message = f"The execution API returned HTTP {status}."
+        if detail:
+            reference = f"request ID {detail.request_id}"
+            if detail.error_code:
+                code = detail.error_code
+                reference = f"{code}, {reference}"
+            message = f"{detail.message} ({reference})"
+        super().__init__(message, code)
+
+    @classmethod
+    async def raise_for_status(cls, response: httpx.Response) -> None:
+        if response.is_success:
+            return
+        detail = None
+        if (
+            response.headers.get("content-type", "").partition(";")[0].lower()
+            == "application/json"
+        ):
+            with suppress(ValidationError):
+                detail = ZooAPIError.model_validate_json(
+                    await response.aread(), extra="ignore"
+                )
+        raise cls(response.status_code, detail)
 
 
 def workspace_path(path: str, *, glob: bool = False) -> str:
@@ -102,6 +143,7 @@ class ExecutionArtifacts(BaseModel):
 
 
 class ExecutionLog(BaseModel):
+    model_config = ConfigDict(frozen=True)
     state: str
     available: bool
     stream: Literal["stdout", "stderr"]
@@ -113,7 +155,8 @@ class ExecutionLog(BaseModel):
     truncated: bool
     failure_code: str | None = None
 
-    def decoded(self) -> bytes:
+    @cached_property
+    def data(self) -> bytes:
         data = base64.b64decode(self.data_base64, validate=True)
         if self.next_offset != self.offset + len(data):
             raise ExecutionError("The execution API returned an invalid log page.")
@@ -199,28 +242,6 @@ def validate_input_paths(paths: list[str]) -> None:
         )
 
 
-def check_response(response: httpx.Response) -> None:
-    """Do not expose response bodies, URLs, or bearer tokens on transport errors."""
-    if response.is_success:
-        return
-    status = response.status_code
-    messages = {
-        400: "The execution API rejected the request; check paths, outputs, timeout, "
-        "and the deployment's configured runtime/profile.",
-        401: "Zoo authentication is required for execution.",
-        403: "Execution is not enabled or authorized for this Zoo account.",
-        404: "The execution resource is unavailable or not owned by this account.",
-        409: "The submission key conflicts with an existing job. Do not resubmit "
-        "with a new key; list existing executions to recover the original job.",
-        413: "The execution request or input exceeds the API size limit.",
-        429: "The execution API is at capacity. Retry the read later.",
-    }
-    raise ExecutionError(
-        messages.get(status, "The execution API is temporarily unavailable."),
-        f"execution_http_{status}",
-    )
-
-
 class ExecutionClient:
     """Runtime-neutral operations on the authenticated Zoo execution-jobs API."""
 
@@ -229,15 +250,17 @@ class ExecutionClient:
         self.base_url = client.base_url.rstrip("/")
         self.headers = client.get_headers()
 
-    async def request(self, method: str, path: str, **kwargs) -> httpx.Response:
+    async def request(
+        self, method: str, path: str, *, headers: dict[str, str] | None = None, **kwargs
+    ) -> httpx.Response:
         response = await self.http.request(
             method,
             f"{self.base_url}/execution/{path}",
-            headers=self.headers,
+            headers={**self.headers, **(headers or {})},
             follow_redirects=False,
             **kwargs,
         )
-        check_response(response)
+        await ExecutionAPIError.raise_for_status(response)
         return response
 
     async def upload(self, path: Path) -> UploadedInput:
@@ -253,14 +276,13 @@ class ExecutionClient:
                     digest.update(chunk)
                     yield chunk
 
-        response = await self.http.post(
-            f"{self.base_url}/execution/inputs",
-            headers={**self.headers, "Content-Type": "application/octet-stream"},
+        response = await self.request(
+            "POST",
+            "inputs",
+            headers={"Content-Type": "application/octet-stream"},
             content=chunks(),
             timeout=300,
-            follow_redirects=False,
         )
-        check_response(response)
         uploaded = UploadedInput.model_validate(response.json())
         if uploaded.byte_length != length or uploaded.sha256 != digest.hexdigest():
             raise ExecutionError(
@@ -301,40 +323,33 @@ class ExecutionClient:
         # lost. Never regenerate upload IDs or the key inside this retry loop.
         if isinstance(request, ExecutionSubmission):
             request = request.model_dump(mode="json")
-        for attempt in range(2):
+        detail = ""
+        for _ in range(2):
             try:
-                response = await self.http.post(
-                    f"{self.base_url}/execution/jobs",
-                    headers={**self.headers, "Idempotency-Key": key},
+                response = await self.request(
+                    "POST",
+                    "jobs",
+                    headers={"Idempotency-Key": key},
                     json=request,
-                    follow_redirects=False,
                 )
             except httpx.TransportError:
-                if attempt == 0:
-                    continue
-                raise ExecutionError(
-                    "Job submission may have succeeded. Do not run it again. "
-                    "List existing executions to recover the job.",
-                    "execution_submission_unknown",
-                ) from None
-            if response.status_code >= 500:
-                if attempt == 0:
-                    continue
-                raise ExecutionError(
-                    "Job admission is uncertain. Do not run it again; "
-                    "list existing executions to recover the job.",
-                    "execution_submission_unknown",
-                )
-            check_response(response)
+                detail = ""
+                continue
+            except ExecutionAPIError as error:
+                if error.status < 500:
+                    raise
+                detail = f" {error}"
+                continue
             try:
-                return ExecutionJob.model_validate(response.json())
+                return ExecutionJob.model_validate_json(response.content)
             except ValueError:
-                raise ExecutionError(
-                    "Job submission may have succeeded but its response was invalid. "
-                    "Do not run it again; list existing executions to recover the job.",
-                    "execution_submission_unknown",
-                ) from None
-        raise AssertionError("unreachable")
+                detail = " The API returned an invalid job."
+                break
+        raise ExecutionError(
+            "Job submission may have succeeded. Do not run it again. "
+            "List existing executions to recover the job." + detail,
+            "execution_submission_unknown",
+        )
 
     async def job(self, job_id: UUID) -> ExecutionJob:
         response = await self.request("GET", f"jobs/{job_id}")
@@ -388,17 +403,15 @@ class ExecutionClient:
         return ExecutionArtifacts.model_validate(response.json())
 
     async def artifact(self, job_id: UUID, artifact_id: UUID) -> ExecutionArtifact:
-        token = None
-        # The API bounds each archive to 1,024 files. Bound our scan too.
-        for _ in range(42):
-            page = await self.artifacts(job_id, token)
-            for artifact in page.artifacts.items:
-                if artifact.id == artifact_id:
-                    workspace_path(artifact.path, glob=True)
-                    return artifact
-            token = page.artifacts.next_page
-            if token is None:
-                break
+        async def fetch_page(page_token: str | None = None) -> ArtifactPage:
+            return (await self.artifacts(job_id, page_token)).artifacts
+
+        async for artifact in create_async_page_iterator(
+            fetch_page, {}, ExecutionArtifact
+        ):
+            if artifact.id == artifact_id:
+                workspace_path(artifact.path, glob=True)
+                return artifact
         raise ExecutionError(
             "The artifact is unavailable in this job's retained results.",
             "execution_artifact_unavailable",
@@ -414,11 +427,7 @@ class ExecutionClient:
             params={"stream": stream, "offset": offset, "limit": limit},
         )
         page = ExecutionLog.model_validate(response.json())
-        if (
-            page.offset != offset
-            or page.stream != stream
-            or len(page.decoded()) > limit
-        ):
+        if page.offset != offset or page.stream != stream or len(page.data) > limit:
             raise ExecutionError("The execution API returned an invalid log cursor.")
         return page
 
@@ -435,25 +444,21 @@ class ExecutionClient:
     async def download(
         self, job_id: UUID, artifact: ExecutionArtifact
     ) -> AsyncGenerator[Path, None]:
-        async with _download_slot(), self._download(job_id, artifact) as path:
-            yield path
-
-    @asynccontextmanager
-    async def _download(
-        self, job_id: UUID, artifact: ExecutionArtifact
-    ) -> AsyncGenerator[Path, None]:
-        with tempfile.TemporaryDirectory(prefix="execution-result-") as directory:
-            path = Path(directory) / "artifact"
-            digest = hashlib.sha256()
-            length = 0
-            async with asyncio.timeout(300):
-                async with self.http.stream(
-                    "GET",
-                    f"{self.base_url}/execution/jobs/{job_id}/artifacts/{artifact.id}",
-                    headers=self.headers,
-                    follow_redirects=False,
-                ) as response:
-                    check_response(response)
+        async with _download_slot():
+            with tempfile.TemporaryDirectory(prefix="execution-result-") as directory:
+                path = Path(directory) / "artifact"
+                digest = hashlib.sha256()
+                length = 0
+                async with (
+                    asyncio.timeout(300),
+                    self.http.stream(
+                        "GET",
+                        f"{self.base_url}/execution/jobs/{job_id}/artifacts/{artifact.id}",
+                        headers=self.headers,
+                        follow_redirects=False,
+                    ) as response,
+                ):
+                    await ExecutionAPIError.raise_for_status(response)
                     with path.open("wb") as target:
                         async for chunk in response.aiter_bytes(65536):
                             length += len(chunk)
@@ -463,12 +468,15 @@ class ExecutionClient:
                                 )
                             digest.update(chunk)
                             await run_blocking(target.write, chunk)
-            if length != artifact.byte_length or digest.hexdigest() != artifact.sha256:
-                raise ExecutionError(
-                    "The artifact failed byte-integrity verification.",
-                    "execution_artifact_integrity_failed",
-                )
-            yield path
+                if (
+                    length != artifact.byte_length
+                    or digest.hexdigest() != artifact.sha256
+                ):
+                    raise ExecutionError(
+                        "The artifact failed byte-integrity verification.",
+                        "execution_artifact_integrity_failed",
+                    )
+                yield path
 
 
 @asynccontextmanager
@@ -490,8 +498,6 @@ async def execution_client() -> AsyncGenerator[ExecutionClient, None]:
             timeout=30,
         ) as client:
             yield ExecutionClient(client)
-    except ExecutionError:
-        raise
     except (httpx.HTTPError, TimeoutError):
         raise ExecutionError(
             "The execution API could not be reached. Retry reads later.",
@@ -541,7 +547,7 @@ async def read_execution_log(
     limit: int = 8192,
 ) -> ExecutionLogPage:
     page = await client.logs(job_id, stream, offset, limit)
-    data = page.decoded()
+    data = page.data
     # A UTF-8 scalar may start up to three bytes before this byte cursor.
     # Emit each scalar on the page that completes it, even with a one-byte limit.
     prefix = b""
@@ -550,7 +556,7 @@ async def read_execution_log(
         previous = await client.logs(job_id, stream, offset - size, size)
         if previous.next_offset != offset:
             raise ExecutionError("The execution API returned incomplete log context.")
-        context = previous.decoded()
+        context = previous.data
         _, consumed = codecs.utf_8_decode(context, "replace", False)
         prefix = context[consumed:]
     window = prefix + data

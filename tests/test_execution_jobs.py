@@ -158,7 +158,9 @@ async def test_solver_job_lifecycle_uses_shared_transport(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure, attempts_expected", [("lost", 2), ("malformed", 1)])
+@pytest.mark.parametrize(
+    "failure, attempts_expected", [("lost", 2), ("unavailable", 2), ("malformed", 1)]
+)
 async def test_uncertain_solver_submission_has_runtime_neutral_recovery_message(
     failure, attempts_expected
 ):
@@ -168,6 +170,10 @@ async def test_uncertain_solver_submission_has_runtime_neutral_recovery_message(
         attempts.append((request.headers["Idempotency-Key"], request.content))
         if failure == "lost":
             raise httpx.ReadError("connection lost", request=request)
+        if failure == "unavailable":
+            return httpx.Response(
+                503, json={"message": "Deployment is offline", "request_id": "req-9"}
+            )
         return httpx.Response(202, json={})
 
     async with AsyncKittyCAD(
@@ -182,6 +188,74 @@ async def test_uncertain_solver_submission_has_runtime_neutral_recovery_message(
     assert len(attempts) == attempts_expected and len(set(attempts)) == 1
     assert error.value.code == "execution_submission_unknown"
     assert "python" not in str(error.value).lower()
+    if failure == "unavailable":
+        assert "Deployment is offline" in str(error.value) and "req-9" in str(
+            error.value
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["submit", "download"])
+async def test_api_rejection_preserves_public_error_fields(operation):
+    requests = []
+    detail = {"message": "The requested artifact has expired", "request_id": "req-7"}
+    if operation == "submit":
+        detail.update(
+            message="Key already used for a different request",
+            error_code="IdempotencyConflict",
+        )
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(
+            409 if operation == "submit" else 404,
+            stream=httpx.ByteStream(json.dumps(detail).encode()),
+            headers={"content-type": "application/json; charset=utf-8"},
+        )
+
+    async with AsyncKittyCAD(
+        token="caller",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as sdk:
+        client = ExecutionClient(sdk)
+        with pytest.raises(ExecutionError) as error:
+            if operation == "submit":
+                await client.submit({"command": ["ccx"]}, "original-key")
+            else:
+                artifact = ExecutionArtifact(
+                    id=uuid4(), path="out", byte_length=0, sha256="0" * 64
+                )
+                async with client.download(uuid4(), artifact):
+                    pytest.fail("An error response cannot be used as artifact content")
+    assert len(requests) == 1
+    assert error.value.code == detail.get("error_code", "execution_http_404")
+    assert all(value in str(error.value) for value in detail.values())
+    assert str(requests[0].url) not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_artifact_lookup_follows_the_api_cursor():
+    artifact = ExecutionArtifact(id=uuid4(), path="out", byte_length=0, sha256="0" * 64)
+
+    def respond(request):
+        page = int(request.url.params.get("page_token", 0))
+        items = [artifact.model_dump(mode="json")] if page == 42 else []
+        return httpx.Response(
+            200,
+            json={
+                "state": "complete",
+                "artifacts": {
+                    "items": items,
+                    "next_page": None if items else str(page + 1),
+                },
+            },
+        )
+
+    async with AsyncKittyCAD(
+        token="caller",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as sdk:
+        assert await ExecutionClient(sdk).artifact(uuid4(), artifact.id) == artifact
 
 
 def test_default_execution_error_is_runtime_neutral():
