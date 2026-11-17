@@ -1,12 +1,4 @@
-"""Authenticated access to Zoo's durable execution-job API.
-
-Only the Zoo API sees user credentials. Jobs run in nexecutor, with explicit
-runtime IDs, commands, input artifacts, and output selectors. Runtime-specific
-preparation, project edits, and chat delivery belong to callers.
-KittyCAD 1.11.0 exposes the separate legacy /file/execute API, but has no native
-durable execution-job or input-upload methods. This adapter uses the SDK's
-authenticated HTTP client for those endpoints.
-"""
+"""Authenticated access to Zoo's durable execution-job API."""
 
 import asyncio
 import base64
