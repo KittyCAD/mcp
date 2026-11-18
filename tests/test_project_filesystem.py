@@ -1096,3 +1096,57 @@ async def test_expected_project_error_propagates_unchanged(api, monkeypatch):
     with pytest.raises(ZooMCPException) as caught:
         await project_stat(PROJECT_ID)
     assert caught.value is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflict", [False, True])
+@pytest.mark.parametrize(
+    "operation,args",
+    [
+        ("write_file", ["main.kcl", "// changed model"]),
+        ("cp", ["main.kcl", "parts/model.kcl"]),
+        ("mv", ["parts/a.bin", "parts/moved.bin"]),
+        ("rm", ["parts"]),
+        ("mkdir", ["new"]),
+    ],
+)
+async def test_mutations_omit_existing_previews_so_api_renders_again(
+    api, operation, args, conflict
+):
+    api.files["thumbnail.png"] = b"old preview"
+    if conflict:
+        api.failure = "conflict"
+    await getattr(ProjectFileSystem(PROJECT_ID), operation)(*args)
+    assert "thumbnail.png" not in api.files
+    for body, files in api.uploads:
+        assert "thumbnail.png" not in files
+        # Preview assets are server-owned and cannot be listed as deleted paths.
+        assert "thumbnail.png" not in body["deleted_paths"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("contents", [b"old preview", b"new preview"])
+@pytest.mark.parametrize("conflict", [False, True])
+async def test_explicit_preview_write_is_preserved_even_when_unchanged(
+    api, contents, conflict
+):
+    api.files["thumbnail.png"] = b"old preview"
+    if conflict:
+        api.failure = "conflict"
+    fs = ProjectFileSystem(PROJECT_ID)
+    result = await fs.write_file("thumbnail.png", contents)
+    assert base64.b64decode(result["contents"]) == contents
+    assert any(entry["relative_path"] == "thumbnail.png" for entry in result["files"])
+    assert await fs.read_file("thumbnail.png") == contents
+    assert all(files["thumbnail.png"] == contents for _, files in api.uploads)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cp", "mv"])
+async def test_explicit_copy_to_preview_preserves_identical_bytes(api, operation):
+    api.files["thumbnail.png"] = b"same preview"
+    api.files["parts/replacement.png"] = b"same preview"
+    fs = ProjectFileSystem(PROJECT_ID)
+    await getattr(fs, operation)("parts/replacement.png", "thumbnail.png")
+    assert await fs.read_file("thumbnail.png") == b"same preview"
+    assert ("parts/replacement.png" in api.files) == (operation == "cp")

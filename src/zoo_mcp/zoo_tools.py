@@ -4537,6 +4537,7 @@ class ProjectFileSystem:
         client: httpx.AsyncClient,
         before: _ProjectSnapshot,
         files: dict[str, bytes],
+        written_paths: set[str],
     ) -> httpx.Response:
         """Build and send one complete project replacement."""
         metadata = before.metadata
@@ -4545,6 +4546,14 @@ class ProjectFileSystem:
             entry["relative_path"]
             for entry in metadata["files"]
             if entry["file_role"] == "preview_image"
+        }
+        # Omit carried-over previews so source edits get a fresh render. Preserve
+        # explicitly written or copied previews even when their bytes are identical:
+        # otherwise a successful write would omit the very file the caller wrote.
+        files = {
+            path: content
+            for path, content in files.items()
+            if path not in previews or path in written_paths
         }
         body = {
             key: metadata[key]
@@ -4571,7 +4580,7 @@ class ProjectFileSystem:
 
     async def _mutate(
         self,
-        transform: Callable[[dict[str, bytes]], None],
+        transform: Callable[[dict[str, bytes]], set[str]],
     ) -> dict:
         lock = self._lock()
         async with self._operation() as client, lock:
@@ -4585,7 +4594,7 @@ class ProjectFileSystem:
                     )
                 # Reapply the requested operation to every refreshed snapshot.
                 updated = snapshot.files.copy()
-                transform(updated)
+                written_paths = transform(updated)
                 _validate_project_paths(updated)
                 _check_project_size(sum(map(len, updated.values())), self.limit)
                 if "main.kcl" not in updated:
@@ -4595,7 +4604,7 @@ class ProjectFileSystem:
                         "Cannot remove or move project.toml; the Project API requires "
                         "it and regenerates it when omitted"
                     )
-                response = await self._put(client, snapshot, updated)
+                response = await self._put(client, snapshot, updated, written_paths)
                 # Only a 409 explicitly rejects the write and permits a fresh attempt.
                 if response.status_code != 409:
                     await self._check_response(response, upload=True)
@@ -4609,11 +4618,12 @@ class ProjectFileSystem:
         path = _project_path(path)
         content = contents.encode("utf-8") if isinstance(contents, str) else contents
 
-        def transform(files: dict[str, bytes]) -> None:
+        def transform(files: dict[str, bytes]) -> set[str]:
             if _project_kind(files, path) == "directory":
                 raise ZooMCPException(f"Cannot overwrite a directory: {path}")
             _project_parent(files, path)
             files[path] = content
+            return {path}
 
         project = await self._mutate(transform)
         if path == project["project_toml_path"]:
@@ -4643,11 +4653,12 @@ class ProjectFileSystem:
     async def mkdir(self, path: str) -> dict:
         path = _project_path(path)
 
-        def transform(files: dict[str, bytes]) -> None:
+        def transform(files: dict[str, bytes]) -> set[str]:
             if _project_kind(files, path) is not None:
                 raise ZooMCPException(f"Path already exists: {path}")
             _project_parent(files, path)
             files[path + "/.empty"] = b""
+            return {path + "/.empty"}
 
         return await self._mutate(transform)
 
@@ -4657,13 +4668,14 @@ class ProjectFileSystem:
         if not path or path == "main.kcl":
             raise ZooMCPException("Cannot remove the project root or main.kcl")
 
-        def transform(files: dict[str, bytes]) -> None:
+        def transform(files: dict[str, bytes]) -> set[str]:
             targets = _project_subtree(files, path)
             if not targets:
                 raise ZooMCPException(f"Path does not exist: {path}")
             for name in targets:
                 del files[name]
             _preserve_project_parent(files, path)
+            return set()
 
         return await self._mutate(transform)
 
@@ -4672,7 +4684,7 @@ class ProjectFileSystem:
         if not source or (move and source == "main.kcl"):
             raise ZooMCPException("Cannot copy the project root or move main.kcl")
 
-        def transform(files: dict[str, bytes]) -> None:
+        def transform(files: dict[str, bytes]) -> set[str]:
             kind = _project_kind(files, source)
             if kind is None:
                 raise ZooMCPException(f"Path does not exist: {source}")
@@ -4692,12 +4704,16 @@ class ProjectFileSystem:
                     "Destination already exists or has an incompatible type"
                 )
             selected = _project_subtree(files, source)
-            for name, content in selected.items():
-                files[target + name[len(source) :]] = content
+            written = {
+                target + name[len(source) :]: content
+                for name, content in selected.items()
+            }
+            files.update(written)
             if move:
                 for name in selected:
                     del files[name]
                 _preserve_project_parent(files, source)
+            return set(written)
 
         return await self._mutate(transform)
 
