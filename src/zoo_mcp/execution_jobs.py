@@ -7,8 +7,9 @@ import hashlib
 import os
 import tempfile
 import weakref
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncGenerator, Generator
+from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path, PurePosixPath
@@ -16,7 +17,12 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
-from kittycad import AsyncKittyCAD
+from kittycad import AsyncExecutorAPI, AsyncKittyCAD
+from kittycad.models import (
+    ExecutionJobCreateRequest,
+    ExecutionLogStream,
+    Uuid,
+)
 from kittycad.models.error import Error as ZooAPIError
 from kittycad.pagination import create_async_page_iterator
 from pydantic import (
@@ -27,6 +33,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_core import to_jsonable_python
 
 from zoo_mcp import ZooMCPException, ctx
 from zoo_mcp.client_config import get_client_config
@@ -242,26 +249,35 @@ def validate_input_paths(paths: list[str]) -> None:
         )
 
 
+# The same HTTP client may also serve SDK callers and account lookups.
+_execution_call = ContextVar("execution_call", default=False)
+
+
+async def _public_execution_errors(response: httpx.Response) -> None:
+    if _execution_call.get():
+        await ExecutionAPIError.raise_for_status(response)
+
+
 class ExecutionClient:
     """Runtime-neutral operations on the authenticated Zoo execution-jobs API."""
 
     def __init__(self, client: AsyncKittyCAD) -> None:
+        self._executor = client.executor
         self.http = client.get_http_client()
         self.base_url = client.base_url.rstrip("/")
         self.headers = client.get_headers()
+        hooks = self.http.event_hooks["response"]
+        if _public_execution_errors not in hooks:
+            hooks.append(_public_execution_errors)
 
-    async def request(
-        self, method: str, path: str, *, headers: dict[str, str] | None = None, **kwargs
-    ) -> httpx.Response:
-        response = await self.http.request(
-            method,
-            f"{self.base_url}/execution/{path}",
-            headers={**self.headers, **(headers or {})},
-            follow_redirects=False,
-            **kwargs,
-        )
-        await ExecutionAPIError.raise_for_status(response)
-        return response
+    @contextmanager
+    def _api(self) -> Generator[AsyncExecutorAPI]:
+        """Keep request URLs and non-API error bodies out of tool results."""
+        token = _execution_call.set(True)
+        try:
+            yield self._executor
+        finally:
+            _execution_call.reset(token)
 
     async def upload(self, path: Path) -> UploadedInput:
         """Stream a private snapshot; check that the API retained the same bytes."""
@@ -276,14 +292,9 @@ class ExecutionClient:
                     digest.update(chunk)
                     yield chunk
 
-        response = await self.request(
-            "POST",
-            "inputs",
-            headers={"Content-Type": "application/octet-stream"},
-            content=chunks(),
-            timeout=300,
-        )
-        uploaded = UploadedInput.model_validate(response.json())
+        with self._api() as api:
+            result = await api.upload_execution_input(chunks(), timeout=300)
+        uploaded = UploadedInput.model_validate(to_jsonable_python(result))
         if uploaded.byte_length != length or uploaded.sha256 != digest.hexdigest():
             raise ExecutionError(
                 "The uploaded input failed byte-integrity verification."
@@ -323,15 +334,15 @@ class ExecutionClient:
         # lost. Never regenerate upload IDs or the key inside this retry loop.
         if isinstance(request, ExecutionSubmission):
             request = request.model_dump(mode="json")
+        body = ExecutionJobCreateRequest.model_validate(request)
         detail = ""
         for _ in range(2):
             try:
-                response = await self.request(
-                    "POST",
-                    "jobs",
-                    headers={"Idempotency-Key": key},
-                    json=request,
-                )
+                with self._api() as api:
+                    result = await api.create_execution_job(
+                        idempotency_key=key, body=body
+                    )
+                return ExecutionJob.model_validate(to_jsonable_python(result))
             except httpx.TransportError:
                 detail = ""
                 continue
@@ -340,8 +351,6 @@ class ExecutionClient:
                     raise
                 detail = f" {error}"
                 continue
-            try:
-                return ExecutionJob.model_validate_json(response.content)
             except ValueError:
                 detail = " The API returned an invalid job."
                 break
@@ -352,8 +361,9 @@ class ExecutionClient:
         )
 
     async def job(self, job_id: UUID) -> ExecutionJob:
-        response = await self.request("GET", f"jobs/{job_id}")
-        return ExecutionJob.model_validate(response.json())
+        with self._api() as api:
+            job = await api.get_execution_job(Uuid(str(job_id)))
+        return ExecutionJob.model_validate(to_jsonable_python(job))
 
     async def list_jobs(
         self,
@@ -364,21 +374,20 @@ class ExecutionClient:
         limit: int = 25,
     ) -> ExecutionJobs:
         """List owner-scoped jobs, optionally restricted to a runtime or status."""
-        params = {"limit": str(limit)}
-        for name, value in (
-            ("runtime_id", runtime_id),
-            ("status", status),
-            ("page_token", page_token),
-        ):
-            if value is not None:
-                params[name] = value
-        response = await self.request("GET", "jobs", params=params)
-        return ExecutionJobs.model_validate(response.json())
+        with self._api() as api:
+            page = await api.list_execution_jobs_page(
+                limit=limit,
+                runtime_id=runtime_id,
+                status=status,
+                page_token=page_token,
+            )
+        return ExecutionJobs.model_validate(to_jsonable_python(page))
 
     async def cancel(self, job_id: UUID) -> ExecutionJob:
         """Request cancellation and return the observed, possibly pending state."""
-        response = await self.request("POST", f"jobs/{job_id}/cancel")
-        return ExecutionJob.model_validate(response.json())
+        with self._api() as api:
+            job = await api.cancel_execution_job(Uuid(str(job_id)))
+        return ExecutionJob.model_validate(to_jsonable_python(job))
 
     async def wait(self, job: ExecutionJob, seconds: int) -> ExecutionJob:
         """The caller's wait deadline includes status requests, not only sleeps."""
@@ -396,11 +405,11 @@ class ExecutionClient:
     async def artifacts(
         self, job_id: UUID, page_token: str | None = None
     ) -> ExecutionArtifacts:
-        params = {"limit": "25"}
-        if page_token is not None:
-            params["page_token"] = page_token
-        response = await self.request("GET", f"jobs/{job_id}/artifacts", params=params)
-        return ExecutionArtifacts.model_validate(response.json())
+        with self._api() as api:
+            page = await api.list_execution_job_artifacts(
+                Uuid(str(job_id)), limit=25, page_token=page_token
+            )
+        return ExecutionArtifacts.model_validate(page, from_attributes=True)
 
     async def artifact(self, job_id: UUID, artifact_id: UUID) -> ExecutionArtifact:
         async def fetch_page(page_token: str | None = None) -> ArtifactPage:
@@ -421,12 +430,14 @@ class ExecutionClient:
         self, job_id: UUID, stream: Literal["stdout", "stderr"], offset: int, limit: int
     ) -> ExecutionLog:
         limit = min(limit, MAX_LOG_PAGE_BYTES)
-        response = await self.request(
-            "GET",
-            f"jobs/{job_id}/logs",
-            params={"stream": stream, "offset": offset, "limit": limit},
-        )
-        page = ExecutionLog.model_validate(response.json())
+        with self._api() as api:
+            result = await api.get_execution_job_logs(
+                Uuid(str(job_id)),
+                stream=ExecutionLogStream(stream),
+                offset=offset,
+                limit=limit,
+            )
+        page = ExecutionLog.model_validate(result, from_attributes=True)
         if page.offset != offset or page.stream != stream or len(page.data) > limit:
             raise ExecutionError("The execution API returned an invalid log cursor.")
         return page
@@ -449,25 +460,22 @@ class ExecutionClient:
                 path = Path(directory) / "artifact"
                 digest = hashlib.sha256()
                 length = 0
-                async with (
-                    asyncio.timeout(300),
-                    self.http.stream(
-                        "GET",
-                        f"{self.base_url}/execution/jobs/{job_id}/artifacts/{artifact.id}",
-                        headers=self.headers,
-                        follow_redirects=False,
-                    ) as response,
-                ):
-                    await ExecutionAPIError.raise_for_status(response)
-                    with path.open("wb") as target:
-                        async for chunk in response.aiter_bytes(65536):
-                            length += len(chunk)
-                            if length > artifact.byte_length:
-                                raise ExecutionError(
-                                    "The artifact exceeds its declared size."
-                                )
-                            digest.update(chunk)
-                            await run_blocking(target.write, chunk)
+                with self._api() as api:
+                    async with (
+                        asyncio.timeout(300),
+                        api.download_execution_job_artifact(
+                            Uuid(str(job_id)), Uuid(str(artifact.id))
+                        ) as response,
+                    ):
+                        with path.open("wb") as target:
+                            async for chunk in response.aiter_bytes(65536):
+                                length += len(chunk)
+                                if length > artifact.byte_length:
+                                    raise ExecutionError(
+                                        "The artifact exceeds its declared size."
+                                    )
+                                digest.update(chunk)
+                                await run_blocking(target.write, chunk)
                 if (
                     length != artifact.byte_length
                     or digest.hexdigest() != artifact.sha256

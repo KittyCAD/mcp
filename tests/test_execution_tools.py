@@ -48,6 +48,10 @@ def api(monkeypatch):
             return {
                 "id": str(self.job_id),
                 "status": self.status,
+                "state_version": 1,
+                "active_attempt": 1,
+                "created_at": "2026-11-17T00:00:00Z",
+                "updated_at": "2026-11-17T00:00:00Z",
                 "runtime_id": "openfoam-14",
                 "compute_profile_id": "cpu-standard-2",
                 "timeout_seconds": 300,

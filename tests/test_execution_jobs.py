@@ -9,6 +9,8 @@ from uuid import uuid4
 import httpx
 import pytest
 from kittycad import AsyncKittyCAD
+from kittycad.exceptions import KittyCADClientError
+from kittycad.models import Uuid
 
 from zoo_mcp.execution_jobs import (
     ExecutionArtifact,
@@ -40,6 +42,10 @@ async def test_solver_job_lifecycle_uses_shared_transport(
     submitted = []
     requests = []
     job = {
+        "state_version": 1,
+        "active_attempt": 1,
+        "created_at": "2026-11-17T00:00:00Z",
+        "updated_at": "2026-11-17T00:00:00Z",
         "id": str(job_id),
         "runtime_id": runtime_id,
         "compute_profile_id": "cpu-standard-4",
@@ -183,7 +189,13 @@ async def test_uncertain_solver_submission_has_runtime_neutral_recovery_message(
         client = ExecutionClient(sdk)
         with pytest.raises(ExecutionError) as error:
             await client.submit(
-                {"runtime_id": "calculix-2.23", "command": ["ccx"]}, "solver-submission"
+                {
+                    "runtime_id": "calculix-2.23",
+                    "compute_profile_id": "cpu",
+                    "timeout_seconds": 300,
+                    "command": ["ccx"],
+                },
+                "solver-submission",
             )
     assert len(attempts) == attempts_expected and len(set(attempts)) == 1
     assert error.value.code == "execution_submission_unknown"
@@ -220,7 +232,15 @@ async def test_api_rejection_preserves_public_error_fields(operation):
         client = ExecutionClient(sdk)
         with pytest.raises(ExecutionError) as error:
             if operation == "submit":
-                await client.submit({"command": ["ccx"]}, "original-key")
+                await client.submit(
+                    {
+                        "runtime_id": "calculix",
+                        "compute_profile_id": "cpu",
+                        "timeout_seconds": 300,
+                        "command": ["ccx"],
+                    },
+                    "original-key",
+                )
             else:
                 artifact = ExecutionArtifact(
                     id=uuid4(), path="out", byte_length=0, sha256="0" * 64
@@ -231,6 +251,37 @@ async def test_api_rejection_preserves_public_error_fields(operation):
     assert error.value.code == detail.get("error_code", "execution_http_404")
     assert all(value in str(error.value) for value in detail.values())
     assert str(requests[0].url) not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_tools_and_sdk_calls_keep_their_own_errors_on_a_shared_client():
+    both_started = asyncio.Event()
+    requests = 0
+
+    async def respond(request):
+        nonlocal requests
+        requests += 1
+        if requests == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=2)
+        return httpx.Response(403, text="private gateway response")
+
+    async with AsyncKittyCAD(
+        token="caller",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as sdk:
+        job_id = uuid4()
+        tools = ExecutionClient(sdk)
+        tool_error, sdk_error = await asyncio.gather(
+            tools.job(job_id),
+            sdk.executor.get_execution_job(Uuid(str(job_id))),
+            return_exceptions=True,
+        )
+    assert isinstance(tool_error, ExecutionError)
+    assert tool_error.code == "execution_http_403"
+    assert str(job_id) not in str(tool_error)
+    assert isinstance(sdk_error, KittyCADClientError)
+    assert sdk_error.request_url and str(job_id) in sdk_error.request_url
 
 
 @pytest.mark.asyncio
@@ -337,7 +388,16 @@ async def test_staged_submission_retries_without_reupload(tmp_path):
         if len(admissions) == 1:
             raise httpx.ReadError("lost response", request=request)
         return httpx.Response(
-            202, json={"id": str(job_id), "status": "queued", **admissions[-1][1]}
+            202,
+            json={
+                "id": str(job_id),
+                "status": "queued",
+                "active_attempt": 0,
+                "state_version": 1,
+                "created_at": "2026-11-17T00:00:00Z",
+                "updated_at": "2026-11-17T00:00:00Z",
+                **admissions[-1][1],
+            },
         )
 
     submission = ExecutionSubmission(

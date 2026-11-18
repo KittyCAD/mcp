@@ -10,7 +10,7 @@ dependencies = [
     "aiofiles<26.0",
     "httpx>=0.28,<1",
     "keyring>=25.6,<26",
-    "kittycad>=1.8.0,<2.0",
+    "kittycad @ git+https://github.com/KittyCAD/kittycad.py@72906be6dadc21eb631ebe7843c62e3a5bf687c7",
     "markdown-it-py>=4.2,<5",
     "mcp[cli]>=2.2.0,<3",
     "pillow>=13.0.0,<14.0",
