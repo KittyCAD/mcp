@@ -3,13 +3,18 @@ import asyncio
 import atexit
 import json
 import math
+import os
+import shutil
 import signal
 import sys
+import tempfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from types import FrameType
 from typing import Annotated, Literal, TypeAlias, TypeVar
+from uuid import UUID
 
 import kcl
 from kittycad.models import (
@@ -96,6 +101,22 @@ from pydantic import ConfigDict, Field, FiniteFloat, with_config
 
 from zoo_mcp import ZooMCPException, logger
 from zoo_mcp.auth import LoginError, auth_command, start_saved_login
+from zoo_mcp.execution_jobs import (
+    ArtifactImage,
+    ExecutionError,
+    ExecutionJob,
+    ExecutionSubmission,
+    UploadedInput,
+    can_read_artifact_inline,
+    execution_client,
+    read_artifact_content,
+)
+from zoo_mcp.execution_tools import (
+    cancel_job_execution,
+    get_job_execution,
+    list_job_executions,
+    read_job_execution_logs,
+)
 from zoo_mcp.kcl_docs import (
     KCLDocs,
     get_doc_content,
@@ -109,6 +130,7 @@ from zoo_mcp.kcl_samples import (
     list_available_samples,
     search_samples,
 )
+from zoo_mcp.utils.async_utils import run_blocking
 from zoo_mcp.utils.image_utils import (
     encode_image,
     save_image_bytes_to_disk,
@@ -241,6 +263,104 @@ async def _modeling_command(
         response_description,
         session_id,
     )
+
+
+@mcp.tool()
+async def upload_job_execution_input(input_file: str) -> UploadedInput:
+    """Upload a file from the MCP server. Use the returned ID as an input to submit_job_execution."""
+    path = Path(input_file)
+    if not path.is_file():
+        raise ExecutionError("The selected execution input is not a file.")
+    async with execution_client() as client:
+        return await client.upload(path)
+
+
+@mcp.tool()
+async def submit_job_execution(
+    submission: ExecutionSubmission,
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=128)],
+) -> ExecutionJob:
+    """Start a remote job with an argv command and workspace-relative inputs and outputs.
+    If the response is lost, retry with the same key and uploaded IDs or list existing jobs.
+    """
+    async with execution_client() as client:
+        return await client.submit(submission, idempotency_key)
+
+
+mcp.add_tool(get_job_execution)
+mcp.add_tool(list_job_executions)
+mcp.add_tool(read_job_execution_logs)
+mcp.add_tool(cancel_job_execution)
+
+
+@mcp.tool()
+async def use_job_execution_artifact(
+    job_id: UUID,
+    artifact_id: UUID,
+    action: Literal["read", "download"] = "read",
+    destination: str | None = None,
+    offset: Annotated[int, Field(ge=0)] = 0,
+) -> CallToolResult:
+    """Read a retained output as paged UTF-8 text or an inline image. To save any format,
+    use download with a new file path on the MCP server. Only text reads accept a byte offset.
+    """
+    if offset < 0 or (action != "read" and offset != 0):
+        raise ExecutionError("offset is nonnegative and only supported for reads.")
+    if action == "download" and not destination:
+        raise ExecutionError("A download requires an explicit destination file.")
+    if action == "read" and destination is not None:
+        raise ExecutionError("destination is only supported for downloads.")
+    target = Path(destination).absolute() if destination else None
+    if target is not None and target.exists():
+        raise ExecutionError("The download destination already exists.")
+    async with execution_client() as client:
+        artifact = await client.artifact(job_id, artifact_id)
+        data = {"artifact": artifact.model_dump(mode="json"), "job_id": str(job_id)}
+        image = None
+        if action == "read" and not can_read_artifact_inline(artifact, offset):
+            data["message"] = (
+                "This image exceeds the host's inline size limit. "
+                "Use action='download' with a destination to save it."
+            )
+        else:
+            async with client.download(job_id, artifact) as path:
+                if target is not None:
+                    await run_blocking(_save_execution_artifact, path, target)
+                    data["destination"] = str(target)
+                else:
+                    content = await run_blocking(
+                        read_artifact_content, path, artifact.path, offset
+                    )
+                    if isinstance(content, ArtifactImage):
+                        image = ImageContent(
+                            type="image", mime_type=content.mime_type, data=content.data
+                        )
+                    else:
+                        text, next_offset = content
+                        data.update(text=text, next_offset=next_offset)
+        result = CallToolResult(
+            structured_content=data,
+            content=[TextContent(type="text", text=json.dumps(data))],
+        )
+        if image is not None:
+            result.content.append(image)
+        return result
+
+
+def _save_execution_artifact(source: Path, destination: Path) -> None:
+    """Publish the closed, complete file exclusively on the destination filesystem."""
+    with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
+        temporary = Path(directory) / "artifact"
+        with source.open("rb") as input_file, temporary.open("wb") as output:
+            shutil.copyfileobj(input_file, output, length=65536)
+        try:
+            if sys.platform == "win32":
+                # Windows rename is exclusive and also works on volumes without hard links.
+                os.rename(temporary, destination)
+            else:
+                os.link(temporary, destination)
+        except FileExistsError:
+            raise ExecutionError("The download destination already exists.") from None
 
 
 @mcp.tool()
