@@ -130,28 +130,46 @@ selects the root for metadata and directory reads. Quoted filenames are preserve
 control characters in paths are rejected. Operations stay within one
 project.
 
-File reads fetch current metadata, then download only the requested file by its
-file ID and immutable project revision. Concurrent saves cannot change those
-bytes. Each download checks the response's revision, file ID, byte size, and
-available SHA-256 hash against the metadata.
+File reads fetch current metadata and reuse cached bytes when their hash and
+size match. Otherwise they request a ZIP archive containing only the selected
+file ID from that immutable project revision. Concurrent saves cannot change
+those bytes. The archive must contain exactly one regular file
+with the expected project-relative path. Its byte size and available SHA-256
+hash are checked against the metadata before returning its contents.
 
-Every mutation fetches current metadata and all files from that immutable
-revision, applies its changes in memory, then uploads the whole project with
-`expected_revision` and explicit `deleted_paths`. Copies and moves use one
+Every mutation fetches current metadata, reuses verified cached bytes, and
+downloads added or changed files from that immutable revision. It applies its
+changes in memory, then uploads the whole project with `expected_revision`
+and explicit `deleted_paths`. Copies and moves use one
 upload, including recursive directory operations. A revision conflict reloads
 the latest project and reapplies the operation, up to three upload attempts.
 Thus a write replaces the target's latest contents, and recursive removal includes files added before a
-retry. Unrelated files and project metadata are preserved. Connection failures,
+retry. Unrelated source files and project metadata are preserved. Carried-over
+previews are omitted so the API generates fresh ones; explicitly written or
+copied previews are retained even when their bytes are unchanged. Connection failures,
 timeouts, other HTTP errors, and unreadable responses surface to the caller
 without an automatic retry. After an upload error, the caller can inspect the
-project before deciding whether to retry.
+project before deciding whether to retry. The API currently requires complete
+replacement uploads, even when only one file changes. After a successful save,
+submitted bytes are cached only when they match the returned size and hash;
+server-stamped manifest contents are read back when needed.
+
+The in-memory file cache is shared between calls for the same project, host,
+credentials, and request headers. Current metadata and access are checked on
+every call, including cache hits. Each event loop retains at most 256 MiB and
+1,024 distinct cache entries, evicting the least recently used entries first.
+Files without hashes or larger than the cache budget are downloaded again when
+needed. Cache eviction does not affect the project stored by the API.
 
 The default limit is **256 MiB of total uncompressed project contents**, based on
 four times text-to-CAD's 64 MiB DFM capture limit. Callers can override
 `max_project_bytes`. The limit applies to metadata before downloading and after
-mutations; streamed file downloads are bounded by their declared sizes.
-A complete operation has a 300-second deadline. There is no persistent content
-cache.
+mutations. Archive downloads have a separate size bound that allows ZIP
+overhead; extracted contents must match their declared byte size.
+Reads and mutations have a 300-second deadline. Manifest writes currently use
+a separate 300-second deadline to read back the server-stamped contents after
+upload, so the full write can exceed 300 seconds. The cache is held only in
+memory and is not retained across server restarts.
 
 - `project_write_file` accepts raw Python bytes when encoding is omitted;
   strings default to UTF-8. Explicit `encoding="utf-8"` or `encoding="base64"`

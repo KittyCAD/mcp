@@ -7,6 +7,10 @@ import json
 import mimetypes
 import os
 import random
+import stat
+import zipfile
+import zlib
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
@@ -19,7 +23,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
-from weakref import WeakKeyDictionary, WeakValueDictionary
+from weakref import WeakKeyDictionary
 
 import aiofiles
 import bson
@@ -4174,7 +4178,10 @@ async def zoo_search_org_dataset_semantic(
 MAX_PROJECT_BYTES = 256 * 1024 * 1024
 _PROJECT_ATTEMPTS = 3
 _PROJECT_TIMEOUT = 300.0
-_project_locks: WeakKeyDictionary = WeakKeyDictionary()
+# Bound retained bytes per event loop; the entry limit also bounds empty files.
+_PROJECT_CACHE_BYTES = MAX_PROJECT_BYTES
+_PROJECT_CACHE_FILES = 1024
+_project_file_caches: WeakKeyDictionary = WeakKeyDictionary()
 
 
 def _project_path(path: str) -> str:
@@ -4283,6 +4290,36 @@ class _ProjectSnapshot:
     files: dict[str, bytes]
 
 
+_ProjectCacheKey: TypeAlias = tuple[str, bytes, str, int]
+
+
+@dataclass
+class _ProjectFileCache:
+    files: OrderedDict[_ProjectCacheKey, bytes] = field(default_factory=OrderedDict)
+    byte_size: int = 0
+
+    def get(self, key: _ProjectCacheKey) -> bytes | None:
+        content = self.files.get(key)
+        if content is not None:
+            self.files.move_to_end(key)
+        return content
+
+    def put(self, key: _ProjectCacheKey, content: bytes) -> None:
+        if len(content) > _PROJECT_CACHE_BYTES:
+            return
+        previous = self.files.pop(key, None)
+        if previous is not None:
+            self.byte_size -= len(previous)
+        self.files[key] = content
+        self.byte_size += len(content)
+        while (
+            self.byte_size > _PROJECT_CACHE_BYTES
+            or len(self.files) > _PROJECT_CACHE_FILES
+        ):
+            _, removed = self.files.popitem(last=False)
+            self.byte_size -= len(removed)
+
+
 def project_file_contents(contents: bytes | str) -> dict[str, str]:
     if isinstance(contents, str):
         return {"contents": contents, "encoding": "utf-8"}
@@ -4295,8 +4332,9 @@ def project_file_contents(contents: bytes | str) -> dict[str, str]:
 class ProjectFileSystem:
     """Authenticated filesystem operations on one existing cloud project.
 
-    All mutations use the same complete-snapshot replacement pipeline. There is
-    no persistent content cache. Instances capture client configuration when constructed.
+    All mutations use the same complete-snapshot replacement pipeline. A bounded
+    in-memory cache reuses verified file bytes; metadata is always fetched afresh.
+    Instances capture client configuration when constructed.
     """
 
     def __init__(self, project_id: str, max_project_bytes: int = MAX_PROJECT_BYTES):
@@ -4333,16 +4371,38 @@ class ProjectFileSystem:
             event_hooks={"response": [_capture_rest_response]},
         )
 
-    def _lock(self) -> asyncio.Lock:
-        # Locks belong to their event loop; weak references discard idle locks.
+    def _file_cache(self) -> _ProjectFileCache:
         loop = asyncio.get_running_loop()
-        locks = _project_locks.setdefault(loop, WeakValueDictionary())
-        key = (self.url, sha256(self.config.token.encode()).digest())
-        lock = locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            locks[key] = lock
-        return lock
+        cache = _project_file_caches.get(loop)
+        if cache is None:
+            cache = _ProjectFileCache()
+            _project_file_caches[loop] = cache
+        return cache
+
+    def _cache_key(self, entry: dict) -> _ProjectCacheKey | None:
+        # New versions assign new file IDs even when the contents are unchanged.
+        checksum = entry.get("sha256")
+        if not checksum:
+            return None
+        credentials = json.dumps(
+            [self.config.token, sorted((self.config.headers or {}).items())]
+        ).encode()
+        return self.url, sha256(credentials).digest(), checksum, entry["byte_size"]
+
+    def _cache_uploaded_files(self, project: dict, files: dict[str, bytes]) -> None:
+        cache = self._file_cache()
+        for entry in project["files"]:
+            content = files.get(entry["relative_path"])
+            key = self._cache_key(entry)
+            # The server can rewrite project.toml. Never cache submitted bytes
+            # unless their size and hash match the acknowledged stored file.
+            if (
+                key is not None
+                and content is not None
+                and len(content) == entry["byte_size"]
+                and sha256(content).hexdigest() == entry["sha256"]
+            ):
+                cache.put(key, content)
 
     @asynccontextmanager
     async def _operation(self) -> AsyncGenerator[httpx.AsyncClient, None]:
@@ -4407,25 +4467,59 @@ class ProjectFileSystem:
         self, client: httpx.AsyncClient, revision: str, entry: dict
     ) -> bytes:
         """Fetch exact bytes from one immutable version, bounded by its manifest."""
+        cache = self._file_cache()
+        key = self._cache_key(entry)
+        if key is not None:
+            cached = cache.get(key)
+            if cached is not None:
+                return cached
         file_id = entry["id"]
         size = entry["byte_size"]
         content = io.BytesIO()
+        # Allow ZIP headers, long filenames, and DEFLATE overhead while bounding
+        # the download independently of the size declared inside the archive.
+        archive_limit = size + size // 1000 + 128 * 1024
+        # The SDK download method currently JSON-decodes binary archive responses.
         async with client.stream(
-            "GET", f"{self.url}/versions/{revision}/files/{file_id}"
+            "GET",
+            f"{self.url}/versions/{revision}/download",
+            params={"format": "zip", "file_ids": file_id},
         ) as response:
             await self._check_response(response)
-            if (
-                response.headers.get("X-Project-Revision") != revision
-                or response.headers.get("X-Artifact-Id") != file_id
-            ):
-                raise ZooMCPException(
-                    "Project file response does not match its version"
-                )
             async for chunk in response.aiter_bytes():
-                if content.tell() + len(chunk) > size:
-                    raise ZooMCPException("Project file exceeds its declared byte size")
+                if content.tell() + len(chunk) > archive_limit:
+                    raise ZooMCPException("Project file archive exceeds its size limit")
                 content.write(chunk)
-        data = content.getvalue()
+        content.seek(0)
+        try:
+            with zipfile.ZipFile(content) as archive:
+                members = archive.infolist()
+                if len(members) != 1:
+                    raise ZooMCPException(
+                        "Project archive must contain only the requested file"
+                    )
+                member = members[0]
+                if (
+                    member.orig_filename != entry["relative_path"]
+                    or member.is_dir()
+                    or stat.S_ISLNK(member.external_attr >> 16)
+                ):
+                    raise ZooMCPException(
+                        "Project archive does not contain the requested file"
+                    )
+                if member.file_size != size:
+                    raise ZooMCPException(
+                        "Project file does not match its declared byte size"
+                    )
+                with archive.open(member) as source:
+                    data = source.read(size + 1)
+        except (
+            zipfile.BadZipFile,
+            RuntimeError,
+            NotImplementedError,
+            zlib.error,
+        ) as exc:
+            raise ZooMCPException(f"Invalid project file archive: {exc}") from exc
         if len(data) != size:
             raise ZooMCPException("Project file does not match its declared byte size")
         if (
@@ -4433,10 +4527,12 @@ class ProjectFileSystem:
             and sha256(data).hexdigest() != entry["sha256"]
         ):
             raise ZooMCPException("Project file does not match its declared hash")
+        if key is not None:
+            cache.put(key, data)
         return data
 
     async def _snapshot(self, client: httpx.AsyncClient) -> _ProjectSnapshot:
-        """Load every file from the immutable revision selected by metadata."""
+        """Fetch current metadata and reuse verified bytes for unchanged files."""
         metadata = await self._metadata(client)
         files = {}
         for entry in metadata["files"]:
@@ -4540,6 +4636,9 @@ class ProjectFileSystem:
         written_paths: set[str],
     ) -> httpx.Response:
         """Build and send one complete project replacement."""
+        # The Projects API currently replaces the whole file set on save. Reuse
+        # cached bytes to avoid downloading unchanged files, then upload the full
+        # replacement until the API supports partial updates.
         metadata = before.metadata
         removed = before.files.keys() - files.keys()
         previews = {
@@ -4582,8 +4681,7 @@ class ProjectFileSystem:
         self,
         transform: Callable[[dict[str, bytes]], set[str]],
     ) -> dict:
-        lock = self._lock()
-        async with self._operation() as client, lock:
+        async with self._operation() as client:
             for _ in range(_PROJECT_ATTEMPTS):
                 snapshot = await self._snapshot(client)
                 if not snapshot.metadata["access"]["can_edit"]:
@@ -4608,7 +4706,9 @@ class ProjectFileSystem:
                 # Only a 409 explicitly rejects the write and permits a fresh attempt.
                 if response.status_code != 409:
                     await self._check_response(response, upload=True)
-                    return response.json()
+                    project = response.json()
+                    self._cache_uploaded_files(project, updated)
+                    return project
             raise ZooMCPException(
                 "Project write conflicted after three attempts; refresh and try again"
             )

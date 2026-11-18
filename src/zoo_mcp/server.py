@@ -10,13 +10,13 @@ import shutil
 import signal
 import sys
 import tempfile
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import FrameType
-from uuid import UUID
-from collections.abc import AsyncGenerator
 from typing import Annotated, Literal, TypeAlias, TypeVar
+from uuid import UUID
 
 import kcl
 from kittycad.models import (
