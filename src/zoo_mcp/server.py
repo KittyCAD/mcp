@@ -98,10 +98,10 @@ from kittycad.models.ok_modeling_cmd_response import (
 from kittycad.models.uuid import Uuid
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import CallToolResult, ImageContent, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import ConfigDict, Field, FiniteFloat, with_config
 
-from zoo_mcp import ZooMCPException, logger
+from zoo_mcp import ZooMCPException, cloud_libraries, logger
 from zoo_mcp.auth import LoginError, auth_command, start_saved_login
 from zoo_mcp.execution_jobs import (
     ArtifactImage,
@@ -1982,6 +1982,56 @@ async def get_kcl_sample(sample_name: str) -> SampleData | str:
     except Exception as e:
         logger.error("get_kcl_sample tool called with error: %s", e)
         raise ToolError(f"There was an error retrieving KCL sample: {e}") from e
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
+async def list_cloud_libraries(limit: int = 20, page_token: str | None = None) -> dict:
+    """List personal libraries and active-organization libraries, including all creation sources.
+
+    Continue with next_page as page_token, even when a page has no items.
+    Unassigned projects have no named library; use list_cloud_projects for them.
+    """
+    try:
+        return await cloud_libraries.list_cloud_libraries(limit, page_token)
+    except ZooMCPException as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
+async def list_cloud_projects(
+    library_id: str | None = None,
+    scope: Literal["personal", "organization"] | None = None,
+    unassigned: bool = False,
+    limit: int = 20,
+    page_token: str | None = None,
+) -> dict:
+    """Browse cloud projects and return cloud:<uuid> project_id values for filesystem tools.
+
+    Use library_id alone or scope/unassigned without library_id. Keep filters
+    unchanged while continuing with next_page as page_token.
+    """
+    try:
+        return await cloud_libraries.list_cloud_projects(
+            library_id, scope, unassigned, limit, page_token
+        )
+    except ZooMCPException as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
+async def search_cloud_projects(
+    query: str, library_id: str | None = None, limit: int = 10
+) -> dict:
+    """Search project titles/descriptions/filenames in the caller's active organization.
+
+    Source contents and personal projects are not searched. library_id optionally
+    restricts to one organization library. Search indexing is asynchronous.
+    Results describe version_id at search time; filesystem tools read current files.
+    """
+    try:
+        return await cloud_libraries.search_cloud_projects(query, library_id, limit)
+    except ZooMCPException as exc:
+        raise ToolError(str(exc)) from exc
 
 
 @mcp.tool()
