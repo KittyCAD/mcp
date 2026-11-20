@@ -120,24 +120,6 @@ The optional `ZOO_MCP_MAX_INLINE_IMAGE_BYTES` environment variable limits the
 raw file size for inline execution images. Larger images return artifact
 metadata and can be downloaded. The default has no size limit.
 
-### Cloud library discovery
-
-Use `list_cloud_libraries` to discover personal libraries and libraries in your
-active organization, including those created by Design Studio, Factory Portal,
-and org datasets. `list_cloud_projects` browses one library or filters accessible
-projects by ownership and unassigned status. Both return one bounded page; pass
-`next_page` back as `page_token` with unchanged filters to continue, including
-after an empty page.
-
-`search_cloud_projects` searches titles, descriptions, and bounded source
-filenames within the active organization. It can filter by library ID. It does
-not search personal projects or file contents, and indexing is asynchronous.
-Discovery returns `cloud:<uuid>` project IDs for the project filesystem tools.
-Search matches describe the indexed version; filesystem tools read current
-project state. All three discovery tools are read-only and use the current
-`ZooClientConfig` credentials, host, and headers. Embedded callers can use
-`zoo_mcp.cloud_libraries` directly without an MCP server round trip.
-
 ### Prebuilt binaries
 
 Each [GitHub release](https://github.com/KittyCAD/mcp/releases) also attaches standalone executables (built with PyInstaller) for Linux (`x86_64`, `arm64`), macOS (`arm64`, `x86_64`), and Windows (`x86_64`) — no Python toolchain required. Download the binary for your platform, set `ZOO_API_TOKEN`, and run it directly, e.g.:
