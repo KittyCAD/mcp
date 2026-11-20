@@ -2,8 +2,12 @@
 
 import asyncio
 import base64
+import gzip
 import hashlib
 import json
+import os
+from pathlib import Path
+from unittest.mock import Mock
 from uuid import uuid4
 
 import httpx
@@ -12,7 +16,9 @@ from kittycad import AsyncKittyCAD
 from kittycad.exceptions import KittyCADClientError
 from kittycad.models import Uuid
 
+from zoo_mcp import execution_jobs
 from zoo_mcp.execution_jobs import (
+    ExecutionAPIError,
     ExecutionArtifact,
     ExecutionClient,
     ExecutionError,
@@ -254,21 +260,132 @@ async def test_api_rejection_preserves_public_error_fields(operation):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "chunks_read"),
+    [
+        ({"content-type": "text/html"}, 0),
+        ({"content-type": "application/json", "content-length": str(4 << 20)}, 0),
+        ({"content-type": "application/json"}, 1),
+    ],
+)
+async def test_failed_download_bounds_body_after_authentication(headers, chunks_read):
+    class GatewayBody(httpx.AsyncByteStream):
+        reads = 0
+        closed = False
+
+        async def __aiter__(self):
+            for _ in range(256):
+                self.reads += 1
+                yield b"x" * 16384
+
+        async def aclose(self):
+            self.closed = True
+
+    body = GatewayBody()
+    attempts = []
+
+    def respond(request):
+        attempts.append(request.headers.get("Authorization"))
+        if len(attempts) == 1:
+            return httpx.Response(
+                401,
+                headers={"WWW-Authenticate": 'Digest realm="artifact", nonce="abc"'},
+            )
+        return httpx.Response(502, headers=headers, stream=body)
+
+    async with AsyncKittyCAD(
+        token="",
+        http_client=httpx.AsyncClient(
+            auth=httpx.DigestAuth("user", "password"),
+            transport=httpx.MockTransport(respond),
+        ),
+    ) as sdk:
+        artifact = ExecutionArtifact(
+            id=uuid4(), path="out", byte_length=0, sha256="0" * 64
+        )
+        with pytest.raises(ExecutionError) as error:
+            async with ExecutionClient(sdk).download(uuid4(), artifact):
+                pytest.fail("gateway error yielded an artifact")
+    assert error.value.code == "execution_http_502"
+    assert body.reads == chunks_read and body.closed
+    assert len(attempts) == 2 and attempts[1].startswith("Digest ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_size", [8, 128 * 1024])
+async def test_gzip_execution_error_limits_decoded_body(message_size):
+    message = "x" * message_size
+    data = gzip.compress(
+        json.dumps({"message": message, "request_id": "req-1"}).encode()
+    )
+    response = httpx.Response(
+        502,
+        headers={"content-type": "application/json", "content-encoding": "gzip"},
+        stream=httpx.ByteStream(data),
+    )
+    with pytest.raises(ExecutionAPIError) as error:
+        await ExecutionAPIError.raise_for_status(response)
+    if message_size == 8:
+        assert str(error.value) == f"{message} (request ID req-1)"
+    else:
+        assert str(error.value) == "The execution API returned HTTP 502."
+
+
+@pytest.mark.asyncio
+async def test_stalled_error_body_preserves_status_and_closes_download(monkeypatch):
+    class StalledBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"{"
+            await asyncio.Event().wait()
+
+    response = httpx.Response(
+        502, headers={"content-type": "application/json"}, stream=StalledBody()
+    )
+    monkeypatch.setattr(execution_jobs, "ERROR_BODY_TIMEOUT", 0.01)
+    async with AsyncKittyCAD(
+        token="caller",
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: response)
+        ),
+    ) as sdk:
+        artifact = ExecutionArtifact(
+            id=uuid4(), path="out", byte_length=0, sha256="0" * 64
+        )
+        async with asyncio.timeout(1):
+            with pytest.raises(ExecutionAPIError) as error:
+                async with ExecutionClient(sdk).download(uuid4(), artifact):
+                    pytest.fail("gateway error yielded an artifact")
+    assert error.value.status == 502 and response.is_closed
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("prefix", ["", "/api/v1"])
 async def test_embedded_execution_client_normalizes_base_url(prefix):
     base_url = f"https://execution.example.test{prefix}/"
+    tokens = []
 
     def respond(request):
         assert request.url.path == f"{prefix}/execution/jobs"
+        assert request.headers["x-caller"] == "embedded"
+        assert request.url.params["tenant"] == "a"
+        tokens.append(request.headers["Authorization"])
         return httpx.Response(200, json={"items": []})
 
     async with AsyncKittyCAD(
         token="caller",
         base_url=base_url,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(respond),
+            headers={"X-Caller": "embedded"},
+            params={"tenant": "a"},
+        ),
     ) as sdk:
-        assert (await ExecutionClient(sdk).list_jobs()).items == []
+        client = ExecutionClient(sdk)
+        assert (await client.list_jobs()).items == []
+        sdk.token = "refreshed"
+        await client.list_jobs()
         assert sdk.base_url == base_url
+        assert tokens == ["Bearer caller", "Bearer refreshed"]
 
 
 @pytest.mark.asyncio
@@ -307,6 +424,31 @@ async def test_execution_errors_allow_digest_authentication(authorized):
             assert str(error.value) == "Invalid credentials (request ID final)"
     assert len(headers) == 2
     assert headers[0] == "" and headers[1].startswith("Digest ")
+
+
+@pytest.mark.asyncio
+async def test_one_pass_upload_accepts_pipe():
+    data = b"input"
+    digest = hashlib.sha256(data).hexdigest()
+
+    def respond(request):
+        assert request.content == data
+        return httpx.Response(
+            200, json={"id": str(uuid4()), "byte_length": len(data), "sha256": digest}
+        )
+
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(write_fd, "wb") as writer:
+        writer.write(data)
+    with os.fdopen(read_fd, "rb") as reader:
+        path = Mock(spec=Path)
+        path.open.return_value = reader
+        async with AsyncKittyCAD(
+            token="caller",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        ) as sdk:
+            uploaded = await ExecutionClient(sdk).upload(path)
+    assert (uploaded.byte_length, uploaded.sha256) == (len(data), digest)
 
 
 @pytest.mark.asyncio
