@@ -607,7 +607,7 @@ wheels = [
 [[package]]
 name = "kittycad"
 version = "1.12.0"
-source = { git = "https://github.com/KittyCAD/kittycad.py?rev=72906be6dadc21eb631ebe7843c62e3a5bf687c7#72906be6dadc21eb631ebe7843c62e3a5bf687c7" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "httpx" },
@@ -618,6 +618,10 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "truststore" },
     { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f4/4d/ffd4b01daeebd817f7499af9fdf364b4c04e3fd1345a16e4c5e608283535/kittycad-1.12.0.tar.gz", hash = "sha256:a2c5793541b8c473f75d7dd6c130daa34ecfd1dca249c77613c8cf09cbd340cd", size = 260412, upload-time = "2026-11-19T19:49:55.491Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/b9/2ebf080956cf56a30b2d277d4247dea57623cf32fae8312535452a163354/kittycad-1.12.0-py3-none-any.whl", hash = "sha256:99d77ee446d2a81d6ee43f6f961823e2a21c0d95cac2e128ef0c5843cc9f8887", size = 441344, upload-time = "2026-11-19T19:49:53.924Z" },
 ]
 
 [[package]]
@@ -1888,7 +1892,7 @@ requires-dist = [
     { name = "aiofiles", specifier = "<26.0" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "keyring", specifier = ">=25.6,<26" },
-    { name = "kittycad", git = "https://github.com/KittyCAD/kittycad.py?rev=72906be6dadc21eb631ebe7843c62e3a5bf687c7" },
+    { name = "kittycad", specifier = ">=1.12.0,<2.0" },
     { name = "markdown-it-py", specifier = ">=4.2,<5" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.2.0,<3" },
     { name = "pillow", specifier = ">=13.0.0,<14.0" },
