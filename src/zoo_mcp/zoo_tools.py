@@ -4,7 +4,6 @@ import asyncio
 import base64
 import io
 import json
-import mimetypes
 import os
 import random
 import stat
@@ -68,7 +67,6 @@ from kittycad.models import (
     Point3d,
     PostEffectType,
     ProjectArchiveFormat,
-    ProjectResponse,
     StepImportTargetRepresentation,
     System,
     UnitArea,
@@ -147,7 +145,6 @@ from kittycad.models.ok_web_socket_response_data import OptionModeling
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
-from kittycad.response_helpers import raise_for_status
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
@@ -4255,39 +4252,6 @@ def _check_project_size(total: int, limit: int) -> None:
         )
 
 
-async def _project_multipart(
-    body: dict,
-    files: dict[str, bytes],
-    boundary: str,
-) -> AsyncGenerator[bytes, None]:
-    """Stream quoted-pair filenames, as understood by the API's multer parser.
-
-    HTTPX's files= encoder percent-encodes quotes, which multer preserves
-    literally. A literal %22 filename must remain distinct from a quote.
-    """
-    delimiter = ("--" + boundary).encode("ascii")
-    yield (
-        delimiter
-        + b'\r\nContent-Disposition: form-data; name="body"\r\nContent-Type: application/json\r\n\r\n'
-    )
-    yield json.dumps(body).encode("utf-8")
-    yield b"\r\n"
-    for path, content in sorted(files.items()):
-        filename = path.replace("\\", "\\\\").replace('"', '\\"')
-        content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        yield (
-            delimiter
-            + (
-                f'\r\nContent-Disposition: form-data; name="files"; filename="{filename}"\r\n'
-                f"Content-Type: {content_type}\r\n\r\n"
-            ).encode()
-        )
-        for offset in range(0, len(content), 64 * 1024):
-            yield content[offset : offset + 64 * 1024]
-        yield b"\r\n"
-    yield delimiter + b"--\r\n"
-
-
 @dataclass
 class _ProjectSnapshot:
     metadata: dict
@@ -4649,25 +4613,9 @@ class ProjectFileSystem:
             deleted_paths=sorted(removed - previews),
         )
         try:
-            if any(path in {"body", "event"} or '"' in path for path in files):
-                # The SDK reserves body/event field names and percent-encodes
-                # quotes. Preserve these valid project filenames until it supports them.
-                boundary = uuid4().hex
-                headers = httpx.Headers(client.get_headers())
-                headers["Content-Type"] = "multipart/form-data; boundary=" + boundary
-                response = await client.get_http_client().put(
-                    self.url,
-                    content=_project_multipart(body.to_dict(), files, boundary),
-                    headers=headers,
-                )
-                raise_for_status(response)
-                project = ProjectResponse.model_validate(
-                    response.json(), extra="ignore"
-                )
-            else:
-                project = await client.projects.update_project(
-                    id=Uuid(self.id), body=body, file_attachments=dict(files)
-                )
+            project = await client.projects.update_project(
+                id=Uuid(self.id), body=body, file_attachments=dict(files)
+            )
             return project.model_dump(mode="json", exclude_unset=True)
         except KittyCADAPIError as exc:
             if exc.status_code < 500:
