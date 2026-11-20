@@ -254,6 +254,98 @@ async def test_api_rejection_preserves_public_error_fields(operation):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["", "/api/v1"])
+async def test_embedded_execution_client_normalizes_base_url(prefix):
+    base_url = f"https://execution.example.test{prefix}/"
+
+    def respond(request):
+        assert request.url.path == f"{prefix}/execution/jobs"
+        return httpx.Response(200, json={"items": []})
+
+    async with AsyncKittyCAD(
+        token="caller",
+        base_url=base_url,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ) as sdk:
+        assert (await ExecutionClient(sdk).list_jobs()).items == []
+        assert sdk.base_url == base_url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorized", [True, False])
+async def test_execution_errors_allow_digest_authentication(authorized):
+    headers = []
+
+    def respond(request):
+        headers.append(request.headers.get("Authorization", ""))
+        if len(headers) == 1:
+            return httpx.Response(
+                401,
+                headers={"WWW-Authenticate": 'Digest realm="execution", nonce="abc"'},
+                json={"message": "Authentication required", "request_id": "challenge"},
+            )
+        if authorized:
+            return httpx.Response(200, json={"items": []})
+        return httpx.Response(
+            401, json={"message": "Invalid credentials", "request_id": "final"}
+        )
+
+    async with AsyncKittyCAD(
+        token="",
+        http_client=httpx.AsyncClient(
+            auth=httpx.DigestAuth("user", "password"),
+            transport=httpx.MockTransport(respond),
+        ),
+    ) as sdk:
+        client = ExecutionClient(sdk)
+        if authorized:
+            assert (await client.list_jobs()).items == []
+        else:
+            with pytest.raises(ExecutionError) as error:
+                await client.list_jobs()
+            assert error.value.code == "execution_http_401"
+            assert str(error.value) == "Invalid credentials (request ID final)"
+    assert len(headers) == 2
+    assert headers[0] == "" and headers[1].startswith("Digest ")
+
+
+@pytest.mark.asyncio
+async def test_digest_challenge_replays_streamed_upload(tmp_path):
+    data = b"solver input" * 8192
+    path = tmp_path / "input"
+    path.write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+    sent = []
+
+    class UploadTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            # Consume the stream as a network transport would. MockTransport
+            # buffers it with aread(), which would make any body replayable.
+            chunks = [chunk async for chunk in request.stream]
+            assert len(chunks) > 1 and b"".join(chunks) == data
+            sent.append(request.headers.get("Authorization", ""))
+            if len(sent) == 1:
+                return httpx.Response(
+                    401,
+                    headers={"WWW-Authenticate": 'Digest realm="upload", nonce="abc"'},
+                )
+            return httpx.Response(
+                200,
+                json={"id": str(uuid4()), "sha256": digest, "byte_length": len(data)},
+            )
+
+    async with AsyncKittyCAD(
+        token="",
+        http_client=httpx.AsyncClient(
+            auth=httpx.DigestAuth("user", "password"), transport=UploadTransport()
+        ),
+    ) as sdk:
+        uploaded = await ExecutionClient(sdk).upload(path)
+    assert len(sent) == 2 and sent[1].startswith("Digest ")
+    assert uploaded.sha256 == digest
+
+
+@pytest.mark.asyncio
 async def test_tools_and_sdk_calls_keep_their_own_errors_on_a_shared_client():
     both_started = asyncio.Event()
     requests = 0

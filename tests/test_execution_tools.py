@@ -553,8 +553,10 @@ async def test_integrity_failures_never_publish_unverified_files(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [403, 307])
 async def test_execution_clients_isolate_authentication_and_redact_failures(
     monkeypatch,
+    status,
 ):
     records = []
 
@@ -567,7 +569,7 @@ async def test_execution_clients_isolate_authentication_and_redact_failures(
             )
         )
         return httpx.Response(
-            403,
+            status,
             text="secret response body",
             headers={"Location": "https://secret.example"},
         )
@@ -577,7 +579,9 @@ async def test_execution_clients_isolate_authentication_and_redact_failures(
         "AsyncKittyCAD",
         lambda **kwargs: AsyncKittyCAD(
             **kwargs,
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(respond), follow_redirects=True
+            ),
         ),
     )
 
@@ -589,7 +593,7 @@ async def test_execution_clients_isolate_authentication_and_redact_failures(
             with pytest.raises(ExecutionError) as failure:
                 async with execution_client() as client:
                     await client.list_jobs()
-            assert failure.value.code == "execution_http_403"
+            assert failure.value.code == f"execution_http_{status}"
             assert "secret" not in str(failure.value) and name + "-token" not in str(
                 failure.value
             )

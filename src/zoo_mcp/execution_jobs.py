@@ -7,17 +7,18 @@ import hashlib
 import os
 import tempfile
 import weakref
-from collections.abc import AsyncGenerator, Generator
-from contextlib import asynccontextmanager, contextmanager, suppress
-from contextvars import ContextVar
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, suppress
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, BinaryIO, Literal
 from uuid import UUID
 
 import httpx
 from kittycad import AsyncExecutorAPI, AsyncKittyCAD
+from kittycad.exceptions import KittyCADAPIError
 from kittycad.models import (
     ExecutionJobCreateRequest,
     ExecutionLogStream,
@@ -90,7 +91,7 @@ class ExecutionAPIError(ExecutionError):
                 detail = ZooAPIError.model_validate_json(
                     await response.aread(), extra="ignore"
                 )
-        raise cls(response.status_code, detail)
+        raise cls(response.status_code, detail) from None
 
 
 def workspace_path(path: str, *, glob: bool = False) -> str:
@@ -176,6 +177,25 @@ class UploadedInput(BaseModel):
     sha256: str
 
 
+class _UploadBody:
+    """Rewind the snapshot when HTTPX resends an upload after an auth challenge."""
+
+    def __init__(self, snapshot: BinaryIO) -> None:
+        self.snapshot = snapshot
+        self.size_and_digest: tuple[int, str] | None = None
+
+    async def __aiter__(self) -> AsyncGenerator[bytes]:
+        self.size_and_digest = None
+        self.snapshot.seek(0)
+        digest = hashlib.sha256()
+        length = 0
+        while chunk := await run_blocking(self.snapshot.read, 65536):
+            length += len(chunk)
+            digest.update(chunk)
+            yield chunk
+        self.size_and_digest = length, digest.hexdigest()
+
+
 class ExecutionInput(BaseModel):
     """An uploaded input and its destination in the remote workspace."""
 
@@ -249,53 +269,55 @@ def validate_input_paths(paths: list[str]) -> None:
         )
 
 
-# The same HTTP client may also serve SDK callers and account lookups.
-_execution_call = ContextVar("execution_call", default=False)
+# The SDK's exceptions omit the raw response. Bind it only during a tool call.
+_execution_response = ContextVar[httpx.Response | None]("execution_response")
 
 
-async def _public_execution_errors(response: httpx.Response) -> None:
-    if _execution_call.get():
+async def _capture_execution_response(response: httpx.Response) -> None:
+    if _execution_response not in copy_context():
+        return
+    if response.has_redirect_location:
+        # Execution requests must not follow redirects on the shared client.
         await ExecutionAPIError.raise_for_status(response)
+    _execution_response.set(response)
 
 
 class ExecutionClient:
     """Runtime-neutral operations on the authenticated Zoo execution-jobs API."""
 
     def __init__(self, client: AsyncKittyCAD) -> None:
-        self._executor = client.executor
         self.http = client.get_http_client()
         self.base_url = client.base_url.rstrip("/")
         self.headers = client.get_headers()
+        self._executor = client.executor
+        if self.base_url != client.base_url:
+            self._executor = AsyncExecutorAPI(client.with_base_url(self.base_url))
         hooks = self.http.event_hooks["response"]
-        if _public_execution_errors not in hooks:
-            hooks.append(_public_execution_errors)
+        if _capture_execution_response not in hooks:
+            hooks.append(_capture_execution_response)
 
-    @contextmanager
-    def _api(self) -> Generator[AsyncExecutorAPI]:
-        """Keep request URLs and non-API error bodies out of tool results."""
-        token = _execution_call.set(True)
+    @asynccontextmanager
+    async def _api(self) -> AsyncGenerator[AsyncExecutorAPI]:
+        """Translate the final SDK rejection after HTTPX completes authentication."""
+        token = _execution_response.set(None)
         try:
             yield self._executor
+        except KittyCADAPIError as error:
+            response = _execution_response.get()
+            if response is not None:
+                await ExecutionAPIError.raise_for_status(response)
+            raise ExecutionAPIError(error.status_code, None) from None
         finally:
-            _execution_call.reset(token)
+            _execution_response.reset(token)
 
     async def upload(self, path: Path) -> UploadedInput:
         """Stream a private snapshot; check that the API retained the same bytes."""
-        digest = hashlib.sha256()
-        length = 0
-
-        async def chunks() -> AsyncGenerator[bytes]:
-            nonlocal length
-            with path.open("rb") as source:
-                while chunk := await run_blocking(source.read, 65536):
-                    length += len(chunk)
-                    digest.update(chunk)
-                    yield chunk
-
-        with self._api() as api:
-            result = await api.upload_execution_input(chunks(), timeout=300)
+        with path.open("rb") as source:
+            body = _UploadBody(source)
+            async with self._api() as api:
+                result = await api.upload_execution_input(body, timeout=300)
         uploaded = UploadedInput.model_validate(to_jsonable_python(result))
-        if uploaded.byte_length != length or uploaded.sha256 != digest.hexdigest():
+        if body.size_and_digest != (uploaded.byte_length, uploaded.sha256):
             raise ExecutionError(
                 "The uploaded input failed byte-integrity verification."
             )
@@ -338,7 +360,7 @@ class ExecutionClient:
         detail = ""
         for _ in range(2):
             try:
-                with self._api() as api:
+                async with self._api() as api:
                     result = await api.create_execution_job(
                         idempotency_key=key, body=body
                     )
@@ -361,7 +383,7 @@ class ExecutionClient:
         )
 
     async def job(self, job_id: UUID) -> ExecutionJob:
-        with self._api() as api:
+        async with self._api() as api:
             job = await api.get_execution_job(Uuid(str(job_id)))
         return ExecutionJob.model_validate(to_jsonable_python(job))
 
@@ -374,7 +396,7 @@ class ExecutionClient:
         limit: int = 25,
     ) -> ExecutionJobs:
         """List owner-scoped jobs, optionally restricted to a runtime or status."""
-        with self._api() as api:
+        async with self._api() as api:
             page = await api.list_execution_jobs_page(
                 limit=limit,
                 runtime_id=runtime_id,
@@ -385,7 +407,7 @@ class ExecutionClient:
 
     async def cancel(self, job_id: UUID) -> ExecutionJob:
         """Request cancellation and return the observed, possibly pending state."""
-        with self._api() as api:
+        async with self._api() as api:
             job = await api.cancel_execution_job(Uuid(str(job_id)))
         return ExecutionJob.model_validate(to_jsonable_python(job))
 
@@ -405,7 +427,7 @@ class ExecutionClient:
     async def artifacts(
         self, job_id: UUID, page_token: str | None = None
     ) -> ExecutionArtifacts:
-        with self._api() as api:
+        async with self._api() as api:
             page = await api.list_execution_job_artifacts(
                 Uuid(str(job_id)), limit=25, page_token=page_token
             )
@@ -430,7 +452,7 @@ class ExecutionClient:
         self, job_id: UUID, stream: Literal["stdout", "stderr"], offset: int, limit: int
     ) -> ExecutionLog:
         limit = min(limit, MAX_LOG_PAGE_BYTES)
-        with self._api() as api:
+        async with self._api() as api:
             result = await api.get_execution_job_logs(
                 Uuid(str(job_id)),
                 stream=ExecutionLogStream(stream),
@@ -460,22 +482,22 @@ class ExecutionClient:
                 path = Path(directory) / "artifact"
                 digest = hashlib.sha256()
                 length = 0
-                with self._api() as api:
-                    async with (
-                        asyncio.timeout(300),
-                        api.download_execution_job_artifact(
-                            Uuid(str(job_id)), Uuid(str(artifact.id))
-                        ) as response,
-                    ):
-                        with path.open("wb") as target:
-                            async for chunk in response.aiter_bytes(65536):
-                                length += len(chunk)
-                                if length > artifact.byte_length:
-                                    raise ExecutionError(
-                                        "The artifact exceeds its declared size."
-                                    )
-                                digest.update(chunk)
-                                await run_blocking(target.write, chunk)
+                async with (
+                    self._api() as api,
+                    asyncio.timeout(300),
+                    api.download_execution_job_artifact(
+                        Uuid(str(job_id)), Uuid(str(artifact.id))
+                    ) as response,
+                ):
+                    with path.open("wb") as target:
+                        async for chunk in response.aiter_bytes(65536):
+                            length += len(chunk)
+                            if length > artifact.byte_length:
+                                raise ExecutionError(
+                                    "The artifact exceeds its declared size."
+                                )
+                            digest.update(chunk)
+                            await run_blocking(target.write, chunk)
                 if (
                     length != artifact.byte_length
                     or digest.hexdigest() != artifact.sha256
