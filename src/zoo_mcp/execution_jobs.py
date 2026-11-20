@@ -7,26 +7,32 @@ import hashlib
 import os
 import tempfile
 import weakref
+import zlib
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, BinaryIO, Literal
 from uuid import UUID
 
 import httpx
-from kittycad import AsyncKittyCAD
+from kittycad import AsyncExecutorAPI, AsyncKittyCAD
+from kittycad.models import (
+    ExecutionJobCreateRequest,
+    ExecutionLogStream,
+    Uuid,
+)
 from kittycad.models.error import Error as ZooAPIError
 from kittycad.pagination import create_async_page_iterator
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    ValidationError,
     field_validator,
     model_validator,
 )
+from pydantic_core import to_jsonable_python
 
 from zoo_mcp import ZooMCPException, ctx
 from zoo_mcp.client_config import get_client_config
@@ -34,6 +40,8 @@ from zoo_mcp.utils.async_utils import run_blocking
 
 MAX_EXECUTION_INPUTS = 256
 MAX_LOG_PAGE_BYTES = 65536
+MAX_ERROR_BODY_BYTES = 16 * 1024
+ERROR_BODY_TIMEOUT = 2.0
 TERMINAL_STATUSES = {"succeeded", "failed", "timed_out", "canceled"}
 _download_slots: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, asyncio.Semaphore
@@ -79,11 +87,48 @@ class ExecutionAPIError(ExecutionError):
             response.headers.get("content-type", "").partition(";")[0].lower()
             == "application/json"
         ):
-            with suppress(ValidationError):
-                detail = ZooAPIError.model_validate_json(
-                    await response.aread(), extra="ignore"
-                )
-        raise cls(response.status_code, detail)
+            # Preserve the HTTP status even when the optional diagnostic stalls
+            # or the gateway sends an incomplete or malformed body.
+            with suppress(
+                ValueError, httpx.HTTPError, httpx.StreamError, TimeoutError, zlib.error
+            ):
+                async with asyncio.timeout(ERROR_BODY_TIMEOUT):
+                    if (body := await _read_error_body(response)) is not None:
+                        detail = ZooAPIError.model_validate_json(body, extra="ignore")
+        raise cls(response.status_code, detail) from None
+
+
+async def _read_error_body(response: httpx.Response) -> bytes | bytearray | None:
+    """Bound both wire bytes and decompressed JSON before parsing the diagnostic."""
+    length_header = response.headers.get("content-length")
+    length = int(length_header) if length_header is not None else None
+    if length is not None and not 0 <= length <= MAX_ERROR_BODY_BYTES:
+        return None
+    if response.is_stream_consumed:
+        return (
+            response.content if len(response.content) <= MAX_ERROR_BODY_BYTES else None
+        )
+
+    encoding = response.headers.get("content-encoding", "identity").lower().strip()
+    if encoding not in {"identity", "gzip", "deflate"}:
+        return None
+    body = bytearray()
+    async for chunk in response.aiter_raw():
+        if len(body) + len(chunk) > MAX_ERROR_BODY_BYTES:
+            return None
+        body.extend(chunk)
+        if len(body) == MAX_ERROR_BODY_BYTES:
+            if length != len(body):
+                return None
+            break
+    if encoding == "identity":
+        return body
+    window_bits = zlib.MAX_WBITS + 16 if encoding == "gzip" else zlib.MAX_WBITS
+    decoder = zlib.decompressobj(window_bits)
+    decoded = decoder.decompress(body, MAX_ERROR_BODY_BYTES + 1)
+    if decoder.eof and not decoder.unused_data and len(decoded) <= MAX_ERROR_BODY_BYTES:
+        return decoded
+    return None
 
 
 def workspace_path(path: str, *, glob: bool = False) -> str:
@@ -169,6 +214,28 @@ class UploadedInput(BaseModel):
     sha256: str
 
 
+class _UploadBody:
+    """Rewind the snapshot when HTTPX resends an upload after an auth challenge."""
+
+    def __init__(self, snapshot: BinaryIO) -> None:
+        self.snapshot = snapshot
+        self._started = False
+        self.size_and_digest: tuple[int, str] | None = None
+
+    async def __aiter__(self) -> AsyncGenerator[bytes]:
+        if self._started:
+            self.snapshot.seek(0)
+        self._started = True
+        self.size_and_digest = None
+        digest = hashlib.sha256()
+        length = 0
+        while chunk := await run_blocking(self.snapshot.read, 65536):
+            length += len(chunk)
+            digest.update(chunk)
+            yield chunk
+        self.size_and_digest = length, digest.hexdigest()
+
+
 class ExecutionInput(BaseModel):
     """An uploaded input and its destination in the remote workspace."""
 
@@ -242,6 +309,33 @@ def validate_input_paths(paths: list[str]) -> None:
         )
 
 
+class _ExecutionTransport(httpx.AsyncBaseTransport):
+    """Inspect the final authenticated response before the SDK can buffer it."""
+
+    def __init__(self, caller: httpx.AsyncClient) -> None:
+        self.caller = caller
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self.caller.send(request, stream=True, follow_redirects=False)
+        if not response.is_success:
+            async with aclosing(response):
+                await ExecutionAPIError.raise_for_status(response)
+        return response
+
+
+class _ExecutionHTTPClient(httpx.AsyncClient):
+    """Use the caller's request defaults, authentication, hooks and connection pool."""
+
+    def __init__(self, caller: httpx.AsyncClient) -> None:
+        super().__init__(transport=_ExecutionTransport(caller), timeout=caller.timeout)
+        self.caller = caller
+
+    def build_request(
+        self, method: str, url: httpx.URL | str, **kwargs
+    ) -> httpx.Request:
+        return self.caller.build_request(method, url, **kwargs)
+
+
 class ExecutionClient:
     """Runtime-neutral operations on the authenticated Zoo execution-jobs API."""
 
@@ -249,42 +343,23 @@ class ExecutionClient:
         self.http = client.get_http_client()
         self.base_url = client.base_url.rstrip("/")
         self.headers = client.get_headers()
+        self._sdk = client
+        self._execution_http = _ExecutionHTTPClient(self.http)
 
-    async def request(
-        self, method: str, path: str, *, headers: dict[str, str] | None = None, **kwargs
-    ) -> httpx.Response:
-        response = await self.http.request(
-            method,
-            f"{self.base_url}/execution/{path}",
-            headers={**self.headers, **(headers or {})},
-            follow_redirects=False,
-            **kwargs,
-        )
-        await ExecutionAPIError.raise_for_status(response)
-        return response
+    @property
+    def _executor(self) -> AsyncExecutorAPI:
+        # Pick up credentials refreshed by an embedded caller between requests.
+        config = self._sdk.with_base_url(self._sdk.base_url.rstrip("/"))
+        config.http_client = self._execution_http
+        return AsyncExecutorAPI(config)
 
     async def upload(self, path: Path) -> UploadedInput:
         """Stream a private snapshot; check that the API retained the same bytes."""
-        digest = hashlib.sha256()
-        length = 0
-
-        async def chunks() -> AsyncGenerator[bytes]:
-            nonlocal length
-            with path.open("rb") as source:
-                while chunk := await run_blocking(source.read, 65536):
-                    length += len(chunk)
-                    digest.update(chunk)
-                    yield chunk
-
-        response = await self.request(
-            "POST",
-            "inputs",
-            headers={"Content-Type": "application/octet-stream"},
-            content=chunks(),
-            timeout=300,
-        )
-        uploaded = UploadedInput.model_validate(response.json())
-        if uploaded.byte_length != length or uploaded.sha256 != digest.hexdigest():
+        with path.open("rb") as source:
+            body = _UploadBody(source)
+            result = await self._executor.upload_execution_input(body, timeout=300)
+        uploaded = UploadedInput.model_validate(to_jsonable_python(result))
+        if body.size_and_digest != (uploaded.byte_length, uploaded.sha256):
             raise ExecutionError(
                 "The uploaded input failed byte-integrity verification."
             )
@@ -323,15 +398,14 @@ class ExecutionClient:
         # lost. Never regenerate upload IDs or the key inside this retry loop.
         if isinstance(request, ExecutionSubmission):
             request = request.model_dump(mode="json")
+        body = ExecutionJobCreateRequest.model_validate(request)
         detail = ""
         for _ in range(2):
             try:
-                response = await self.request(
-                    "POST",
-                    "jobs",
-                    headers={"Idempotency-Key": key},
-                    json=request,
+                result = await self._executor.create_execution_job(
+                    idempotency_key=key, body=body
                 )
+                return ExecutionJob.model_validate(to_jsonable_python(result))
             except httpx.TransportError:
                 detail = ""
                 continue
@@ -340,8 +414,6 @@ class ExecutionClient:
                     raise
                 detail = f" {error}"
                 continue
-            try:
-                return ExecutionJob.model_validate_json(response.content)
             except ValueError:
                 detail = " The API returned an invalid job."
                 break
@@ -352,8 +424,8 @@ class ExecutionClient:
         )
 
     async def job(self, job_id: UUID) -> ExecutionJob:
-        response = await self.request("GET", f"jobs/{job_id}")
-        return ExecutionJob.model_validate(response.json())
+        job = await self._executor.get_execution_job(Uuid(str(job_id)))
+        return ExecutionJob.model_validate(to_jsonable_python(job))
 
     async def list_jobs(
         self,
@@ -364,21 +436,15 @@ class ExecutionClient:
         limit: int = 25,
     ) -> ExecutionJobs:
         """List owner-scoped jobs, optionally restricted to a runtime or status."""
-        params = {"limit": str(limit)}
-        for name, value in (
-            ("runtime_id", runtime_id),
-            ("status", status),
-            ("page_token", page_token),
-        ):
-            if value is not None:
-                params[name] = value
-        response = await self.request("GET", "jobs", params=params)
-        return ExecutionJobs.model_validate(response.json())
+        page = await self._executor.list_execution_jobs_page(
+            limit=limit, runtime_id=runtime_id, status=status, page_token=page_token
+        )
+        return ExecutionJobs.model_validate(to_jsonable_python(page))
 
     async def cancel(self, job_id: UUID) -> ExecutionJob:
         """Request cancellation and return the observed, possibly pending state."""
-        response = await self.request("POST", f"jobs/{job_id}/cancel")
-        return ExecutionJob.model_validate(response.json())
+        job = await self._executor.cancel_execution_job(Uuid(str(job_id)))
+        return ExecutionJob.model_validate(to_jsonable_python(job))
 
     async def wait(self, job: ExecutionJob, seconds: int) -> ExecutionJob:
         """The caller's wait deadline includes status requests, not only sleeps."""
@@ -396,11 +462,10 @@ class ExecutionClient:
     async def artifacts(
         self, job_id: UUID, page_token: str | None = None
     ) -> ExecutionArtifacts:
-        params = {"limit": "25"}
-        if page_token is not None:
-            params["page_token"] = page_token
-        response = await self.request("GET", f"jobs/{job_id}/artifacts", params=params)
-        return ExecutionArtifacts.model_validate(response.json())
+        page = await self._executor.list_execution_job_artifacts(
+            Uuid(str(job_id)), limit=25, page_token=page_token
+        )
+        return ExecutionArtifacts.model_validate(page, from_attributes=True)
 
     async def artifact(self, job_id: UUID, artifact_id: UUID) -> ExecutionArtifact:
         async def fetch_page(page_token: str | None = None) -> ArtifactPage:
@@ -421,12 +486,13 @@ class ExecutionClient:
         self, job_id: UUID, stream: Literal["stdout", "stderr"], offset: int, limit: int
     ) -> ExecutionLog:
         limit = min(limit, MAX_LOG_PAGE_BYTES)
-        response = await self.request(
-            "GET",
-            f"jobs/{job_id}/logs",
-            params={"stream": stream, "offset": offset, "limit": limit},
+        result = await self._executor.get_execution_job_logs(
+            Uuid(str(job_id)),
+            stream=ExecutionLogStream(stream),
+            offset=offset,
+            limit=limit,
         )
-        page = ExecutionLog.model_validate(response.json())
+        page = ExecutionLog.model_validate(result, from_attributes=True)
         if page.offset != offset or page.stream != stream or len(page.data) > limit:
             raise ExecutionError("The execution API returned an invalid log cursor.")
         return page
@@ -451,14 +517,10 @@ class ExecutionClient:
                 length = 0
                 async with (
                     asyncio.timeout(300),
-                    self.http.stream(
-                        "GET",
-                        f"{self.base_url}/execution/jobs/{job_id}/artifacts/{artifact.id}",
-                        headers=self.headers,
-                        follow_redirects=False,
+                    self._executor.download_execution_job_artifact(
+                        Uuid(str(job_id)), Uuid(str(artifact.id))
                     ) as response,
                 ):
-                    await ExecutionAPIError.raise_for_status(response)
                     with path.open("wb") as target:
                         async for chunk in response.aiter_bytes(65536):
                             length += len(chunk)
