@@ -1,21 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import os
 import random
+import stat
+import zipfile
+import zlib
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
+from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, TypeVar, cast
 from urllib.parse import urlencode, urlsplit, urlunsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
+from weakref import WeakKeyDictionary
 
 import aiofiles
 import bson
@@ -23,6 +30,7 @@ import httpx
 import kcl
 import trimesh
 from kittycad import AsyncKittyCAD
+from pydantic import ValidationError
 
 if TYPE_CHECKING:
 
@@ -35,7 +43,7 @@ if TYPE_CHECKING:
         def unfixed_lints(self) -> list[kcl.Discovered]: ...
 
 
-from kittycad.exceptions import KittyCADClientError
+from kittycad.exceptions import KittyCADAPIError, KittyCADClientError
 from kittycad.models import (
     ApiCallStatus,
     Axis,
@@ -59,6 +67,7 @@ from kittycad.models import (
     Point2d,
     Point3d,
     PostEffectType,
+    ProjectArchiveFormat,
     StepImportTargetRepresentation,
     System,
     UnitArea,
@@ -66,6 +75,7 @@ from kittycad.models import (
     UnitLength,
     UnitMass,
     UnitVolume,
+    UpdateProjectRequest,
     WebSocketRequest,
     WebSocketResponse,
 )
@@ -4164,3 +4174,623 @@ async def zoo_search_org_dataset_semantic(
         }
         for m in matches
     ]
+
+
+# Four times the 64 MiB project capture limit in text-to-cad's dfm_execution.py.
+MAX_PROJECT_BYTES = 256 * 1024 * 1024
+_PROJECT_ATTEMPTS = 3
+_PROJECT_TIMEOUT = 300.0
+# Bound retained bytes per event loop; the entry limit also bounds empty files.
+_PROJECT_CACHE_BYTES = MAX_PROJECT_BYTES
+_PROJECT_CACHE_FILES = 1024
+_project_file_caches: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def _project_path(path: str) -> str:
+    """Canonical project-relative POSIX paths, never local filesystem paths."""
+    if any(ord(char) < 32 or ord(char) == 127 for char in path):
+        raise ZooMCPException("Project paths cannot contain control characters")
+    # Match the API's normalization before checking relative path components.
+    path = path.strip().replace("\\", "/")
+    if path in ("", ".", "/"):
+        return ""
+    if path.startswith("/") or ".." in path.split("/"):
+        raise ZooMCPException("Expected a project-relative POSIX path without '..'")
+    result = str(PurePosixPath(path))
+    return "" if result == "." else result
+
+
+def _project_kind(files: dict, path: str) -> str | None:
+    if not path:
+        return "directory"
+    if path in files:
+        return "file"
+    if any(name.startswith(path + "/") for name in files):
+        return "directory"
+    return None
+
+
+def _project_subtree(files: dict[str, bytes], path: str) -> dict[str, bytes]:
+    return {
+        name: content
+        for name, content in files.items()
+        if name == path or name.startswith(path + "/")
+    }
+
+
+def _project_parent(files: dict, path: str) -> None:
+    parent = str(PurePosixPath(path).parent)
+    if _project_kind(files, "" if parent == "." else parent) != "directory":
+        raise ZooMCPException(f"Parent directory does not exist: {parent}")
+
+
+def _preserve_project_parent(files: dict[str, bytes], path: str) -> None:
+    parent = str(PurePosixPath(path).parent)
+    if (
+        PurePosixPath(path).name != ".empty"
+        and parent != "."
+        and _project_kind(files, parent) is None
+    ):
+        # A zero-byte .empty file persists the directory in the file-only Project API.
+        files[parent + "/.empty"] = b""
+
+
+def _validate_project_paths(files: dict) -> None:
+    for path in files:
+        if not path or _project_path(path) != path:
+            raise ZooMCPException("Project file paths must be canonical and nonempty")
+        parent = PurePosixPath(path).parent
+        while str(parent) != ".":
+            if str(parent) in files:
+                raise ZooMCPException("A project path is both a file and a directory")
+            parent = parent.parent
+
+
+def _check_project_size(total: int, limit: int) -> None:
+    if total > limit:
+        raise ZooMCPException(
+            f"Project exceeds the {limit}-byte uncompressed size limit"
+        )
+
+
+@dataclass
+class _ProjectSnapshot:
+    metadata: dict
+    files: dict[str, bytes]
+
+
+_ProjectCacheKey: TypeAlias = tuple[str, bytes, str, int]
+
+
+@dataclass
+class _ProjectFileCache:
+    files: OrderedDict[_ProjectCacheKey, bytes] = field(default_factory=OrderedDict)
+    byte_size: int = 0
+
+    def get(self, key: _ProjectCacheKey) -> bytes | None:
+        content = self.files.get(key)
+        if content is not None:
+            self.files.move_to_end(key)
+        return content
+
+    def put(self, key: _ProjectCacheKey, content: bytes) -> None:
+        if len(content) > _PROJECT_CACHE_BYTES:
+            return
+        previous = self.files.pop(key, None)
+        if previous is not None:
+            self.byte_size -= len(previous)
+        self.files[key] = content
+        self.byte_size += len(content)
+        while (
+            self.byte_size > _PROJECT_CACHE_BYTES
+            or len(self.files) > _PROJECT_CACHE_FILES
+        ):
+            _, removed = self.files.popitem(last=False)
+            self.byte_size -= len(removed)
+
+
+def project_file_contents(contents: bytes | str) -> dict[str, str]:
+    if isinstance(contents, str):
+        return {"contents": contents, "encoding": "utf-8"}
+    return {
+        "contents": base64.b64encode(contents).decode("ascii"),
+        "encoding": "base64",
+    }
+
+
+class ProjectFileSystem:
+    """Authenticated filesystem operations on one existing cloud project.
+
+    All mutations use the same complete-snapshot replacement pipeline. A bounded
+    in-memory cache reuses verified file bytes; metadata is always fetched afresh.
+    Instances capture client configuration when constructed.
+    """
+
+    def __init__(self, project_id: str, max_project_bytes: int = MAX_PROJECT_BYTES):
+        if not project_id.startswith("cloud:"):
+            raise ZooMCPException("project_id must have the cloud: prefix")
+        try:
+            self.id = str(UUID(project_id.removeprefix("cloud:")))
+        except ValueError as exc:
+            raise ZooMCPException(
+                "project_id must contain a cloud project UUID"
+            ) from exc
+        if (
+            not isinstance(max_project_bytes, int)
+            or isinstance(max_project_bytes, bool)
+            or max_project_bytes <= 0
+        ):
+            raise ZooMCPException("max_project_bytes must be positive")
+        self.limit = max_project_bytes
+        try:
+            self.config = get_client_config()
+        except ValueError as exc:
+            raise ZooMCPException(str(exc)) from exc
+        self.url = self.config.base_url.rstrip("/") + "/user/projects/" + self.id
+
+    def _client(self) -> AsyncKittyCAD:
+        client = AsyncKittyCAD(
+            token=self.config.token,
+            base_url=self.config.base_url.rstrip("/"),
+            headers=dict(self.config.headers or {}),
+            verify_ssl=ctx,
+            timeout=60.0,
+        )
+        client.get_http_client().event_hooks["response"].append(_capture_rest_response)
+        return client
+
+    def _file_cache(self) -> _ProjectFileCache:
+        loop = asyncio.get_running_loop()
+        cache = _project_file_caches.get(loop)
+        if cache is None:
+            cache = _ProjectFileCache()
+            _project_file_caches[loop] = cache
+        return cache
+
+    def _cache_key(self, entry: dict) -> _ProjectCacheKey | None:
+        # New versions assign new file IDs even when the contents are unchanged.
+        checksum = entry.get("sha256")
+        if not checksum:
+            return None
+        credentials = json.dumps(
+            [self.config.token, sorted((self.config.headers or {}).items())]
+        ).encode()
+        return self.url, sha256(credentials).digest(), checksum, entry["byte_size"]
+
+    def _cache_uploaded_files(self, project: dict, files: dict[str, bytes]) -> None:
+        cache = self._file_cache()
+        for entry in project["files"]:
+            content = files.get(entry["relative_path"])
+            key = self._cache_key(entry)
+            # The server can rewrite project.toml. Never cache submitted bytes
+            # unless their size and hash match the acknowledged stored file.
+            if (
+                key is not None
+                and content is not None
+                and len(content) == entry["byte_size"]
+                and sha256(content).hexdigest() == entry["sha256"]
+            ):
+                cache.put(key, content)
+
+    @asynccontextmanager
+    async def _operation(self) -> AsyncGenerator[AsyncKittyCAD, None]:
+        deadline = asyncio.timeout(_PROJECT_TIMEOUT)
+        try:
+            async with deadline, self._client() as client:
+                yield client
+        except KittyCADAPIError as exc:
+            raise ZooMCPException(f"Project API request failed with {exc}") from exc
+        except httpx.RequestError as exc:
+            raise ZooMCPException(
+                f"Project API request failed ({type(exc).__name__}): {exc}. "
+                "Check your connection and try again."
+            ) from exc
+        except TimeoutError as exc:
+            if not deadline.expired():
+                raise
+            raise ZooMCPTimeoutError(
+                "Project operation deadline exceeded; an upload may have completed. "
+                "Inspect the latest project before retrying a mutation."
+            ) from exc
+
+    async def _metadata(self, client: AsyncKittyCAD) -> dict:
+        project = await client.projects.get_project(id=Uuid(self.id))
+        data = project.model_dump(mode="json", exclude_unset=True)
+        if not isinstance(data, dict) or not isinstance(data.get("revision"), str):
+            raise ZooMCPException("Project response is missing its revision")
+        entries = data.get("files")
+        if not isinstance(entries, list):
+            raise ZooMCPException("Project response is missing its file metadata")
+        paths: dict[str, dict] = {}
+        total = 0
+        for entry in entries:
+            path = _project_path(entry["relative_path"])
+            if path != entry["relative_path"]:
+                raise ZooMCPException("Project file paths must be canonical")
+            size = entry["byte_size"]
+            if not path or path in paths or not isinstance(size, int) or size < 0:
+                raise ZooMCPException("Invalid project file metadata")
+            paths[path] = entry
+            total += size
+        _check_project_size(total, self.limit)
+        _validate_project_paths(paths)
+        return data
+
+    async def _download_file(
+        self, client: AsyncKittyCAD, revision: str, entry: dict
+    ) -> bytes:
+        """Fetch exact bytes from one immutable version, bounded by its manifest."""
+        cache = self._file_cache()
+        key = self._cache_key(entry)
+        if key is not None:
+            cached = cache.get(key)
+            if cached is not None:
+                return cached
+        file_id = entry["id"]
+        size = entry["byte_size"]
+        content = io.BytesIO()
+        # Allow ZIP headers, long filenames, and DEFLATE overhead while bounding
+        # the download independently of the size declared inside the archive.
+        archive_limit = size + size // 1000 + 128 * 1024
+        async with client.projects.download_project_version(
+            id=Uuid(self.id),
+            version_id=Uuid(revision),
+            format=ProjectArchiveFormat.ZIP,
+            file_ids=[file_id],
+        ) as response:
+            async for chunk in response.aiter_bytes():
+                if content.tell() + len(chunk) > archive_limit:
+                    raise ZooMCPException("Project file archive exceeds its size limit")
+                content.write(chunk)
+        content.seek(0)
+        try:
+            with zipfile.ZipFile(content) as archive:
+                members = archive.infolist()
+                if len(members) != 1:
+                    raise ZooMCPException(
+                        "Project archive must contain only the requested file"
+                    )
+                member = members[0]
+                if (
+                    member.orig_filename != entry["relative_path"]
+                    or member.is_dir()
+                    or stat.S_ISLNK(member.external_attr >> 16)
+                ):
+                    raise ZooMCPException(
+                        "Project archive does not contain the requested file"
+                    )
+                if member.file_size != size:
+                    raise ZooMCPException(
+                        "Project file does not match its declared byte size"
+                    )
+                with archive.open(member) as source:
+                    data = source.read(size + 1)
+        except (
+            zipfile.BadZipFile,
+            RuntimeError,
+            NotImplementedError,
+            zlib.error,
+        ) as exc:
+            raise ZooMCPException(f"Invalid project file archive: {exc}") from exc
+        if len(data) != size:
+            raise ZooMCPException("Project file does not match its declared byte size")
+        if (
+            entry.get("sha256") is not None
+            and sha256(data).hexdigest() != entry["sha256"]
+        ):
+            raise ZooMCPException("Project file does not match its declared hash")
+        if key is not None:
+            cache.put(key, data)
+        return data
+
+    async def _snapshot(self, client: AsyncKittyCAD) -> _ProjectSnapshot:
+        """Fetch current metadata and reuse verified bytes for unchanged files."""
+        metadata = await self._metadata(client)
+        if not metadata["access"]["can_edit"]:
+            raise ZooMCPException("The caller cannot edit this project")
+        if metadata["entrypoint_path"] != "main.kcl":
+            raise ZooMCPException(
+                "Filesystem mutations require main.kcl as the entrypoint"
+            )
+        files = {}
+        for entry in metadata["files"]:
+            files[entry["relative_path"]] = await self._download_file(
+                client, metadata["revision"], entry
+            )
+        return _ProjectSnapshot(metadata, files)
+
+    @api_operation
+    async def access(self, path: str = ".") -> dict:
+        path = _project_path(path)
+        async with self._operation() as client:
+            metadata = await self._metadata(client)
+        self._stat(self._entries(metadata), path)
+        return {"access": metadata["access"]}
+
+    @api_operation
+    async def stat(self, path: str = ".") -> dict:
+        path = _project_path(path)
+        async with self._operation() as client:
+            metadata = await self._metadata(client)
+        return self._stat(self._entries(metadata), path)
+
+    @staticmethod
+    def _entries(metadata: dict) -> dict[str, dict]:
+        """Index file and inferred directory metadata once per response."""
+
+        def directory(path: str) -> dict:
+            # Directories have no independent API record.
+            return {
+                "relative_path": path,
+                "kind": "directory",
+                "id": None,
+                "created_at": None,
+                "updated_at": None,
+                "sha256": None,
+                "byte_size": None,
+                "content_type": None,
+            }
+
+        entries = {"": directory("")}
+        for entry in metadata["files"]:
+            path = entry["relative_path"]
+            entries[path] = {**entry, "kind": "file"}
+            for parent in PurePosixPath(path).parents:
+                parent_path = "" if str(parent) == "." else str(parent)
+                if parent_path in entries:
+                    break
+                entries[parent_path] = directory(parent_path)
+        return entries
+
+    @staticmethod
+    def _stat(entries: dict[str, dict], path: str) -> dict:
+        if path not in entries:
+            raise ZooMCPException(f"Path does not exist: {path}")
+        return entries[path]
+
+    @api_operation
+    async def readdir(self, path: str = ".") -> dict:
+        path = _project_path(path)
+        async with self._operation() as client:
+            metadata = await self._metadata(client)
+        entries = self._entries(metadata)
+        if self._stat(entries, path)["kind"] != "directory":
+            raise ZooMCPException(f"Not a directory: {path}")
+        children = (
+            name for name in entries if name and name.rpartition("/")[0] == path
+        )
+        return {"files": [entries[name] for name in sorted(children)]}
+
+    @api_operation
+    async def read_file(
+        self, path: str, encoding: Literal["utf-8"] | None = None
+    ) -> bytes | str:
+        path = _project_path(path)
+        if encoding not in (None, "utf-8"):
+            raise ZooMCPException("Only utf-8 text decoding is supported")
+        async with self._operation() as client:
+            metadata = await self._metadata(client)
+            for entry in metadata["files"]:
+                if entry["relative_path"] == path:
+                    content = await self._download_file(
+                        client, metadata["revision"], entry
+                    )
+                    if encoding:
+                        try:
+                            return content.decode("utf-8")
+                        except UnicodeDecodeError as exc:
+                            raise ZooMCPException(
+                                f"File {path} is not valid UTF-8; use base64 encoding "
+                                "to read binary files."
+                            ) from exc
+                    return content
+        raise ZooMCPException(f"Not a file: {path}")
+
+    async def _put(
+        self,
+        client: AsyncKittyCAD,
+        before: _ProjectSnapshot,
+        files: dict[str, bytes],
+        written_paths: set[str],
+    ) -> dict:
+        """Build and send one complete project replacement."""
+        # The Projects API currently replaces the whole file set on save. Reuse
+        # cached bytes to avoid downloading unchanged files, then upload the full
+        # replacement until the API supports partial updates.
+        metadata = before.metadata
+        removed = before.files.keys() - files.keys()
+        previews = {
+            entry["relative_path"]
+            for entry in metadata["files"]
+            if entry["file_role"] == "preview_image"
+        }
+        # Omit carried-over previews so source edits get a fresh render. Preserve
+        # explicitly written or copied previews even when their bytes are identical:
+        # otherwise a successful write would omit the very file the caller wrote.
+        files = {
+            path: content
+            for path, content in files.items()
+            if path not in previews or path in written_paths
+        }
+        # Omit publication_status to preserve server-owned workflow states.
+        body = UpdateProjectRequest(
+            title=metadata["title"],
+            description=metadata["description"],
+            entrypoint_path=metadata["entrypoint_path"],
+            category_ids=[Uuid(value) for value in metadata["category_ids"]],
+            expected_revision=metadata["revision"],
+            deleted_paths=sorted(removed - previews),
+        )
+        try:
+            project = await client.projects.update_project(
+                id=Uuid(self.id), body=body, file_attachments=dict(files)
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
+            raise ZooMCPException(
+                "Project upload returned an unreadable response. Inspect the latest "
+                "project revision before retrying a mutation."
+            ) from exc
+        except KittyCADAPIError as exc:
+            if exc.status_code < 500:
+                raise
+            raise ZooMCPException(
+                f"Project API upload failed with {exc}; "
+                "an upload may have completed. Inspect the latest project "
+                "before retrying a mutation."
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ZooMCPException(
+                f"Project API upload failed ({type(exc).__name__}): {exc}; "
+                "an upload may have completed. Inspect the latest project "
+                "before retrying a mutation."
+            ) from exc
+        if project is None:
+            raise ZooMCPException(
+                "Project upload returned an empty response. Inspect the latest "
+                "project revision before retrying a mutation."
+            )
+        return project.model_dump(mode="json", exclude_unset=True)
+
+    async def _mutate(
+        self,
+        transform: Callable[[dict[str, bytes]], set[str]],
+    ) -> dict:
+        async with self._operation() as client:
+            for _ in range(_PROJECT_ATTEMPTS):
+                snapshot = await self._snapshot(client)
+                # Reapply the requested operation to every refreshed snapshot.
+                updated = snapshot.files.copy()
+                written_paths = transform(updated)
+                _validate_project_paths(updated)
+                _check_project_size(sum(map(len, updated.values())), self.limit)
+                if "main.kcl" not in updated:
+                    raise ZooMCPException("main.kcl must remain the entrypoint")
+                if snapshot.metadata["project_toml_path"] not in updated:
+                    raise ZooMCPException(
+                        "Cannot remove or move project.toml; the Project API requires "
+                        "it and regenerates it when omitted"
+                    )
+                try:
+                    project = await self._put(client, snapshot, updated, written_paths)
+                except KittyCADClientError as exc:
+                    # Only a 409 explicitly rejects the write and permits a fresh attempt.
+                    if exc.status_code == 409:
+                        continue
+                    raise
+                self._cache_uploaded_files(project, updated)
+                return project
+            raise ZooMCPException(
+                "Project write conflicted after three attempts; refresh and try again"
+            )
+
+    @api_operation
+    async def write_file(self, path: str, contents: bytes | str) -> dict:
+        path = _project_path(path)
+        content = contents.encode("utf-8") if isinstance(contents, str) else contents
+
+        def transform(files: dict[str, bytes]) -> set[str]:
+            if _project_kind(files, path) == "directory":
+                raise ZooMCPException(f"Cannot overwrite a directory: {path}")
+            _project_parent(files, path)
+            files[path] = content
+            return {path}
+
+        project = await self._mutate(transform)
+        if path == project["project_toml_path"]:
+            # The API stamps cloud identity into the manifest. Use the acknowledged
+            # version, even if another writer has since replaced the current one.
+            entry = next(
+                item for item in project["files"] if item["relative_path"] == path
+            )
+            try:
+                async with self._operation() as client:
+                    stored = await self._download_file(
+                        client, project["revision"], entry
+                    )
+            except ZooMCPException as exc:
+                raise ZooMCPException(
+                    f"Project upload succeeded at revision {project['revision']}, "
+                    f"but its stored manifest could not be read: {exc}"
+                ) from exc
+            contents = stored.decode("utf-8") if isinstance(contents, str) else stored
+        return {
+            **project,
+            "path": path,
+            **project_file_contents(contents),
+        }
+
+    @api_operation
+    async def mkdir(self, path: str) -> dict:
+        path = _project_path(path)
+
+        def transform(files: dict[str, bytes]) -> set[str]:
+            if _project_kind(files, path) is not None:
+                raise ZooMCPException(f"Path already exists: {path}")
+            _project_parent(files, path)
+            files[path + "/.empty"] = b""
+            return {path + "/.empty"}
+
+        return await self._mutate(transform)
+
+    @api_operation
+    async def rm(self, path: str) -> dict:
+        path = _project_path(path)
+        if not path or path == "main.kcl":
+            raise ZooMCPException("Cannot remove the project root or main.kcl")
+
+        def transform(files: dict[str, bytes]) -> set[str]:
+            targets = _project_subtree(files, path)
+            if not targets:
+                raise ZooMCPException(f"Path does not exist: {path}")
+            for name in targets:
+                del files[name]
+            _preserve_project_parent(files, path)
+            return set()
+
+        return await self._mutate(transform)
+
+    async def _copy(self, source: str, destination: str, *, move: bool) -> dict:
+        source, destination = _project_path(source), _project_path(destination)
+        if not source or (move and source == "main.kcl"):
+            raise ZooMCPException("Cannot copy the project root or move main.kcl")
+
+        def transform(files: dict[str, bytes]) -> set[str]:
+            kind = _project_kind(files, source)
+            if kind is None:
+                raise ZooMCPException(f"Path does not exist: {source}")
+            target = destination
+            if _project_kind(files, target) == "directory":
+                target = str(PurePosixPath(target) / PurePosixPath(source).name)
+            if target == "main.kcl":
+                raise ZooMCPException("Cannot overwrite main.kcl through copy or move")
+            if source == target or (
+                kind == "directory" and target.startswith(source + "/")
+            ):
+                raise ZooMCPException("Cannot copy or move a path into itself")
+            _project_parent(files, target)
+            target_kind = _project_kind(files, target)
+            if target_kind and (kind == "directory" or target_kind == "directory"):
+                raise ZooMCPException(
+                    "Destination already exists or has an incompatible type"
+                )
+            selected = _project_subtree(files, source)
+            written = {
+                target + name[len(source) :]: content
+                for name, content in selected.items()
+            }
+            files.update(written)
+            if move:
+                for name in selected:
+                    del files[name]
+                _preserve_project_parent(files, source)
+            return set(written)
+
+        return await self._mutate(transform)
+
+    @api_operation
+    async def cp(self, source: str, destination: str) -> dict:
+        return await self._copy(source, destination, move=False)
+
+    @api_operation
+    async def mv(self, source: str, destination: str) -> dict:
+        return await self._copy(source, destination, move=True)
