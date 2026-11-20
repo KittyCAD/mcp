@@ -43,7 +43,7 @@ if TYPE_CHECKING:
         def unfixed_lints(self) -> list[kcl.Discovered]: ...
 
 
-from kittycad.exceptions import KittyCADClientError
+from kittycad.exceptions import KittyCADAPIError, KittyCADClientError
 from kittycad.models import (
     ApiCallStatus,
     Axis,
@@ -67,6 +67,8 @@ from kittycad.models import (
     Point2d,
     Point3d,
     PostEffectType,
+    ProjectArchiveFormat,
+    ProjectResponse,
     StepImportTargetRepresentation,
     System,
     UnitArea,
@@ -74,6 +76,7 @@ from kittycad.models import (
     UnitLength,
     UnitMass,
     UnitVolume,
+    UpdateProjectRequest,
     WebSocketRequest,
     WebSocketResponse,
 )
@@ -144,6 +147,7 @@ from kittycad.models.ok_web_socket_response_data import OptionModeling
 from kittycad.models.success_web_socket_response import SuccessWebSocketResponse
 from kittycad.models.uuid import Uuid
 from kittycad.models.web_socket_request import OptionModelingCmdReq
+from kittycad.response_helpers import raise_for_status
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
@@ -4359,17 +4363,16 @@ class ProjectFileSystem:
             raise ZooMCPException(str(exc)) from exc
         self.url = self.config.base_url.rstrip("/") + "/user/projects/" + self.id
 
-    def _client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
-            headers={
-                "Authorization": f"Bearer {self.config.token}",
-                **(self.config.headers or {}),
-            },
-            verify=ctx,
+    def _client(self) -> AsyncKittyCAD:
+        client = AsyncKittyCAD(
+            token=self.config.token,
+            base_url=self.config.base_url.rstrip("/"),
+            headers=dict(self.config.headers or {}),
+            verify_ssl=ctx,
             timeout=60.0,
-            follow_redirects=False,
-            event_hooks={"response": [_capture_rest_response]},
         )
+        client.get_http_client().event_hooks["response"].append(_capture_rest_response)
+        return client
 
     def _file_cache(self) -> _ProjectFileCache:
         loop = asyncio.get_running_loop()
@@ -4405,11 +4408,13 @@ class ProjectFileSystem:
                 cache.put(key, content)
 
     @asynccontextmanager
-    async def _operation(self) -> AsyncGenerator[httpx.AsyncClient, None]:
+    async def _operation(self) -> AsyncGenerator[AsyncKittyCAD, None]:
         deadline = asyncio.timeout(_PROJECT_TIMEOUT)
         try:
             async with deadline, self._client() as client:
                 yield client
+        except KittyCADAPIError as exc:
+            raise ZooMCPException(f"Project API request failed with {exc}") from exc
         except httpx.RequestError as exc:
             raise ZooMCPException(
                 f"Project API request failed ({type(exc).__name__}): {exc}. "
@@ -4423,28 +4428,9 @@ class ProjectFileSystem:
                 "Inspect the latest project before retrying a mutation."
             ) from exc
 
-    @staticmethod
-    async def _check_response(
-        response: httpx.Response, *, upload: bool = False
-    ) -> None:
-        if response.is_success:
-            return
-        await response.aread()
-        message = (
-            f"Project API {response.request.method} failed with HTTP "
-            f"{response.status_code}: {response.text[:2000]}"
-        )
-        if upload and response.status_code >= 500:
-            message += (
-                "; an upload may have completed. Inspect the latest project "
-                "before retrying a mutation."
-            )
-        raise ZooMCPException(message)
-
-    async def _metadata(self, client: httpx.AsyncClient) -> dict:
-        response = await client.get(self.url)
-        await self._check_response(response)
-        data = response.json()
+    async def _metadata(self, client: AsyncKittyCAD) -> dict:
+        project = await client.projects.get_project(id=Uuid(self.id))
+        data = project.model_dump(mode="json", exclude_unset=True)
         if not isinstance(data, dict) or not isinstance(data.get("revision"), str):
             raise ZooMCPException("Project response is missing its revision")
         entries = data.get("files")
@@ -4464,7 +4450,7 @@ class ProjectFileSystem:
         return data
 
     async def _download_file(
-        self, client: httpx.AsyncClient, revision: str, entry: dict
+        self, client: AsyncKittyCAD, revision: str, entry: dict
     ) -> bytes:
         """Fetch exact bytes from one immutable version, bounded by its manifest."""
         cache = self._file_cache()
@@ -4479,13 +4465,12 @@ class ProjectFileSystem:
         # Allow ZIP headers, long filenames, and DEFLATE overhead while bounding
         # the download independently of the size declared inside the archive.
         archive_limit = size + size // 1000 + 128 * 1024
-        # The SDK download method currently JSON-decodes binary archive responses.
-        async with client.stream(
-            "GET",
-            f"{self.url}/versions/{revision}/download",
-            params={"format": "zip", "file_ids": file_id},
+        async with client.projects.download_project_version(
+            id=Uuid(self.id),
+            version_id=Uuid(revision),
+            format=ProjectArchiveFormat.ZIP,
+            file_ids=[file_id],
         ) as response:
-            await self._check_response(response)
             async for chunk in response.aiter_bytes():
                 if content.tell() + len(chunk) > archive_limit:
                     raise ZooMCPException("Project file archive exceeds its size limit")
@@ -4531,7 +4516,7 @@ class ProjectFileSystem:
             cache.put(key, data)
         return data
 
-    async def _snapshot(self, client: httpx.AsyncClient) -> _ProjectSnapshot:
+    async def _snapshot(self, client: AsyncKittyCAD) -> _ProjectSnapshot:
         """Fetch current metadata and reuse verified bytes for unchanged files."""
         metadata = await self._metadata(client)
         files = {}
@@ -4630,11 +4615,11 @@ class ProjectFileSystem:
 
     async def _put(
         self,
-        client: httpx.AsyncClient,
+        client: AsyncKittyCAD,
         before: _ProjectSnapshot,
         files: dict[str, bytes],
         written_paths: set[str],
-    ) -> httpx.Response:
+    ) -> dict:
         """Build and send one complete project replacement."""
         # The Projects API currently replaces the whole file set on save. Reuse
         # cached bytes to avoid downloading unchanged files, then upload the full
@@ -4654,22 +4639,44 @@ class ProjectFileSystem:
             for path, content in files.items()
             if path not in previews or path in written_paths
         }
-        body = {
-            key: metadata[key]
-            for key in ("title", "description", "entrypoint_path", "category_ids")
-        }
         # Omit publication_status to preserve server-owned workflow states.
-        body.update(
+        body = UpdateProjectRequest(
+            title=metadata["title"],
+            description=metadata["description"],
+            entrypoint_path=metadata["entrypoint_path"],
+            category_ids=[Uuid(value) for value in metadata["category_ids"]],
             expected_revision=metadata["revision"],
             deleted_paths=sorted(removed - previews),
         )
-        boundary = uuid4().hex
         try:
-            return await client.put(
-                self.url,
-                content=_project_multipart(body, files, boundary),
-                headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
-            )
+            if any(path in {"body", "event"} or '"' in path for path in files):
+                # The SDK reserves body/event field names and percent-encodes
+                # quotes. Preserve these valid project filenames until it supports them.
+                boundary = uuid4().hex
+                headers = httpx.Headers(client.get_headers())
+                headers["Content-Type"] = "multipart/form-data; boundary=" + boundary
+                response = await client.get_http_client().put(
+                    self.url,
+                    content=_project_multipart(body.to_dict(), files, boundary),
+                    headers=headers,
+                )
+                raise_for_status(response)
+                project = ProjectResponse.model_validate(
+                    response.json(), extra="ignore"
+                )
+            else:
+                project = await client.projects.update_project(
+                    id=Uuid(self.id), body=body, file_attachments=dict(files)
+                )
+            return project.model_dump(mode="json", exclude_unset=True)
+        except KittyCADAPIError as exc:
+            if exc.status_code < 500:
+                raise
+            raise ZooMCPException(
+                f"Project API upload failed with {exc}; "
+                "an upload may have completed. Inspect the latest project "
+                "before retrying a mutation."
+            ) from exc
         except httpx.RequestError as exc:
             raise ZooMCPException(
                 f"Project API upload failed ({type(exc).__name__}): {exc}; "
@@ -4702,13 +4709,15 @@ class ProjectFileSystem:
                         "Cannot remove or move project.toml; the Project API requires "
                         "it and regenerates it when omitted"
                     )
-                response = await self._put(client, snapshot, updated, written_paths)
-                # Only a 409 explicitly rejects the write and permits a fresh attempt.
-                if response.status_code != 409:
-                    await self._check_response(response, upload=True)
-                    project = response.json()
-                    self._cache_uploaded_files(project, updated)
-                    return project
+                try:
+                    project = await self._put(client, snapshot, updated, written_paths)
+                except KittyCADClientError as exc:
+                    # Only a 409 explicitly rejects the write and permits a fresh attempt.
+                    if exc.status_code == 409:
+                        continue
+                    raise
+                self._cache_uploaded_files(project, updated)
+                return project
             raise ZooMCPException(
                 "Project write conflicted after three attempts; refresh and try again"
             )

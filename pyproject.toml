@@ -10,7 +10,8 @@ dependencies = [
     "aiofiles<26.0",
     "httpx>=0.28,<1",
     "keyring>=25.6,<26",
-    "kittycad>=1.12.0,<2.0",
+    # Project uploads and streaming downloads are unreleased on SDK main.
+    "kittycad @ https://github.com/KittyCAD/kittycad.py/archive/d9eeaebe312f2415e6e1201b5e40fa4e6c13ef8c.tar.gz",
     "markdown-it-py>=4.2,<5",
     "mcp[cli]>=2.2.0,<3",
     "pillow>=13.0.0,<14.0",

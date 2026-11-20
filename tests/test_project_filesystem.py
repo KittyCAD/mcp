@@ -13,6 +13,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 import pytest
+from kittycad import AsyncKittyCAD
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
@@ -61,27 +62,39 @@ class ProjectAPI:
         return {
             "id": PROJECT_ID[6:],
             "revision": str(self.revision),
+            "metadata_revision": str(self.revision),
+            "created_at": "2026-11-20T00:00:00Z",
+            "updated_at": "2026-11-20T00:00:00Z",
             "title": "My project",
             "description": "Keep this description",
             "category_ids": ["category"],
             "publication_status": "published",
+            "publication": {"has_unpublished_changes": False},
+            "preview_status": "pending",
             "entrypoint_path": "main.kcl",
             "project_toml_path": "project.toml",
-            "access": {"can_edit": self.editable, "can_delete": False},
+            "access": {
+                "can_edit": self.editable,
+                "can_delete": False,
+                "can_manage_organization": False,
+                "organization_id": None,
+                "scope": "personal",
+            },
             "files": [
                 {
                     "relative_path": path,
                     "byte_size": len(data),
                     "sha256": hashlib.sha256(data).hexdigest(),
                     "id": self.file_id(path),
-                    "created_at": "created",
-                    "updated_at": "updated",
+                    "created_at": "2026-11-20T00:00:00Z",
+                    "updated_at": "2026-11-20T00:00:00Z",
+                    "sort_order": order,
                     "content_type": "application/octet-stream",
                     "file_role": "preview_image"
                     if path == "thumbnail.png"
                     else "project_file",
                 }
-                for path, data in self.files.items()
+                for order, (path, data) in enumerate(self.files.items())
             ],
         }
 
@@ -201,10 +214,15 @@ def project_transport(monkeypatch):
         monkeypatch.setattr(
             ProjectFileSystem,
             "_client",
-            lambda _: httpx.AsyncClient(
-                transport=httpx.MockTransport(handler),
-                headers={"Authorization": "Bearer test-token"},
-                follow_redirects=False,
+            lambda fs: AsyncKittyCAD(
+                token=fs.config.token,
+                base_url=fs.config.base_url.rstrip("/"),
+                headers=dict(fs.config.headers or {}),
+                http_client=httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler),
+                    follow_redirects=False,
+                    event_hooks={"response": [zoo_tools._capture_rest_response]},
+                ),
             ),
         )
 
@@ -212,11 +230,12 @@ def project_transport(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_write_preserves_binary_metadata_and_arbitrary_field_names(api):
+@pytest.mark.parametrize("path", ["body", "event"])
+async def test_write_preserves_binary_metadata_and_arbitrary_field_names(api, path):
     fs = ProjectFileSystem(PROJECT_ID)
-    await fs.write_file("body", "new contents")
+    await fs.write_file(path, "new contents")
     assert api.files["parts/a.bin"] == b"\xff\x00"
-    assert api.files["body"] == b"new contents"
+    assert api.files[path] == b"new contents"
     assert len(api.uploads) == 1
     assert api.uploads[0][0]["deleted_paths"] == []
 
@@ -243,6 +262,9 @@ async def test_reads_and_metadata(api):
     assert (await fs.access("parts"))["access"] == {
         "can_edit": True,
         "can_delete": False,
+        "can_manage_organization": False,
+        "organization_id": None,
+        "scope": "personal",
     }
     assert (await fs.stat("parts/a.bin"))["sha256"] == hashlib.sha256(
         b"\xff\x00"
@@ -711,20 +733,34 @@ async def test_credentials_are_captured_at_construction(api):
 
 
 @pytest.mark.asyncio
-async def test_file_requests_keep_captured_custom_headers(api):
+@pytest.mark.parametrize("path", ["new.kcl", "body", "event", 'quoted"file.kcl'])
+async def test_file_requests_keep_captured_custom_headers(api, path):
     with use_client_config(
         ZooClientConfig(
             "test-token",
             "https://api.example.test/custom/",
-            headers={"X-Caller": "project-owner"},
+            headers={
+                "X-Caller": "project-owner",
+                "User-Agent": "ExampleClient/1.0",
+                "content-type": "application/json",
+            },
         )
     ):
         fs = ProjectFileSystem(PROJECT_ID)
 
     assert await fs.read_file("parts/a.bin") == b"\xff\x00"
+    await fs.write_file(path, b"// changed")
+    assert api.files[path] == b"// changed"
     assert all(
         request.headers["X-Caller"] == "project-owner" for request in api.requests
     )
+    assert all(
+        request.headers.get_list("User-Agent") == ["ExampleClient/1.0"]
+        for request in api.requests
+    )
+    upload = next(request for request in api.requests if request.method == "PUT")
+    assert len(upload.headers.get_list("Content-Type")) == 1
+    assert upload.headers["Content-Type"].startswith("multipart/form-data;")
 
 
 @pytest.mark.asyncio
