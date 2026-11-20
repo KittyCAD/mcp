@@ -47,6 +47,7 @@ class ProjectAPI:
         self.requests = []
         self.uploads = []
         self.failure = None
+        self.entrypoint = "main.kcl"
         self.editable = True
         self.download_hook = None
         self.versions = {}
@@ -71,7 +72,7 @@ class ProjectAPI:
             "publication_status": "published",
             "publication": {"has_unpublished_changes": False},
             "preview_status": "pending",
-            "entrypoint_path": "main.kcl",
+            "entrypoint_path": self.entrypoint,
             "project_toml_path": "project.toml",
             "access": {
                 "can_edit": self.editable,
@@ -385,15 +386,10 @@ async def test_upload_timeout_leaves_concurrent_edit_for_caller(api):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "failure,error",
-    [
-        ("disconnect", ZooMCPException),
-        ("server_error", ZooMCPException),
-        ("invalid_json", ValueError),
-    ],
+    "failure", ["disconnect", "server_error", "invalid_json", "invalid_model", "empty"]
 )
 async def test_upload_response_errors_propagate_without_retry_or_reload(
-    api, project_transport, failure, error
+    api, project_transport, failure
 ):
     def handle(request):
         response = api.handle(request)
@@ -403,10 +399,14 @@ async def test_upload_response_errors_propagate_without_retry_or_reload(
             raise httpx.RemoteProtocolError("connection closed", request=request)
         if failure == "server_error":
             return httpx.Response(503)
+        if failure == "empty":
+            return httpx.Response(200)
+        if failure == "invalid_model":
+            return httpx.Response(200, json={})
         return httpx.Response(200, content=b"invalid json")
 
     project_transport(handle)
-    with pytest.raises(error):
+    with pytest.raises(ZooMCPException, match="Inspect the latest project"):
         await ProjectFileSystem(PROJECT_ID).write_file("parts/a.bin", b"changed")
     assert len(api.uploads) == 1
     assert api.requests[-1].method == "PUT"
@@ -512,9 +512,12 @@ async def test_oversized_file_stream_stops_before_reading_remaining_chunks(
 
 
 @pytest.mark.asyncio
-async def test_unsafe_manifest_path_is_rejected_before_downloading(api):
-    api.files["../escape"] = b"unsafe"
-    with pytest.raises(ZooMCPException, match="project-relative"):
+@pytest.mark.parametrize(
+    "path,message", [("../escape", "project-relative"), ("parts//a.kcl", "canonical")]
+)
+async def test_unsafe_manifest_path_is_rejected_before_downloading(api, path, message):
+    api.files[path] = b"unsafe"
+    with pytest.raises(ZooMCPException, match=message):
         await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
     assert len(api.requests) == 1
 
@@ -616,11 +619,19 @@ async def test_slow_file_download_allows_metadata_queries(
 
 
 @pytest.mark.asyncio
+async def test_unsupported_entrypoint_is_rejected_before_downloading(api):
+    api.entrypoint = "parts/model.kcl"
+    with pytest.raises(ZooMCPException, match="require main.kcl"):
+        await ProjectFileSystem(PROJECT_ID).write_file("new", "x")
+    assert len(api.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_permission_denied_and_http_failure_never_retry(api):
     api.editable = False
     with pytest.raises(ZooMCPException, match="cannot edit"):
         await ProjectFileSystem(PROJECT_ID).write_file("new", "x")
-    assert not api.uploads
+    assert len(api.requests) == 1
     api.editable = True
     api.failure = "forbidden"
     with pytest.raises(ZooMCPException):

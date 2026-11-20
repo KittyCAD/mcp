@@ -30,6 +30,7 @@ import httpx
 import kcl
 import trimesh
 from kittycad import AsyncKittyCAD
+from pydantic import ValidationError
 
 if TYPE_CHECKING:
 
@@ -4404,6 +4405,8 @@ class ProjectFileSystem:
         total = 0
         for entry in entries:
             path = _project_path(entry["relative_path"])
+            if path != entry["relative_path"]:
+                raise ZooMCPException("Project file paths must be canonical")
             size = entry["byte_size"]
             if not path or path in paths or not isinstance(size, int) or size < 0:
                 raise ZooMCPException("Invalid project file metadata")
@@ -4483,6 +4486,12 @@ class ProjectFileSystem:
     async def _snapshot(self, client: AsyncKittyCAD) -> _ProjectSnapshot:
         """Fetch current metadata and reuse verified bytes for unchanged files."""
         metadata = await self._metadata(client)
+        if not metadata["access"]["can_edit"]:
+            raise ZooMCPException("The caller cannot edit this project")
+        if metadata["entrypoint_path"] != "main.kcl":
+            raise ZooMCPException(
+                "Filesystem mutations require main.kcl as the entrypoint"
+            )
         files = {}
         for entry in metadata["files"]:
             files[entry["relative_path"]] = await self._download_file(
@@ -4616,7 +4625,11 @@ class ProjectFileSystem:
             project = await client.projects.update_project(
                 id=Uuid(self.id), body=body, file_attachments=dict(files)
             )
-            return project.model_dump(mode="json", exclude_unset=True)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as exc:
+            raise ZooMCPException(
+                "Project upload returned an unreadable response. Inspect the latest "
+                "project revision before retrying a mutation."
+            ) from exc
         except KittyCADAPIError as exc:
             if exc.status_code < 500:
                 raise
@@ -4631,6 +4644,12 @@ class ProjectFileSystem:
                 "an upload may have completed. Inspect the latest project "
                 "before retrying a mutation."
             ) from exc
+        if project is None:
+            raise ZooMCPException(
+                "Project upload returned an empty response. Inspect the latest "
+                "project revision before retrying a mutation."
+            )
+        return project.model_dump(mode="json", exclude_unset=True)
 
     async def _mutate(
         self,
@@ -4639,12 +4658,6 @@ class ProjectFileSystem:
         async with self._operation() as client:
             for _ in range(_PROJECT_ATTEMPTS):
                 snapshot = await self._snapshot(client)
-                if not snapshot.metadata["access"]["can_edit"]:
-                    raise ZooMCPException("The caller cannot edit this project")
-                if snapshot.metadata["entrypoint_path"] != "main.kcl":
-                    raise ZooMCPException(
-                        "Filesystem mutations require main.kcl as the entrypoint"
-                    )
                 # Reapply the requested operation to every refreshed snapshot.
                 updated = snapshot.files.copy()
                 written_paths = transform(updated)
