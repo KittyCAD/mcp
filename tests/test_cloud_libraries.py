@@ -3,6 +3,7 @@ import json
 
 import httpx
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
 from zoo_mcp import ZooMCPException, client_config, cloud_libraries
@@ -168,6 +169,34 @@ async def test_bad_browse_arguments_do_not_make_requests(httpx_mock, kwargs):
     with pytest.raises(ZooMCPException):
         await cloud_libraries.list_cloud_projects(**kwargs)
     assert not httpx_mock.get_requests()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "arguments", "response", "default"),
+    [
+        ("list_cloud_libraries", {}, {"items": [], "next_page": None}, 20),
+        ("list_cloud_projects", {}, {"items": [], "next_page": None}, 20),
+        ("search_cloud_projects", {"query": "bracket"}, [], 10),
+    ],
+)
+async def test_mcp_cloud_limit(httpx_mock, name, arguments, response, default):
+    tool = next(tool for tool in await mcp.list_tools() if tool.name == name)
+    schema = tool.input_schema["properties"]["limit"]
+    assert schema["type"] == "integer"
+    assert schema["minimum"] == 1
+    assert schema["maximum"] == 100
+    assert schema["default"] == default
+
+    for limit in (True, "2", 2.0, 1.5, 0, 101):
+        with pytest.raises(ToolError, match="limit"):
+            await mcp.call_tool(name, arguments={**arguments, "limit": limit})
+    assert not httpx_mock.get_requests()
+
+    for limit in (1, 100):
+        httpx_mock.add_response(json=response)
+        result = await mcp.call_tool(name, arguments={**arguments, "limit": limit})
+        assert isinstance(result, CallToolResult) and not result.is_error
 
 
 @pytest.mark.asyncio

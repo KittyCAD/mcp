@@ -1984,8 +1984,13 @@ async def get_kcl_sample(sample_name: str) -> SampleData | str:
         raise ToolError(f"There was an error retrieving KCL sample: {e}") from e
 
 
+CloudLimit: TypeAlias = Annotated[int, Field(strict=True, ge=1, le=100)]
+
+
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
-async def list_cloud_libraries(limit: int = 20, page_token: str | None = None) -> dict:
+async def list_cloud_libraries(
+    limit: CloudLimit = 20, page_token: str | None = None
+) -> dict:
     """List personal libraries and active-organization libraries, including all creation sources.
 
     Continue with next_page as page_token, even when a page has no items.
@@ -2002,7 +2007,7 @@ async def list_cloud_projects(
     library_id: str | None = None,
     scope: Literal["personal", "organization"] | None = None,
     unassigned: bool = False,
-    limit: int = 20,
+    limit: CloudLimit = 20,
     page_token: str | None = None,
 ) -> dict:
     """Browse cloud projects and return cloud:<uuid> project_id values for filesystem tools.
@@ -2020,7 +2025,7 @@ async def list_cloud_projects(
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False))
 async def search_cloud_projects(
-    query: str, library_id: str | None = None, limit: int = 10
+    query: str, library_id: str | None = None, limit: CloudLimit = 10
 ) -> dict:
     """Search project titles/descriptions/filenames in the caller's active organization.
 
