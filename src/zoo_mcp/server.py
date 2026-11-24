@@ -2059,6 +2059,8 @@ async def project_write_file(
     and encoding. Text uses UTF-8; raw bytes and base64 inputs return base64.
     Pass expected_revision from a read to reject stale edits, including changes
     during upload. A rejected write is not reapplied to a newer revision.
+    This guards the project's content revision. Generated previews such as
+    thumbnail.png can change within that revision.
     """
     if isinstance(contents, bytes) and encoding is not None:
         raise ZooMCPException("Omit encoding when contents are raw bytes")
@@ -2087,6 +2089,8 @@ async def project_mkdir(
     marker may remain after files are added. Default project limit: 256 MiB.
     Pass expected_revision from a read to reject stale edits, including changes
     during upload. A rejected write is not reapplied to a newer revision.
+    This guards the project's content revision. Generated previews such as
+    thumbnail.png can change within that revision.
     """
     return await ProjectFileSystem(
         project_id, max_project_bytes, expected_revision=expected_revision
@@ -2107,6 +2111,8 @@ async def project_rm(
     Default total uncompressed project limit: 256 MiB.
     Pass expected_revision from a read to reject stale edits, including changes
     during upload. A rejected write is not reapplied to a newer revision.
+    This guards the project's content revision. Generated previews such as
+    thumbnail.png can change within that revision.
     """
     return await ProjectFileSystem(
         project_id, max_project_bytes, expected_revision=expected_revision
@@ -2129,6 +2135,8 @@ async def project_cp(
     Default total project limit: 256 MiB.
     Pass expected_revision from a read to reject stale edits, including changes
     during upload. A rejected write is not reapplied to a newer revision.
+    This guards the project's content revision. Generated previews such as
+    thumbnail.png can change within that revision.
     """
     return await ProjectFileSystem(
         project_id, max_project_bytes, expected_revision=expected_revision
@@ -2151,6 +2159,8 @@ async def project_mv(
     Default total uncompressed project limit: 256 MiB.
     Pass expected_revision from a read to reject stale edits, including changes
     during upload. A rejected write is not reapplied to a newer revision.
+    This guards the project's content revision. Generated previews such as
+    thumbnail.png can change within that revision.
     """
     return await ProjectFileSystem(
         project_id, max_project_bytes, expected_revision=expected_revision
@@ -2182,6 +2192,8 @@ async def project_stat(
     Directory-specific IDs, timestamps, sizes, and hashes are null because the
     API stores files. Includes the project revision for a subsequent mutation's
     expected_revision. Default total uncompressed project limit: 256 MiB.
+    The revision tracks project content; generated previews such as thumbnail.png
+    can change within that revision.
     """
     filesystem = ProjectFileSystem(project_id, max_project_bytes)
     result = await filesystem.stat(path)
@@ -2199,6 +2211,8 @@ async def project_readdir(
     Requires a cloud:<uuid> project ID. Includes the project revision for a
     subsequent mutation's expected_revision.
     Default total uncompressed project limit: 256 MiB.
+    The revision tracks project content; generated previews such as thumbnail.png
+    can change within that revision.
     """
     filesystem = ProjectFileSystem(project_id, max_project_bytes)
     result = await filesystem.readdir(path)
@@ -2215,8 +2229,9 @@ async def project_read_file(
     """Read a cloud project file as UTF-8 text or base64-encoded binary data.
 
     Returns {contents: str, encoding: str, revision: str}. Downloads only the
-    requested file from the current immutable revision. Default total project
-    limit: 256 MiB.
+    requested file from the current content revision. Generated previews such as
+    thumbnail.png can change within that revision. Default total project limit:
+    256 MiB.
     """
     filesystem = ProjectFileSystem(project_id, max_project_bytes)
     content = await filesystem.read_file(
