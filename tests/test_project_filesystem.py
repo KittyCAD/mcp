@@ -936,7 +936,7 @@ async def test_write_tool_accepts_bytes_without_encoding(
     assert json.loads(read.content[0].text) == {
         key: value
         for key, value in json.loads(result.content[0].text).items()
-        if key in ("contents", "encoding")
+        if key in ("contents", "encoding", "revision")
     }
 
 
@@ -1536,3 +1536,73 @@ async def test_cache_is_separate_for_projects_on_the_same_host(httpx_mock):
             )
     assert len(downloads) == 2
     assert downloads[0] != downloads[1]
+
+
+@pytest.mark.asyncio
+async def test_read_returns_the_revision_the_agent_can_use_for_its_write(api):
+    from zoo_mcp.server import project_read_file
+
+    result = await project_read_file(PROJECT_ID, "main.kcl")
+    assert result["contents"] == "// main"
+    assert result["revision"] == "1"
+    saved = await project_write_file(
+        PROJECT_ID, "main.kcl", "// edited", expected_revision=result["revision"]
+    )
+    assert saved["revision"] == "2"
+    assert api.files["main.kcl"] == b"// edited"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_upload", [False, True])
+@pytest.mark.parametrize(
+    "tool,arguments",
+    [
+        (
+            "project_write_file",
+            {"path": "main.kcl", "contents": "// stale replacement"},
+        ),
+        ("project_mkdir", {"path": "new"}),
+        ("project_rm", {"path": "parts/a.bin"}),
+        ("project_cp", {"source": "parts/a.bin", "destination": "copied.bin"}),
+        ("project_mv", {"source": "parts/a.bin", "destination": "moved.bin"}),
+    ],
+)
+async def test_observed_revision_rejects_changes_without_reapplying_the_write(
+    api, during_upload, tool, arguments
+):
+    from zoo_mcp import server
+
+    if during_upload:
+        api.failure = "conflict"
+    else:
+        api.files["main.kcl"] = b"// user edit"
+        api.revision += 1
+    with pytest.raises(ZooMCPException, match="changed"):
+        await getattr(server, tool)(PROJECT_ID, **arguments, expected_revision="1")
+    assert api.files["main.kcl"] == (b"// main" if during_upload else b"// user edit")
+    assert len(api.uploads) == (1 if during_upload else 0)
+
+
+@pytest.mark.asyncio
+async def test_read_revision_matches_its_contents_when_the_cloud_changes_during_download(
+    api,
+):
+    from zoo_mcp.server import project_read_file
+
+    def edit():
+        api.files["main.kcl"] = b"// user edit"
+        api.revision += 1
+
+    api.download_hook = edit
+    result = await project_read_file(PROJECT_ID, "main.kcl")
+    assert result["contents"] == "// main"
+    assert result["revision"] == "1"
+    with pytest.raises(ZooMCPException, match="changed"):
+        await project_write_file(
+            PROJECT_ID,
+            "main.kcl",
+            "// stale edit",
+            expected_revision=result["revision"],
+        )
+    assert api.files["main.kcl"] == b"// user edit"
+    assert not api.uploads
