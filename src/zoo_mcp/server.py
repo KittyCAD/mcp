@@ -2195,9 +2195,7 @@ async def project_stat(
     The revision tracks project content; generated previews such as thumbnail.png
     can change within that revision.
     """
-    filesystem = ProjectFileSystem(project_id, max_project_bytes)
-    result = await filesystem.stat(path)
-    return {**result, "revision": filesystem.revision}
+    return await ProjectFileSystem(project_id, max_project_bytes).stat(path)
 
 
 @mcp.tool()
@@ -2214,9 +2212,7 @@ async def project_readdir(
     The revision tracks project content; generated previews such as thumbnail.png
     can change within that revision.
     """
-    filesystem = ProjectFileSystem(project_id, max_project_bytes)
-    result = await filesystem.readdir(path)
-    return {**result, "revision": filesystem.revision}
+    return await ProjectFileSystem(project_id, max_project_bytes).readdir(path)
 
 
 @mcp.tool()
@@ -2233,11 +2229,10 @@ async def project_read_file(
     thumbnail.png can change within that revision. Default total project limit:
     256 MiB.
     """
-    filesystem = ProjectFileSystem(project_id, max_project_bytes)
-    content = await filesystem.read_file(
-        path, encoding="utf-8" if encoding == "utf-8" else None
-    )
-    return {**project_file_contents(content), "revision": filesystem.revision}
+    content, revision = await ProjectFileSystem(
+        project_id, max_project_bytes
+    ).read_file(path, encoding="utf-8" if encoding == "utf-8" else None)
+    return {**project_file_contents(content), "revision": revision}
 
 
 def _shutdown_on_signal(signum: int, _frame: FrameType | None) -> None:

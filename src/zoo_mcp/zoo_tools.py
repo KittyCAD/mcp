@@ -4329,7 +4329,6 @@ class ProjectFileSystem:
             raise ZooMCPException("max_project_bytes must be positive")
         self.limit = max_project_bytes
         self.expected_revision = expected_revision
-        self.revision: str | None = None
         try:
             self.config = get_client_config()
         except ValueError as exc:
@@ -4422,7 +4421,6 @@ class ProjectFileSystem:
             total += size
         _check_project_size(total, self.limit)
         _validate_project_paths(paths)
-        self.revision = data["revision"]
         return data
 
     async def _download_file(
@@ -4528,7 +4526,10 @@ class ProjectFileSystem:
         path = _project_path(path)
         async with self._operation() as client:
             metadata = await self._metadata(client)
-        return self._stat(self._entries(metadata), path)
+        return {
+            **self._stat(self._entries(metadata), path),
+            "revision": metadata["revision"],
+        }
 
     @staticmethod
     def _entries(metadata: dict) -> dict[str, dict]:
@@ -4575,12 +4576,16 @@ class ProjectFileSystem:
         children = (
             name for name in entries if name and name.rpartition("/")[0] == path
         )
-        return {"files": [entries[name] for name in sorted(children)]}
+        return {
+            "files": [entries[name] for name in sorted(children)],
+            "revision": metadata["revision"],
+        }
 
     @api_operation
     async def read_file(
         self, path: str, encoding: Literal["utf-8"] | None = None
-    ) -> bytes | str:
+    ) -> tuple[bytes | str, str]:
+        """Return file contents paired with the content revision used to read them."""
         path = _project_path(path)
         if encoding not in (None, "utf-8"):
             raise ZooMCPException("Only utf-8 text decoding is supported")
@@ -4593,13 +4598,13 @@ class ProjectFileSystem:
                     )
                     if encoding:
                         try:
-                            return content.decode("utf-8")
+                            return content.decode("utf-8"), metadata["revision"]
                         except UnicodeDecodeError as exc:
                             raise ZooMCPException(
                                 f"File {path} is not valid UTF-8; use base64 encoding "
                                 "to read binary files."
                             ) from exc
-                    return content
+                    return content, metadata["revision"]
         raise ZooMCPException(f"Not a file: {path}")
 
     async def _put(
