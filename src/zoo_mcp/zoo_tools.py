@@ -4306,7 +4306,13 @@ class ProjectFileSystem:
     Instances capture client configuration when constructed.
     """
 
-    def __init__(self, project_id: str, max_project_bytes: int = MAX_PROJECT_BYTES):
+    def __init__(
+        self,
+        project_id: str,
+        max_project_bytes: int = MAX_PROJECT_BYTES,
+        *,
+        expected_revision: str | None = None,
+    ):
         if not project_id.startswith("cloud:"):
             raise ZooMCPException("project_id must have the cloud: prefix")
         try:
@@ -4322,6 +4328,7 @@ class ProjectFileSystem:
         ):
             raise ZooMCPException("max_project_bytes must be positive")
         self.limit = max_project_bytes
+        self.expected_revision = expected_revision
         try:
             self.config = get_client_config()
         except ValueError as exc:
@@ -4486,6 +4493,13 @@ class ProjectFileSystem:
     async def _snapshot(self, client: AsyncKittyCAD) -> _ProjectSnapshot:
         """Fetch current metadata and reuse verified bytes for unchanged files."""
         metadata = await self._metadata(client)
+        if (
+            self.expected_revision is not None
+            and metadata["revision"] != self.expected_revision
+        ):
+            raise ZooMCPException(
+                "Project changed since it was read; inspect the latest contents and reconcile your edit before saving again."
+            )
         if not metadata["access"]["can_edit"]:
             raise ZooMCPException("The caller cannot edit this project")
         if metadata["entrypoint_path"] != "main.kcl":
@@ -4512,7 +4526,10 @@ class ProjectFileSystem:
         path = _project_path(path)
         async with self._operation() as client:
             metadata = await self._metadata(client)
-        return self._stat(self._entries(metadata), path)
+        return {
+            **self._stat(self._entries(metadata), path),
+            "revision": metadata["revision"],
+        }
 
     @staticmethod
     def _entries(metadata: dict) -> dict[str, dict]:
@@ -4559,12 +4576,16 @@ class ProjectFileSystem:
         children = (
             name for name in entries if name and name.rpartition("/")[0] == path
         )
-        return {"files": [entries[name] for name in sorted(children)]}
+        return {
+            "files": [entries[name] for name in sorted(children)],
+            "revision": metadata["revision"],
+        }
 
     @api_operation
     async def read_file(
         self, path: str, encoding: Literal["utf-8"] | None = None
-    ) -> bytes | str:
+    ) -> tuple[bytes | str, str]:
+        """Return file contents paired with the content revision used to read them."""
         path = _project_path(path)
         if encoding not in (None, "utf-8"):
             raise ZooMCPException("Only utf-8 text decoding is supported")
@@ -4577,13 +4598,13 @@ class ProjectFileSystem:
                     )
                     if encoding:
                         try:
-                            return content.decode("utf-8")
+                            return content.decode("utf-8"), metadata["revision"]
                         except UnicodeDecodeError as exc:
                             raise ZooMCPException(
                                 f"File {path} is not valid UTF-8; use base64 encoding "
                                 "to read binary files."
                             ) from exc
-                    return content
+                    return content, metadata["revision"]
         raise ZooMCPException(f"Not a file: {path}")
 
     async def _put(
@@ -4675,6 +4696,10 @@ class ProjectFileSystem:
                 except KittyCADClientError as exc:
                     # Only a 409 explicitly rejects the write and permits a fresh attempt.
                     if exc.status_code == 409:
+                        if self.expected_revision is not None:
+                            raise ZooMCPException(
+                                "Project changed while saving; inspect the latest contents and reconcile your edit before saving again."
+                            ) from exc
                         continue
                     raise
                 self._cache_uploaded_files(project, updated)
