@@ -4306,7 +4306,13 @@ class ProjectFileSystem:
     Instances capture client configuration when constructed.
     """
 
-    def __init__(self, project_id: str, max_project_bytes: int = MAX_PROJECT_BYTES):
+    def __init__(
+        self,
+        project_id: str,
+        max_project_bytes: int = MAX_PROJECT_BYTES,
+        *,
+        expected_revision: str | None = None,
+    ):
         if not project_id.startswith("cloud:"):
             raise ZooMCPException("project_id must have the cloud: prefix")
         try:
@@ -4322,6 +4328,8 @@ class ProjectFileSystem:
         ):
             raise ZooMCPException("max_project_bytes must be positive")
         self.limit = max_project_bytes
+        self.expected_revision = expected_revision
+        self.revision: str | None = None
         try:
             self.config = get_client_config()
         except ValueError as exc:
@@ -4414,6 +4422,7 @@ class ProjectFileSystem:
             total += size
         _check_project_size(total, self.limit)
         _validate_project_paths(paths)
+        self.revision = data["revision"]
         return data
 
     async def _download_file(
@@ -4658,6 +4667,13 @@ class ProjectFileSystem:
         async with self._operation() as client:
             for _ in range(_PROJECT_ATTEMPTS):
                 snapshot = await self._snapshot(client)
+                if (
+                    self.expected_revision is not None
+                    and snapshot.metadata["revision"] != self.expected_revision
+                ):
+                    raise ZooMCPException(
+                        "Project changed since it was read; inspect the latest contents and reconcile your edit before saving again."
+                    )
                 # Reapply the requested operation to every refreshed snapshot.
                 updated = snapshot.files.copy()
                 written_paths = transform(updated)
@@ -4675,6 +4691,10 @@ class ProjectFileSystem:
                 except KittyCADClientError as exc:
                     # Only a 409 explicitly rejects the write and permits a fresh attempt.
                     if exc.status_code == 409:
+                        if self.expected_revision is not None:
+                            raise ZooMCPException(
+                                "Project changed while saving; inspect the latest contents and reconcile your edit before saving again."
+                            ) from exc
                         continue
                     raise
                 self._cache_uploaded_files(project, updated)
