@@ -1584,6 +1584,27 @@ async def test_observed_revision_rejects_changes_without_reapplying_the_write(
 
 
 @pytest.mark.asyncio
+async def test_stale_write_reports_conflict_before_downloading_files(
+    api, project_transport
+):
+    api.files["main.kcl"] = b"// user edit"
+    api.revision += 1
+
+    def handle(request):
+        if "/versions/" in request.url.path:
+            raise httpx.ReadTimeout("file download timed out", request=request)
+        return api.handle(request)
+
+    project_transport(handle)
+    with pytest.raises(ZooMCPException, match="Project changed since it was read"):
+        await project_write_file(
+            PROJECT_ID, "main.kcl", "// stale replacement", expected_revision="1"
+        )
+    assert api.files["main.kcl"] == b"// user edit"
+    assert not api.uploads
+
+
+@pytest.mark.asyncio
 async def test_read_revision_matches_its_contents_when_the_cloud_changes_during_download(
     api,
 ):
