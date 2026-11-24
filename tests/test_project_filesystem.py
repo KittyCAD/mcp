@@ -258,8 +258,8 @@ async def test_empty_directory_and_marker_survive_addition(api):
 @pytest.mark.asyncio
 async def test_reads_and_metadata(api):
     fs = ProjectFileSystem(PROJECT_ID)
-    assert await fs.read_file("parts/a.bin") == b"\xff\x00"
-    assert await fs.read_file("main.kcl", "utf-8") == "// main"
+    assert (await fs.read_file("parts/a.bin"))[0] == b"\xff\x00"
+    assert (await fs.read_file("main.kcl", "utf-8"))[0] == "// main"
     assert (await fs.access("parts"))["access"] == {
         "can_edit": True,
         "can_delete": False,
@@ -429,7 +429,7 @@ async def test_read_fetches_only_requested_file_from_pinned_revision(api):
         api.revision += 1
 
     api.download_hook = edit
-    assert await ProjectFileSystem(PROJECT_ID).read_file("main.kcl") == b"// main"
+    assert (await ProjectFileSystem(PROJECT_ID).read_file("main.kcl"))[0] == b"// main"
     assert api.files["main.kcl"] == b"// newer revision"
     downloads = [
         request for request in api.requests if "/versions/" in request.url.path
@@ -439,10 +439,9 @@ async def test_read_fetches_only_requested_file_from_pinned_revision(api):
     assert downloads[0].url.params["file_ids"] == str(
         uuid5(NAMESPACE_URL, "1/main.kcl")
     )
-    assert (
-        await ProjectFileSystem(PROJECT_ID).read_file("main.kcl")
-        == b"// newer revision"
-    )
+    assert (await ProjectFileSystem(PROJECT_ID).read_file("main.kcl"))[
+        0
+    ] == b"// newer revision"
 
 
 @pytest.mark.asyncio
@@ -583,7 +582,7 @@ async def test_slow_file_download_allows_metadata_queries(
     api, project_transport, monkeypatch
 ):
     fs = ProjectFileSystem(PROJECT_ID)
-    assert await fs.read_file("parts/a.bin") == b"\xff\x00"
+    assert (await fs.read_file("parts/a.bin"))[0] == b"\xff\x00"
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -609,10 +608,10 @@ async def test_slow_file_download_allows_metadata_queries(
         await entered.wait()
         elapsed = 7.0
         assert (await fs.stat("parts/a.bin"))["byte_size"] == 2
-        assert await fs.read_file("parts/a.bin") == b"\xff\x00"
+        assert (await fs.read_file("parts/a.bin"))[0] == b"\xff\x00"
         assert not task.done()
         release.set()
-        assert await task == b"// main"
+        assert await task == (b"// main", "1")
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -740,7 +739,7 @@ async def test_credentials_are_captured_at_construction(api):
     with use_client_config(
         ZooClientConfig("different-token", "https://other.example.test")
     ):
-        assert await fs.read_file("main.kcl") == b"// main"
+        assert (await fs.read_file("main.kcl"))[0] == b"// main"
 
 
 @pytest.mark.asyncio
@@ -759,7 +758,7 @@ async def test_file_requests_keep_captured_custom_headers(api, path):
     ):
         fs = ProjectFileSystem(PROJECT_ID)
 
-    assert await fs.read_file("parts/a.bin") == b"\xff\x00"
+    assert (await fs.read_file("parts/a.bin"))[0] == b"\xff\x00"
     await fs.write_file(path, b"// changed")
     assert api.files[path] == b"// changed"
     assert all(
@@ -986,7 +985,7 @@ async def test_api_valid_paths_do_not_disable_other_files(api, path):
     api.files[path] = b"// valid API file"
     fs = ProjectFileSystem(PROJECT_ID)
     assert (await fs.stat("main.kcl"))["kind"] == "file"
-    assert await fs.read_file(path) == b"// valid API file"
+    assert (await fs.read_file(path))[0] == b"// valid API file"
     await fs.write_file(path, b"// updated")
     assert api.files[path] == b"// updated"
 
@@ -1030,7 +1029,7 @@ async def test_write_path_normalization_matches_api(api):
     fs = ProjectFileSystem(PROJECT_ID)
     await fs.write_file("  .\\parts\\part:v1.kcl  ", "// normalized")
     assert api.files["parts/part:v1.kcl"] == b"// normalized"
-    assert await fs.read_file(" parts\\part:v1.kcl ") == b"// normalized"
+    assert (await fs.read_file(" parts\\part:v1.kcl "))[0] == b"// normalized"
 
 
 @pytest.mark.asyncio
@@ -1040,7 +1039,7 @@ async def test_quoted_and_literal_percent_filenames_remain_distinct(api):
     await fs.write_file('part"v1.kcl', b"// quoted name")
     assert api.files['part"v1.kcl'] == b"// quoted name"
     assert api.files["part%22v1.kcl"] == b"// literal percent name"
-    assert await fs.read_file('part"v1.kcl') == b"// quoted name"
+    assert (await fs.read_file('part"v1.kcl'))[0] == b"// quoted name"
     request = next(request for request in api.requests if request.method == "PUT")
     assert b'filename="part\\"v1.kcl"\r\n' in request.content
     assert b'filename="part%22v1.kcl"\r\n' in request.content
@@ -1104,7 +1103,9 @@ async def test_manifest_write_returns_stamped_contents_from_acknowledged_revisio
     )
     assert hashlib.sha256(returned).hexdigest() == entry["sha256"]
     assert len(returned) == entry["byte_size"]
-    assert await ProjectFileSystem(PROJECT_ID).read_file("project.toml") == returned
+    assert (await ProjectFileSystem(PROJECT_ID).read_file("project.toml"))[
+        0
+    ] == returned
 
 
 @pytest.mark.asyncio
@@ -1257,7 +1258,7 @@ async def test_explicit_preview_write_is_preserved_even_when_unchanged(
     result = await fs.write_file("thumbnail.png", contents)
     assert base64.b64decode(result["contents"]) == contents
     assert any(entry["relative_path"] == "thumbnail.png" for entry in result["files"])
-    assert await fs.read_file("thumbnail.png") == contents
+    assert (await fs.read_file("thumbnail.png"))[0] == contents
     assert all(files["thumbnail.png"] == contents for _, files in api.uploads)
 
 
@@ -1303,7 +1304,7 @@ async def test_explicit_copy_to_preview_preserves_identical_bytes(api, operation
     api.files["parts/replacement.png"] = b"same preview"
     fs = ProjectFileSystem(PROJECT_ID)
     await getattr(fs, operation)("parts/replacement.png", "thumbnail.png")
-    assert await fs.read_file("thumbnail.png") == b"same preview"
+    assert (await fs.read_file("thumbnail.png"))[0] == b"same preview"
     assert ("parts/replacement.png" in api.files) == (operation == "cp")
 
 
@@ -1361,7 +1362,9 @@ async def test_manifest_cache_uses_stored_contents_instead_of_submitted_text(api
     expected = b"[settings]\n# new settings\n" + CLOUD_STAMP
     assert api.files["project.toml"] == expected
     start = len(api.requests)
-    assert await ProjectFileSystem(PROJECT_ID).read_file("project.toml") == expected
+    assert (await ProjectFileSystem(PROJECT_ID).read_file("project.toml"))[
+        0
+    ] == expected
     await ProjectFileSystem(PROJECT_ID).write_file("new.kcl", "// new")
     assert api.files["project.toml"] == expected
     assert api.downloaded_paths(api.requests[start:]) == []
@@ -1378,13 +1381,13 @@ async def test_failed_upload_does_not_replace_cached_bytes_with_unacknowledged_i
     with pytest.raises(ZooMCPException, match="upload may have completed"):
         await fs.write_file("main.kcl", "// requested change")
     expected = b"// main" if failure == "timeout_before" else b"// requested change"
-    assert await ProjectFileSystem(PROJECT_ID).read_file("main.kcl") == expected
+    assert (await ProjectFileSystem(PROJECT_ID).read_file("main.kcl"))[0] == expected
 
 
 @pytest.mark.asyncio
 async def test_cached_read_still_checks_access_with_the_api(api, project_transport):
     fs = ProjectFileSystem(PROJECT_ID)
-    assert await fs.read_file("main.kcl") == b"// main"
+    assert (await fs.read_file("main.kcl"))[0] == b"// main"
 
     def forbidden(request):
         return httpx.Response(403, json={"message": "Access revoked"})
@@ -1398,9 +1401,9 @@ async def test_cached_read_still_checks_access_with_the_api(api, project_transpo
 async def test_preview_metadata_changes_refresh_bytes_without_a_new_revision(api):
     api.files["thumbnail.png"] = b"old preview"
     fs = ProjectFileSystem(PROJECT_ID)
-    assert await fs.read_file("thumbnail.png") == b"old preview"
+    assert (await fs.read_file("thumbnail.png"))[0] == b"old preview"
     api.files["thumbnail.png"] = b"generated preview"
-    assert await fs.read_file("thumbnail.png") == b"generated preview"
+    assert (await fs.read_file("thumbnail.png"))[0] == b"generated preview"
 
 
 @pytest.mark.asyncio
@@ -1416,8 +1419,8 @@ async def test_files_without_hashes_are_downloaded_again(api, project_transport)
 
     project_transport(handle)
     fs = ProjectFileSystem(PROJECT_ID)
-    assert await fs.read_file("main.kcl") == b"// main"
-    assert await fs.read_file("main.kcl") == b"// main"
+    assert (await fs.read_file("main.kcl"))[0] == b"// main"
+    assert (await fs.read_file("main.kcl"))[0] == b"// main"
     assert api.downloaded_paths(api.requests) == ["main.kcl", "main.kcl"]
 
 
@@ -1425,9 +1428,9 @@ async def test_files_without_hashes_are_downloaded_again(api, project_transport)
 async def test_cache_evicts_old_file_bytes_when_full(api, monkeypatch):
     monkeypatch.setattr(zoo_tools, "_PROJECT_CACHE_BYTES", 8)
     fs = ProjectFileSystem(PROJECT_ID)
-    assert await fs.read_file("main.kcl") == b"// main"
-    assert await fs.read_file("parts/a.bin") == b"\xff\x00"
-    assert await fs.read_file("main.kcl") == b"// main"
+    assert (await fs.read_file("main.kcl"))[0] == b"// main"
+    assert (await fs.read_file("parts/a.bin"))[0] == b"\xff\x00"
+    assert (await fs.read_file("main.kcl"))[0] == b"// main"
     assert api.downloaded_paths(api.requests) == ["main.kcl", "parts/a.bin", "main.kcl"]
 
 
@@ -1443,7 +1446,7 @@ async def test_cache_limits_empty_entries_and_reuses_recent_request_scopes(
                 "test-token", "https://api.example.test/custom/", {"X-Cache-Tag": scope}
             )
         ):
-            assert await ProjectFileSystem(PROJECT_ID).read_file("empty") == b""
+            assert (await ProjectFileSystem(PROJECT_ID).read_file("empty"))[0] == b""
     assert [
         request.headers["X-Cache-Tag"]
         for request in api.requests
@@ -1483,9 +1486,9 @@ async def test_cache_is_scoped_to_host_credentials_and_headers(httpx_mock, secon
     )
     for config in [first, first, second]:
         with use_client_config(config):
-            assert (
-                await ProjectFileSystem(PROJECT_ID).read_file("main.kcl") == b"// main"
-            )
+            assert (await ProjectFileSystem(PROJECT_ID).read_file("main.kcl"))[
+                0
+            ] == b"// main"
     assert len(downloads) == 2
     assert downloads[1].headers["Authorization"] == f"Bearer {second.token}"
     assert downloads[1].headers["X-Scope"] == second.headers["X-Scope"]
@@ -1497,13 +1500,13 @@ async def test_files_larger_than_the_cache_budget_are_not_retained(api, monkeypa
     api.files["large.bin"] = b"123456789"
     fs = ProjectFileSystem(PROJECT_ID)
     for _ in range(2):
-        assert await fs.read_file("large.bin") == b"123456789"
+        assert (await fs.read_file("large.bin"))[0] == b"123456789"
     assert api.downloaded_paths(api.requests) == ["large.bin", "large.bin"]
 
 
 @pytest.mark.asyncio
 async def test_cached_bytes_do_not_bypass_a_lower_project_size_limit(api):
-    assert await ProjectFileSystem(PROJECT_ID).read_file("main.kcl") == b"// main"
+    assert (await ProjectFileSystem(PROJECT_ID).read_file("main.kcl"))[0] == b"// main"
     size = sum(map(len, api.files.values()))
     with pytest.raises(ZooMCPException, match="size limit"):
         await ProjectFileSystem(PROJECT_ID, size - 1).read_file("main.kcl")
@@ -1531,11 +1534,55 @@ async def test_cache_is_separate_for_projects_on_the_same_host(httpx_mock):
             PROJECT_ID,
             "cloud:00000000-0000-4000-8000-000000000002",
         ]:
-            assert (
-                await ProjectFileSystem(project_id).read_file("main.kcl") == b"// main"
-            )
+            assert (await ProjectFileSystem(project_id).read_file("main.kcl"))[
+                0
+            ] == b"// main"
     assert len(downloads) == 2
     assert downloads[0] != downloads[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata_operation", ["stat", "readdir"])
+async def test_shared_filesystem_returns_each_reads_own_revision(
+    api, project_transport, metadata_operation
+):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowFile(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            entered.set()
+            await release.wait()
+            yield project_zip([("main.kcl", b"// main")])
+
+    def handle(request):
+        response = api.handle(request)
+        if "/versions/" in request.url.path:
+            return httpx.Response(200, headers=response.headers, stream=SlowFile())
+        return response
+
+    project_transport(handle)
+    fs = ProjectFileSystem(PROJECT_ID)
+    reading = asyncio.create_task(fs.read_file("main.kcl"))
+    try:
+        await entered.wait()
+        api.files["main.kcl"] = b"// user edit"
+        api.revision += 1
+        latest = await getattr(fs, metadata_operation)()
+        release.set()
+        contents, revision = await reading
+        assert contents == b"// main"
+        assert revision == "1"
+        assert latest["revision"] == "2"
+        with pytest.raises(ZooMCPException, match="changed"):
+            await project_write_file(
+                PROJECT_ID, "main.kcl", "// stale edit", expected_revision=revision
+            )
+        assert api.files["main.kcl"] == b"// user edit"
+        assert not api.uploads
+    finally:
+        reading.cancel()
+        await asyncio.gather(reading, return_exceptions=True)
 
 
 @pytest.mark.asyncio
