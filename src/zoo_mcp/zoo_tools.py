@@ -4495,6 +4495,13 @@ class ProjectFileSystem:
     async def _snapshot(self, client: AsyncKittyCAD) -> _ProjectSnapshot:
         """Fetch current metadata and reuse verified bytes for unchanged files."""
         metadata = await self._metadata(client)
+        if (
+            self.expected_revision is not None
+            and metadata["revision"] != self.expected_revision
+        ):
+            raise ZooMCPException(
+                "Project changed since it was read; inspect the latest contents and reconcile your edit before saving again."
+            )
         if not metadata["access"]["can_edit"]:
             raise ZooMCPException("The caller cannot edit this project")
         if metadata["entrypoint_path"] != "main.kcl":
@@ -4667,13 +4674,6 @@ class ProjectFileSystem:
         async with self._operation() as client:
             for _ in range(_PROJECT_ATTEMPTS):
                 snapshot = await self._snapshot(client)
-                if (
-                    self.expected_revision is not None
-                    and snapshot.metadata["revision"] != self.expected_revision
-                ):
-                    raise ZooMCPException(
-                        "Project changed since it was read; inspect the latest contents and reconcile your edit before saving again."
-                    )
                 # Reapply the requested operation to every refreshed snapshot.
                 updated = snapshot.files.copy()
                 written_paths = transform(updated)
